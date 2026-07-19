@@ -2,24 +2,139 @@
 
 The canonical **client ⇄ dig-node CONTROL interface** contract. One ecosystem definition of the
 management/query surface a client (the CLI `dign`, the browser extension, dig-app, hub) uses to
-control and query a running dig-node — config, cache config, peer status, subscriptions, peer
-connect/disconnect, and other node-control operations — so the client side and the node side can
-never silently drift. Transport-agnostic: rides the `dig-ipc-protocol` local session, or
-loopback-mTLS + a signed control token over HTTP/WebSocket for clients that aren't on the local pipe.
+control and query a running dig-node — status, config, cache, hosted/pinned stores, §21 sync, the peer
+network, subscriptions, the auto-update beacon, live log level, and control-token pairing — so the
+client side and the node side can never silently drift. Transport-agnostic: rides the
+`dig-ipc-protocol` local session, or loopback-mTLS + a signed control token over HTTP/WebSocket for
+clients that aren't on the local pipe.
 
 - **License:** Apache-2.0 OR MIT
 - **Spec:** [`SPEC.md`](./SPEC.md) (normative) — this README is the at-a-glance interface reference.
 
 ```toml
 [dependencies]
-dig-node-control-interface = "0.1"
+dig-node-control-interface = "0.2"
 ```
 
-> **Status: skeleton (epic #1110, T1).** This is the provisioning commit — the repository, CI/release
-> plumbing, and module layout only. The full method catalog (this section is where every control
-> method, its params/result types, and its error code would be listed for LLM/agent lookup, per the
-> ecosystem's dig-`<x>`-protocol convention) lands in **T2** (tracked as `dig_ecosystem#1147`). Check
-> back there, or re-read this README once T2 merges, for the real interface reference.
+## Usage
+
+Client side — build a typed request, carry it over your transport, parse the typed result:
+
+```rust
+use dig_node_control_interface::{
+    params::SetCapParams,
+    traits::{build_request, parse_response},
+    envelope::JsonRpcResponse,
+};
+
+let call = SetCapParams { cap_bytes: 128 * 1024 * 1024 };
+let request = build_request(1.into(), &call);          // → control.cache.setCap envelope
+// ... send `request` over dig-ipc / loopback-mTLS, receive `response` ...
+# let response = JsonRpcResponse::success(1.into(), serde_json::json!({ "cap_bytes": 134217728 }));
+let result = parse_response::<SetCapParams>(response)?; // → SetCapResult { cap_bytes }
+# Ok::<(), dig_node_control_interface::ControlError>(())
+```
+
+Node side — implement `ControlHandler` (one typed method per control method); the provided `dispatch`
+routes a raw request to the right method and builds the response.
+
+## Authorization
+
+Every `control.*` method is token-gated: present the node's local control token as the
+`X-Dig-Control-Token` header (preferred) or a `params._control_token` field. `pairing.request` /
+`pairing.poll` are OPEN (a token-less client uses them to obtain a scoped token after local operator
+approval). The three `control.pairing.*` admin methods require the MASTER token specifically.
+
+## Full interface reference
+
+Every control method, for LLM/agent lookup without reading code. `Auth`: **T** = requires the control
+token, **M** = requires the MASTER token, **—** = open. `Route`: how the node resolves it — `own`
+(service shell), `del` (engine), `open` (bootstrap).
+
+### Status / config / log
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.status` | T | own | — | `{running, service, version, commit, protocol, uptime_secs, addr, upstream, cache:{cap_bytes,used_bytes,dir,shared}, hosted_store_count, cached_capsule_count, pinned_store_count, sync:{available}}` |
+| `control.config.get` | T | own | — | `{addr, port, upstream, upstream_override:string\|null, cache_dir, cache_shared, config_path, sync_available}` |
+| `control.config.setUpstream` | T | own | `{upstream:string}` | `{upstream, requires_restart:true}` |
+| `control.log.setLevel` | T | own | `{filter:string}` (an EnvFilter directive) | `{filter}` |
+
+### Cache
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.cache.get` | T | own | — | `{cap_bytes, used_bytes, dir, shared}` |
+| `control.cache.setCap` | T | own | `{cap_bytes:u64}` | `{cap_bytes}` (floored at 64 MiB) |
+| `control.cache.clear` | T | own | — | `{cleared:true}` |
+
+### Hosted / pinned stores
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.hostedStores.list` | T | own | — | `{stores:[{store_id, pinned, capsule_count, total_bytes, capsules:[{capsule,root,size_bytes,last_used_unix_ms}]}]}` |
+| `control.hostedStores.pin` | T | own | `{store:"storeId[:root]"}` | `{store_id, root:string\|null, pinned:true, fetch:{status,…}}` |
+| `control.hostedStores.unpin` | T | own | `{store}` | `{store_id, unpinned:bool, evicted_capsules:u64}` |
+| `control.hostedStores.status` | T | own | `{store}` | `{store_id, pinned, capsule_count, total_bytes, capsules}` |
+
+### §21 whole-store sync
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.sync.status` | T | own | — | `{available, method, pinned_total, pinned_synced, whole_store_trigger_supported}` |
+| `control.sync.trigger` | T | own | `{store:"storeId:root"}` | `{store_id, root, status:"synced", size_bytes, served_root}` |
+
+### Auto-update beacon (proxied to dig-updater)
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.updater.status` | T | own | — | (proxied beacon status) |
+| `control.updater.setChannel` | T | own | `{channel:"nightly"\|"stable"}` | (proxied) |
+| `control.updater.pause` | T | own | `{until?:u64}` (unix secs; omit = indefinite) | (proxied) |
+| `control.updater.resume` | T | own | — | (proxied) |
+| `control.updater.checkNow` | T | own | — | (proxied) |
+
+### Pairing (control-token lifecycle)
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.pairing.list` | M | own | — | (pending requests + issued tokens) |
+| `control.pairing.approve` | M | own | `{pairing_id:string}` | `{approved:true, client_name, token_id}` |
+| `control.pairing.revoke` | M | own | `{token_id:string}` | `{revoked:bool, token_id}` |
+| `pairing.request` | — | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
+| `pairing.poll` | — | open | `{pairing_id:string}` | `{status, token?}` (token present once, after approval) |
+
+### Peers (delegated to the engine)
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.peerStatus` | T | del | — | (peer-pool + relay-reservation snapshot, incl. per-peer `peers[]`) |
+| `control.peers.connect` | T | del | `{peer:string}` (address or peer_id) | `{connected:true, peer_id}` |
+| `control.peers.disconnect` | T | del | `{peer:string}` (peer_id) | `{disconnected:true, peer_id}` |
+
+### Subscriptions (delegated to the engine)
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.subscribe` | T | del | `{store_id:string}` | `{subscribed:true, added:bool, store_id}` |
+| `control.unsubscribe` | T | del | `{store_id:string}` | `{subscribed:false, removed:bool, store_id}` |
+| `control.listSubscriptions` | T | del | — | `{subscriptions:[string], count}` |
+
+### Error codes
+
+Every control error is `{code:int, message:string, data:{code:SYMBOL, origin:string}}`. Branch on
+`data.code` (the stable symbol), never the message.
+
+| Code | Symbol | Origin | Meaning |
+|---|---|---|---|
+| `-32700` | `PARSE_ERROR` | shell | request body was not valid JSON |
+| `-32600` | `INVALID_REQUEST` | shell | not a single JSON-RPC object |
+| `-32601` | `METHOD_NOT_FOUND` | boundary | control method is not resolved |
+| `-32602` | `INVALID_PARAMS` | node | missing/malformed params |
+| `-32000` | `DISPATCH_FAILED` | shell | the node failed to dispatch a well-formed call |
+| `-32030` | `UNAUTHORIZED` | shell | `control.*` called without a valid token |
+| `-32031` | `NOT_SUPPORTED` | shell | control op unsupported on this build |
+| `-32032` | `CONTROL_ERROR` | shell | control op failed at runtime |
 
 ## Boundary
 
@@ -29,10 +144,10 @@ dig-node-control-interface = "0.1"
 - `dig-node-control-interface` (this crate) — the control METHOD CATALOG carried inside that
   authenticated channel, or over loopback-mTLS for remote-transport clients.
 
-See `SPEC.md` §1 for the full boundary statement, and the superproject `SYSTEM.md` for how this crate
-fits the wider cross-repo contract map.
+See `SPEC.md` for the normative contract and the superproject `SYSTEM.md` for the wider cross-repo map.
 
-## Consumers (planned)
+## Consumers
 
-dig-node (server-side dispatch), the CLI `dign`, dig-chrome-extension, dig-app, hub — all consuming
-this one control contract once T2 lands, per epic #1110.
+dig-node (server-side dispatch — implements `ControlHandler`), the CLI `dign`, dig-chrome-extension,
+dig-app, hub — all consuming this one control contract per epic #1110 (dig-node adoption + the
+dig-rpc Control-tier removal land in later tasks of the cascade).
