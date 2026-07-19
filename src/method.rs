@@ -1,0 +1,411 @@
+//! The canonical control-method catalog.
+//!
+//! [`ControlMethod`] enumerates every method a client can send to a running dig-node's CONTROL
+//! plane, its stable wire name, whether it requires the local control token, whether it is a
+//! pairing-administration method (which requires the MASTER token specifically), and how the node
+//! routes it (owned by the service shell, delegated to the embedded node engine, or an open
+//! pairing-bootstrap method reachable without a token).
+//!
+//! This is the SINGLE source of truth for "what can be controlled". The node dispatchers, the
+//! client SDKs (CLI `dign`, the extension, dig-app, hub), the OpenRPC/discovery surface, and the
+//! conformance KATs all read this one table, so the method set can never drift between them.
+//!
+//! Mirrors the live dig-node surface: the shell-owned methods in
+//! `dig-node-service/src/control.rs` (`CONTROL_METHODS`) plus the peer/subscription methods
+//! delegated to `dig-node-core` (`control.peerStatus` / `control.peers.*` / `control.subscribe`
+//! / `control.unsubscribe` / `control.listSubscriptions`), and the two OPEN pairing-bootstrap
+//! methods (`pairing.request` / `pairing.poll`) a token-less MV3 extension uses to obtain a
+//! scoped token after local operator approval.
+
+/// How the node resolves a control method — the routing source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Routing {
+    /// Answered by the dig-node service shell itself (config/status/cache/pins/sync/updater/pairing-admin).
+    Owned,
+    /// Delegated to the embedded dig-node engine's own control surface (peers + subscriptions).
+    Delegated,
+    /// An OPEN bootstrap method reachable WITHOUT the control token (pairing handshake).
+    OpenBootstrap,
+}
+
+/// The functional area a control method belongs to — for grouping in UIs and docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Category {
+    /// Node status snapshot.
+    Status,
+    /// Node configuration (upstream override).
+    Config,
+    /// Live log-level control.
+    Log,
+    /// On-disk content cache.
+    Cache,
+    /// Hosted/pinned stores.
+    HostedStores,
+    /// §21 authenticated whole-store sync.
+    Sync,
+    /// The DIG auto-update beacon proxy.
+    Updater,
+    /// Control-token pairing lifecycle.
+    Pairing,
+    /// The L7 peer network.
+    Peers,
+    /// The node's subscribed-store set.
+    Subscriptions,
+}
+
+/// A dig-node CONTROL method.
+///
+/// `#[non_exhaustive]` so adding a method in a minor release is additive; downstream matches must
+/// carry a `_ => …` arm. Convert to/from the wire name with [`ControlMethod::name`] /
+/// [`ControlMethod::from_name`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlMethod {
+    // ---- Status / config / log (shell-owned) ----
+    /// `control.status` — a rich node status snapshot.
+    Status,
+    /// `control.config.get` — the node's effective configuration.
+    ConfigGet,
+    /// `control.config.setUpstream` — persist an upstream-RPC override (effective on restart).
+    ConfigSetUpstream,
+    /// `control.log.setLevel` — live-swap the running node's tracing level filter.
+    LogSetLevel,
+
+    // ---- Cache (shell-owned) ----
+    /// `control.cache.get` — the on-disk cache view (cap/used/dir/shared).
+    CacheGet,
+    /// `control.cache.setCap` — set the cache size cap (floored at 64 MiB).
+    CacheSetCap,
+    /// `control.cache.clear` — delete all locally cached content.
+    CacheClear,
+
+    // ---- Hosted stores (shell-owned) ----
+    /// `control.hostedStores.list` — every held/pinned store with its cached capsules.
+    HostedStoresList,
+    /// `control.hostedStores.pin` — pin a store (and pre-fetch when a root is given).
+    HostedStoresPin,
+    /// `control.hostedStores.unpin` — unpin a store and evict its cached capsules.
+    HostedStoresUnpin,
+    /// `control.hostedStores.status` — per-store pinned flag + cached capsules.
+    HostedStoresStatus,
+
+    // ---- §21 sync (shell-owned) ----
+    /// `control.sync.status` — whether authenticated whole-store sync is available + pin coverage.
+    SyncStatus,
+    /// `control.sync.trigger` — trigger a §21 sync for one capsule (storeId + root).
+    SyncTrigger,
+
+    // ---- Updater beacon proxy (shell-owned) ----
+    /// `control.updater.status` — the DIG auto-update beacon's current status.
+    UpdaterStatus,
+    /// `control.updater.setChannel` — set the beacon's update channel.
+    UpdaterSetChannel,
+    /// `control.updater.pause` — suspend auto-updates (optionally until a unix time).
+    UpdaterPause,
+    /// `control.updater.resume` — resume auto-updates.
+    UpdaterResume,
+    /// `control.updater.checkNow` — force an immediate update check.
+    UpdaterCheckNow,
+
+    // ---- Pairing administration (shell-owned, MASTER-token only) ----
+    /// `control.pairing.list` — list pending pairing requests + issued paired tokens.
+    PairingList,
+    /// `control.pairing.approve` — approve a pending pairing, minting a scoped token.
+    PairingApprove,
+    /// `control.pairing.revoke` — revoke an issued paired token.
+    PairingRevoke,
+
+    // ---- Peers (delegated to the engine) ----
+    /// `control.peerStatus` — live peer-pool + relay-reservation snapshot.
+    PeerStatus,
+    /// `control.peers.connect` — dial a peer by address / resolve a connected peer_id.
+    PeersConnect,
+    /// `control.peers.disconnect` — drop a pooled peer by peer_id.
+    PeersDisconnect,
+
+    // ---- Subscriptions (delegated to the engine) ----
+    /// `control.subscribe` — subscribe the node to a store (watch + gap-fill).
+    Subscribe,
+    /// `control.unsubscribe` — stop watching a store.
+    Unsubscribe,
+    /// `control.listSubscriptions` — the node's persisted subscription set.
+    ListSubscriptions,
+
+    // ---- Pairing bootstrap (OPEN — no token) ----
+    /// `pairing.request` — request a control-token pairing (returns a code to compare).
+    PairingRequest,
+    /// `pairing.poll` — poll a pairing; once the operator approves, returns the scoped token once.
+    PairingPoll,
+}
+
+impl ControlMethod {
+    /// The stable JSON-RPC wire name. Never derived from anything else — the published contract.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ControlMethod::Status => "control.status",
+            ControlMethod::ConfigGet => "control.config.get",
+            ControlMethod::ConfigSetUpstream => "control.config.setUpstream",
+            ControlMethod::LogSetLevel => "control.log.setLevel",
+            ControlMethod::CacheGet => "control.cache.get",
+            ControlMethod::CacheSetCap => "control.cache.setCap",
+            ControlMethod::CacheClear => "control.cache.clear",
+            ControlMethod::HostedStoresList => "control.hostedStores.list",
+            ControlMethod::HostedStoresPin => "control.hostedStores.pin",
+            ControlMethod::HostedStoresUnpin => "control.hostedStores.unpin",
+            ControlMethod::HostedStoresStatus => "control.hostedStores.status",
+            ControlMethod::SyncStatus => "control.sync.status",
+            ControlMethod::SyncTrigger => "control.sync.trigger",
+            ControlMethod::UpdaterStatus => "control.updater.status",
+            ControlMethod::UpdaterSetChannel => "control.updater.setChannel",
+            ControlMethod::UpdaterPause => "control.updater.pause",
+            ControlMethod::UpdaterResume => "control.updater.resume",
+            ControlMethod::UpdaterCheckNow => "control.updater.checkNow",
+            ControlMethod::PairingList => "control.pairing.list",
+            ControlMethod::PairingApprove => "control.pairing.approve",
+            ControlMethod::PairingRevoke => "control.pairing.revoke",
+            ControlMethod::PeerStatus => "control.peerStatus",
+            ControlMethod::PeersConnect => "control.peers.connect",
+            ControlMethod::PeersDisconnect => "control.peers.disconnect",
+            ControlMethod::Subscribe => "control.subscribe",
+            ControlMethod::Unsubscribe => "control.unsubscribe",
+            ControlMethod::ListSubscriptions => "control.listSubscriptions",
+            ControlMethod::PairingRequest => "pairing.request",
+            ControlMethod::PairingPoll => "pairing.poll",
+        }
+    }
+
+    /// Resolve a wire name back to its [`ControlMethod`], or `None` for an unknown name.
+    pub fn from_name(name: &str) -> Option<ControlMethod> {
+        ControlMethod::ALL
+            .iter()
+            .copied()
+            .find(|m| m.name() == name)
+    }
+
+    /// Does calling this method require the local control token?
+    ///
+    /// Every `control.*` method is token-gated; the two OPEN pairing-bootstrap methods
+    /// (`pairing.request` / `pairing.poll`) are not, so a token-less client can obtain a token.
+    pub const fn requires_auth(self) -> bool {
+        !matches!(
+            self,
+            ControlMethod::PairingRequest | ControlMethod::PairingPoll
+        )
+    }
+
+    /// Is this a PAIRING-ADMINISTRATION method that requires the MASTER control token specifically?
+    ///
+    /// A paired (scoped) token can drive ordinary `control.*` mutations but MUST NOT mint more
+    /// tokens or revoke itself — so listing/approving/revoking pairings requires the master token
+    /// (a local file read), never a paired token.
+    pub const fn is_pairing_admin(self) -> bool {
+        matches!(
+            self,
+            ControlMethod::PairingList
+                | ControlMethod::PairingApprove
+                | ControlMethod::PairingRevoke
+        )
+    }
+
+    /// How the node routes this method (shell-owned, engine-delegated, or open bootstrap).
+    pub const fn routing(self) -> Routing {
+        match self {
+            ControlMethod::PeerStatus
+            | ControlMethod::PeersConnect
+            | ControlMethod::PeersDisconnect
+            | ControlMethod::Subscribe
+            | ControlMethod::Unsubscribe
+            | ControlMethod::ListSubscriptions => Routing::Delegated,
+            ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
+            _ => Routing::Owned,
+        }
+    }
+
+    /// The functional area this method belongs to.
+    pub const fn category(self) -> Category {
+        match self {
+            ControlMethod::Status => Category::Status,
+            ControlMethod::ConfigGet | ControlMethod::ConfigSetUpstream => Category::Config,
+            ControlMethod::LogSetLevel => Category::Log,
+            ControlMethod::CacheGet | ControlMethod::CacheSetCap | ControlMethod::CacheClear => {
+                Category::Cache
+            }
+            ControlMethod::HostedStoresList
+            | ControlMethod::HostedStoresPin
+            | ControlMethod::HostedStoresUnpin
+            | ControlMethod::HostedStoresStatus => Category::HostedStores,
+            ControlMethod::SyncStatus | ControlMethod::SyncTrigger => Category::Sync,
+            ControlMethod::UpdaterStatus
+            | ControlMethod::UpdaterSetChannel
+            | ControlMethod::UpdaterPause
+            | ControlMethod::UpdaterResume
+            | ControlMethod::UpdaterCheckNow => Category::Updater,
+            ControlMethod::PairingList
+            | ControlMethod::PairingApprove
+            | ControlMethod::PairingRevoke
+            | ControlMethod::PairingRequest
+            | ControlMethod::PairingPoll => Category::Pairing,
+            ControlMethod::PeerStatus
+            | ControlMethod::PeersConnect
+            | ControlMethod::PeersDisconnect => Category::Peers,
+            ControlMethod::Subscribe
+            | ControlMethod::Unsubscribe
+            | ControlMethod::ListSubscriptions => Category::Subscriptions,
+        }
+    }
+
+    /// A one-line human/agent description for the discovery catalogue.
+    pub const fn summary(self) -> &'static str {
+        match self {
+            ControlMethod::Status => "A rich node status snapshot (version, uptime, addr, cache, hosted/pinned counts, sync availability).",
+            ControlMethod::ConfigGet => "The node's effective configuration (addr/port, upstream + override, cache dir/shared, config path, sync availability).",
+            ControlMethod::ConfigSetUpstream => "Persist an upstream-RPC override; takes effect on next node start (requires_restart).",
+            ControlMethod::LogSetLevel => "Live-swap the running node's tracing EnvFilter directive (not persisted).",
+            ControlMethod::CacheGet => "The on-disk content-cache view: cap_bytes, used_bytes, dir, shared.",
+            ControlMethod::CacheSetCap => "Set the on-disk cache size cap in bytes (floored at 64 MiB).",
+            ControlMethod::CacheClear => "Delete all locally cached DIG content.",
+            ControlMethod::HostedStoresList => "Every held/pinned store, merged, with each store's cached capsules and a pinned flag.",
+            ControlMethod::HostedStoresPin => "Pin a store (storeId[:rootHash]); pre-fetches the capsule when a root is given and §21 sync is available.",
+            ControlMethod::HostedStoresUnpin => "Unpin a store and evict its cached capsules.",
+            ControlMethod::HostedStoresStatus => "Per-store status: pinned flag, cached capsules, total bytes.",
+            ControlMethod::SyncStatus => "Whether authenticated §21 whole-store sync is available, plus pinned-store cache coverage.",
+            ControlMethod::SyncTrigger => "Trigger a §21 sync for one capsule (storeId + root).",
+            ControlMethod::UpdaterStatus => "The DIG auto-update beacon's current status (proxied from dig-updater).",
+            ControlMethod::UpdaterSetChannel => "Set the beacon's update channel (\"nightly\" | \"stable\").",
+            ControlMethod::UpdaterPause => "Suspend the beacon's auto-updates (optionally until a unix time).",
+            ControlMethod::UpdaterResume => "Resume the beacon's auto-updates.",
+            ControlMethod::UpdaterCheckNow => "Force an immediate beacon update check.",
+            ControlMethod::PairingList => "List pending pairing requests and issued paired tokens (MASTER token only).",
+            ControlMethod::PairingApprove => "Approve a pending pairing, minting a scoped token (MASTER token only).",
+            ControlMethod::PairingRevoke => "Revoke an issued paired token by token_id (MASTER token only).",
+            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array.",
+            ControlMethod::PeersConnect => "Dial a peer by address, or resolve an already-connected peer_id, via the live gossip pool.",
+            ControlMethod::PeersDisconnect => "Drop a pooled peer by peer_id, closing its mTLS link (idempotent).",
+            ControlMethod::Subscribe => "Subscribe the node to a store it actively watches and gap-fills.",
+            ControlMethod::Unsubscribe => "Stop watching a store.",
+            ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
+            ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
+            ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
+        }
+    }
+
+    /// Every catalogued method, in a stable order — the enumeration a machine reads to discover the
+    /// full control surface, and the anchor the conformance KATs pin against.
+    pub const ALL: &'static [ControlMethod] = &[
+        ControlMethod::Status,
+        ControlMethod::ConfigGet,
+        ControlMethod::ConfigSetUpstream,
+        ControlMethod::LogSetLevel,
+        ControlMethod::CacheGet,
+        ControlMethod::CacheSetCap,
+        ControlMethod::CacheClear,
+        ControlMethod::HostedStoresList,
+        ControlMethod::HostedStoresPin,
+        ControlMethod::HostedStoresUnpin,
+        ControlMethod::HostedStoresStatus,
+        ControlMethod::SyncStatus,
+        ControlMethod::SyncTrigger,
+        ControlMethod::UpdaterStatus,
+        ControlMethod::UpdaterSetChannel,
+        ControlMethod::UpdaterPause,
+        ControlMethod::UpdaterResume,
+        ControlMethod::UpdaterCheckNow,
+        ControlMethod::PairingList,
+        ControlMethod::PairingApprove,
+        ControlMethod::PairingRevoke,
+        ControlMethod::PeerStatus,
+        ControlMethod::PeersConnect,
+        ControlMethod::PeersDisconnect,
+        ControlMethod::Subscribe,
+        ControlMethod::Unsubscribe,
+        ControlMethod::ListSubscriptions,
+        ControlMethod::PairingRequest,
+        ControlMethod::PairingPoll,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_method_has_a_unique_wire_name() {
+        let names: BTreeSet<&str> = ControlMethod::ALL.iter().map(|m| m.name()).collect();
+        assert_eq!(
+            names.len(),
+            ControlMethod::ALL.len(),
+            "duplicate or missing wire names in the catalog"
+        );
+    }
+
+    #[test]
+    fn from_name_round_trips_every_method() {
+        for &m in ControlMethod::ALL {
+            assert_eq!(ControlMethod::from_name(m.name()), Some(m));
+        }
+        assert_eq!(ControlMethod::from_name("control.nope"), None);
+        assert_eq!(ControlMethod::from_name(""), None);
+    }
+
+    #[test]
+    fn only_pairing_bootstrap_is_open() {
+        for &m in ControlMethod::ALL {
+            let open = matches!(
+                m,
+                ControlMethod::PairingRequest | ControlMethod::PairingPoll
+            );
+            assert_eq!(m.requires_auth(), !open, "{} auth mismatch", m.name());
+            assert_eq!(
+                m.routing() == Routing::OpenBootstrap,
+                open,
+                "{} routing mismatch",
+                m.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_admin_methods_are_exactly_three() {
+        let admin: Vec<&str> = ControlMethod::ALL
+            .iter()
+            .filter(|m| m.is_pairing_admin())
+            .map(|m| m.name())
+            .collect();
+        assert_eq!(
+            admin,
+            vec![
+                "control.pairing.list",
+                "control.pairing.approve",
+                "control.pairing.revoke"
+            ]
+        );
+    }
+
+    #[test]
+    fn delegated_set_matches_the_engine_surface() {
+        let delegated: BTreeSet<&str> = ControlMethod::ALL
+            .iter()
+            .filter(|m| m.routing() == Routing::Delegated)
+            .map(|m| m.name())
+            .collect();
+        let expected: BTreeSet<&str> = [
+            "control.peerStatus",
+            "control.peers.connect",
+            "control.peers.disconnect",
+            "control.subscribe",
+            "control.unsubscribe",
+            "control.listSubscriptions",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(delegated, expected);
+    }
+
+    #[test]
+    fn every_method_has_a_nonempty_summary() {
+        for &m in ControlMethod::ALL {
+            assert!(!m.summary().is_empty(), "{} has no summary", m.name());
+        }
+    }
+}
