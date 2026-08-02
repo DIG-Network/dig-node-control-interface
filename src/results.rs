@@ -283,6 +283,26 @@ pub struct ListSubscriptionsResult {
     pub count: u64,
 }
 
+/// `control.wallet.balance` — an address's balance for one asset, as the node's chain read saw it.
+///
+/// A READ-only result: this reports chain state, it never moves funds. It is a strict SUPERSET of
+/// dig-app's frozen `BalanceResponse { balance }` — the node emits the richer shape, and because
+/// dig-app's struct does not deny unknown fields it reads [`balance`](Self::balance) losslessly and
+/// ignores the rest. That superset relationship is the "no dig-app code change" guarantee, pinned by
+/// the conformance KAT.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletBalanceResult {
+    /// The CONFIRMED, spendable balance in the asset's base unit (mojos for XCH, base units for DIG).
+    /// The only field dig-app 3.x reads.
+    pub balance: u64,
+    /// Incoming funds seen but not yet confirmed (asset base units); not yet spendable.
+    pub pending: u64,
+    /// Whether the node's chain view is caught up. When `false`, the figures are STALE.
+    pub synced: bool,
+    /// The peak block height the reported figures reflect, or `null` when the node has no height yet.
+    pub peak_height: Option<u32>,
+}
+
 /// `pairing.request` — the pairing handshake bootstrap (OPEN, no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequestResult {
