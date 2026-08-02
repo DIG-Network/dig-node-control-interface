@@ -192,6 +192,11 @@ pub trait ControlHandler: Sync {
     ) -> Result<results::UnsubscribeResult, ControlError>;
     /// `control.listSubscriptions`
     async fn list_subscriptions(&self) -> Result<results::ListSubscriptionsResult, ControlError>;
+    /// `control.wallet.balance` (READ-only)
+    async fn wallet_balance(
+        &self,
+        params: params::WalletBalanceParams,
+    ) -> Result<results::WalletBalanceResult, ControlError>;
     /// `pairing.request` (OPEN)
     async fn pairing_request(
         &self,
@@ -279,6 +284,7 @@ pub trait ControlHandler: Sync {
             ControlMethod::Subscribe => encode(self.subscribe(decode(params)?).await?),
             ControlMethod::Unsubscribe => encode(self.unsubscribe(decode(params)?).await?),
             ControlMethod::ListSubscriptions => encode(self.list_subscriptions().await?),
+            ControlMethod::WalletBalance => encode(self.wallet_balance(decode(params)?).await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),
             ControlMethod::PairingPoll => encode(self.pairing_poll(decode(params)?).await?),
         }

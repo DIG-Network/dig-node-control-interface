@@ -109,6 +109,13 @@ fn golden_request_vectors() {
         },
         json!({"jsonrpc":"2.0","id":1,"method":"pairing.request","params":{"client_name":"DIG extension"}}),
     );
+    assert_request(
+        &WalletBalanceParams {
+            address: "xch1exampleaddr".into(),
+            asset: Asset::Dig,
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.balance","params":{"address":"xch1exampleaddr","asset":"dig"}}),
+    );
 }
 
 #[test]
@@ -156,6 +163,44 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::PairingPollResult>(json!({
         "status": "approved", "token": "deadbeef"
     }));
+    assert_result_round_trips::<results::WalletBalanceResult>(json!({
+        "balance": 1234u64, "pending": 0u64, "synced": true, "peak_height": 5000000u32
+    }));
+    // `peak_height` is present as `null` (never omitted) when the node has no height yet.
+    assert_result_round_trips::<results::WalletBalanceResult>(json!({
+        "balance": 0u64, "pending": 7u64, "synced": false, "peak_height": null
+    }));
+}
+
+/// The "no dig-app code change" guarantee, pinned: the node's richer `WalletBalanceResult` is a
+/// strict SUPERSET of dig-app's frozen `BalanceResponse { balance }`, so dig-app deserializes the
+/// node's payload losslessly (its struct does not deny unknown fields) and reads the confirmed
+/// balance. This mirrors dig-app's `dig-app-core::wallet::engine::BalanceResponse` byte-for-byte.
+#[test]
+fn node_balance_superset_is_readable_by_dig_apps_balance_struct() {
+    /// Byte-identical mirror of dig-app's frozen `BalanceResponse` — NO `deny_unknown_fields`, so the
+    /// node's extra fields (`pending`/`synced`/`peak_height`) are ignored, not rejected.
+    #[derive(serde::Deserialize)]
+    struct DigAppBalanceResponse {
+        balance: u64,
+    }
+
+    // The node emits the full superset...
+    let node_payload = serde_json::to_value(results::WalletBalanceResult {
+        balance: 9_999,
+        pending: 42,
+        synced: true,
+        peak_height: Some(6_123_456),
+    })
+    .unwrap();
+
+    // ...and dig-app's `{balance}` struct reads it without any code change on dig-app's side.
+    let app: DigAppBalanceResponse =
+        serde_json::from_value(node_payload).expect("dig-app must read the node's richer payload");
+    assert_eq!(
+        app.balance, 9_999,
+        "dig-app must read the confirmed balance verbatim"
+    );
 }
 
 #[test]
@@ -375,6 +420,17 @@ impl ControlHandler for MockNode {
             count: 0,
         })
     }
+    async fn wallet_balance(
+        &self,
+        _params: WalletBalanceParams,
+    ) -> Result<results::WalletBalanceResult, ControlError> {
+        Ok(results::WalletBalanceResult {
+            balance: 1234,
+            pending: 0,
+            synced: true,
+            peak_height: Some(5_000_000),
+        })
+    }
     async fn pairing_request(
         &self,
         _params: RequestParams,
@@ -511,7 +567,7 @@ fn dispatcher_surfaces_a_handler_error_verbatim() {
 fn every_catalog_method_dispatches_without_panicking() {
     // The dispatcher must have an arm for EVERY catalog method — a missing arm would not compile,
     // but this also proves no method routes to a MethodNotFound (i.e. the name table + the match
-    // agree for all 29 methods).
+    // agree for all catalog methods).
     let node = MockNode;
     for &m in ControlMethod::ALL {
         let req = JsonRpcRequest::new(RequestId::Number(1), m.name(), minimal_params(m));
@@ -546,6 +602,7 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::Subscribe | ControlMethod::Unsubscribe => json!({"store_id": STORE}),
         ControlMethod::PairingRequest => json!({"client_name": "c"}),
         ControlMethod::PairingPoll => json!({"pairing_id": "x"}),
+        ControlMethod::WalletBalance => json!({"address": "xch1abc", "asset": "dig"}),
         _ => json!({}),
     }
 }

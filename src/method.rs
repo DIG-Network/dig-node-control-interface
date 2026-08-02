@@ -51,6 +51,8 @@ pub enum Category {
     Peers,
     /// The node's subscribed-store set.
     Subscriptions,
+    /// Read-only wallet chain reads (balance).
+    Wallet,
 }
 
 /// A dig-node CONTROL method.
@@ -131,6 +133,10 @@ pub enum ControlMethod {
     /// `control.listSubscriptions` — the node's persisted subscription set.
     ListSubscriptions,
 
+    // ---- Wallet (READ-only, delegated to the engine) ----
+    /// `control.wallet.balance` — read an address's confirmed spendable balance for an asset.
+    WalletBalance,
+
     // ---- Pairing bootstrap (OPEN — no token) ----
     /// `pairing.request` — request a control-token pairing (returns a code to compare).
     PairingRequest,
@@ -169,6 +175,7 @@ impl ControlMethod {
             ControlMethod::Subscribe => "control.subscribe",
             ControlMethod::Unsubscribe => "control.unsubscribe",
             ControlMethod::ListSubscriptions => "control.listSubscriptions",
+            ControlMethod::WalletBalance => "control.wallet.balance",
             ControlMethod::PairingRequest => "pairing.request",
             ControlMethod::PairingPoll => "pairing.poll",
         }
@@ -215,7 +222,8 @@ impl ControlMethod {
             | ControlMethod::PeersDisconnect
             | ControlMethod::Subscribe
             | ControlMethod::Unsubscribe
-            | ControlMethod::ListSubscriptions => Routing::Delegated,
+            | ControlMethod::ListSubscriptions
+            | ControlMethod::WalletBalance => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
             _ => Routing::Owned,
         }
@@ -251,6 +259,7 @@ impl ControlMethod {
             ControlMethod::Subscribe
             | ControlMethod::Unsubscribe
             | ControlMethod::ListSubscriptions => Category::Subscriptions,
+            ControlMethod::WalletBalance => Category::Wallet,
         }
     }
 
@@ -284,6 +293,7 @@ impl ControlMethod {
             ControlMethod::Subscribe => "Subscribe the node to a store it actively watches and gap-fills.",
             ControlMethod::Unsubscribe => "Stop watching a store.",
             ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
+            ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
         }
@@ -319,6 +329,7 @@ impl ControlMethod {
         ControlMethod::Subscribe,
         ControlMethod::Unsubscribe,
         ControlMethod::ListSubscriptions,
+        ControlMethod::WalletBalance,
         ControlMethod::PairingRequest,
         ControlMethod::PairingPoll,
     ];
@@ -396,6 +407,7 @@ mod tests {
             "control.subscribe",
             "control.unsubscribe",
             "control.listSubscriptions",
+            "control.wallet.balance",
         ]
         .into_iter()
         .collect();

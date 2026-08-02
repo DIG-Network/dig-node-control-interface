@@ -202,6 +202,33 @@ pub struct UnsubscribeParams {
 }
 control_call!(UnsubscribeParams => ControlMethod::Unsubscribe, results::UnsubscribeResult);
 
+/// The asset a wallet balance/coin read is denominated in.
+///
+/// Serializes to a lowercase, language-neutral wire token (`"xch"` / `"dig"`) — byte-identical to the
+/// frozen consumer type in dig-app (`dig-app-core::wallet::state::Asset`), so the contract and the
+/// consumer share one wire form. Extended additively as the wallet grows to hold more CAT types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Asset {
+    /// Native Chia (XCH), denominated in mojos.
+    Xch,
+    /// The DIG CAT, denominated in its base units.
+    Dig,
+}
+
+/// `control.wallet.balance` params: which address + asset to read the balance of.
+///
+/// A READ over the loopback control plane — never a spend. Field names + the [`Asset`] wire form are
+/// byte-identical to dig-app's frozen `BalanceRequest`, so the node reads exactly what dig-app emits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletBalanceParams {
+    /// The `xch1…` address to read the balance of.
+    pub address: String,
+    /// The asset to read the balance for.
+    pub asset: Asset,
+}
+control_call!(WalletBalanceParams => ControlMethod::WalletBalance, results::WalletBalanceResult);
+
 /// `pairing.request` params (OPEN — no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestParams {
