@@ -478,10 +478,43 @@ pub struct WalletBalanceResult {
     pub balance: u64,
     /// Incoming funds seen but not yet confirmed (asset base units); not yet spendable.
     pub pending: u64,
-    /// Whether the node's chain view is caught up. When `false`, the figures are STALE.
+    /// Which tier produced these figures, or `None` from a node too old to disclose it.
+    ///
+    /// See [`WalletReadSource`]. Absent (`null` / omitted) is a THIRD state, not a default tier:
+    /// it means the answering node predates tier disclosure, so the caller knows the tier is
+    /// unknown rather than being told a tier that was never reported.
+    ///
+    /// The [`Option`] carries the backwards compatibility on its own — serde treats a missing
+    /// `Option` field as `None` — so no `#[serde(default)]` is needed and none is written; a
+    /// REQUIRED field here would reject an older node's payload outright.
+    pub source: Option<WalletReadSource>,
+    /// Whether THESE figures reflect a caught-up local view. When `false`, they are STALE or came
+    /// from the fallback tier.
+    ///
+    /// This describes the ANSWER, not the node: a [`WalletReadSource::Fallback`] answer is always
+    /// `false`, however caught-up the node's own replica happens to be.
     pub synced: bool,
-    /// The peak block height the reported figures reflect, or `null` when the node has no height yet.
+    /// The peak block height the reported figures reflect, or `null` when no height applies —
+    /// including every [`WalletReadSource::Fallback`] answer, whose figures came from the oracle's
+    /// chain view rather than the node's.
     pub peak_height: Option<u32>,
+}
+
+/// Which tier answered a wallet read (dig_ecosystem#2233).
+///
+/// A node serves a wallet read either from its own chain replica or from a third-party HTTP
+/// oracle, and the two are not interchangeable to a caller: the oracle path is a network round
+/// trip that **discloses the queried address off-node**, which a user on a metered or private
+/// connection has a legitimate interest in knowing about. Reporting the tier is also what makes
+/// "the node answered from its own chain state" a falsifiable claim — a sync-progress flag is not,
+/// since a flag can flip while the oracle keeps answering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WalletReadSource {
+    /// The node's own local chain replica. No third party was consulted.
+    Db,
+    /// A third-party coinset HTTP oracle. The queried address was disclosed off-node.
+    Fallback,
 }
 
 /// `pairing.request` — the pairing handshake bootstrap (OPEN, no token).
