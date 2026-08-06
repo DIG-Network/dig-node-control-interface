@@ -287,7 +287,7 @@ impl ControlMethod {
             ControlMethod::PairingList => "List pending pairing requests and issued paired tokens (MASTER token only).",
             ControlMethod::PairingApprove => "Approve a pending pairing, minting a scoped token (MASTER token only).",
             ControlMethod::PairingRevoke => "Revoke an issued paired token by token_id (MASTER token only).",
-            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array.",
+            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array; each entry carries an always-present `software` field (the peer's advertised build).",
             ControlMethod::PeersConnect => "Dial a peer by address, or resolve an already-connected peer_id, via the live gossip pool.",
             ControlMethod::PeersDisconnect => "Drop a pooled peer by peer_id, closing its mTLS link (idempotent).",
             ControlMethod::Subscribe => "Subscribe the node to a store it actively watches and gap-fills.",

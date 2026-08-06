@@ -15,6 +15,9 @@
 //! - [`params`] — a typed request-params struct per method, each bound (via [`ControlCall`]) to its
 //!   method and its typed result.
 //! - [`results`] — the typed result payloads, field-for-field with what dig-node emits.
+//!   Includes [`PeerSoftware`], the one interpreted member of the otherwise-proxied
+//!   `control.peerStatus` snapshot: a peer's advertised software build, defined here so every
+//!   client reads a gossip handshake's `software_version` string the same way.
 //! - [`error`] — the stable control-error taxonomy ([`ControlErrorCode`]) + the [`ControlError`]
 //!   envelope a client branches its UX off.
 //! - [`envelope`] — the minimal JSON-RPC 2.0 request/response the catalog rides in.
@@ -69,6 +72,7 @@ mod kats;
 
 pub use error::{ControlError, ControlErrorCode, ControlErrorData};
 pub use method::{Category, ControlMethod, Routing};
+pub use results::{PeerSoftware, SoftwareVersionDetail};
 pub use traits::{ControlCall, ControlClient, ControlHandler, DefaultControlClient};
 
 /// The crate's semantic version, exposed so consumers can assert compatibility at runtime without
