@@ -72,7 +72,7 @@ mod kats;
 
 pub use error::{ControlError, ControlErrorCode, ControlErrorData};
 pub use method::{Category, ControlMethod, Routing};
-pub use results::PeerSoftware;
+pub use results::{PeerSoftware, SoftwareVersionDetail};
 pub use traits::{ControlCall, ControlClient, ControlHandler, DefaultControlClient};
 
 /// The crate's semantic version, exposed so consumers can assert compatibility at runtime without

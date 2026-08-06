@@ -164,6 +164,25 @@ a struct over them.
   network. A node that declines to advertise sends an empty string, which reads as `unknown` here and
   is indistinguishable from a build predating the field.
 
+- **`SoftwareVersionDetail`** — how much of its own build a node reveals when it advertises. Wire
+  tokens `"full"` (default) | `"minor"` | `"off"`, rendering:
+
+  | Mode | Advertised for version `0.99.1` | Read back as |
+  |---|---|---|
+  | `full` | `dig-node/0.99.1` | `reported`, exact |
+  | `minor` | `dig-node/0.99.0` | `reported`, patch level hidden |
+  | `off` | `""` | `unknown` |
+
+  `minor` MUST render `MAJOR.MINOR.0`, never a bare `MAJOR.MINOR`: a two-part version is not valid
+  semver, so the coarse setting would be read as `unknown` and become a confusing second spelling of
+  `off`. `minor` MUST also strip pre-release and build metadata — a nightly identifier is more
+  precisely identifying than the patch number beside it, so retaining it would coarsen nothing for
+  exactly the builds that most want it. A coarsened `1.4.0` is indistinguishable from a genuine
+  `1.4.0`; that is the purpose of coarsening, not a defect in it.
+
+  Rendering is specified here, beside the parsing, because they are two halves of one format. A node
+  MUST NOT hand-roll its own `product/version` string.
+
 - **`StatusResult.version`** already reports THIS node's own build; there is no separate method for
   it, and `control.peerStatus` covers both the point lookup ("what is that peer running") and the
   census (a group-by over the returned array).

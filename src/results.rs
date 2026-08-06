@@ -28,6 +28,58 @@ pub struct SyncAvailability {
     pub available: bool,
 }
 
+/// How much of its own build a node reveals when it advertises (dig_ecosystem#2215).
+///
+/// Advertising an exact build is a fingerprinting aid — it tells an observer precisely which peers
+/// run a version with a publicly disclosed defect. This is the operator's dial between that cost
+/// and the diagnostic value of knowing what the network is running.
+///
+/// It lives here, beside [`PeerSoftware`], because rendering and parsing are two halves of one
+/// format: a node that hand-rolled its own `product/version` string would be re-implementing half
+/// the contract, and the two halves would drift. A node picks a mode; this type renders it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SoftwareVersionDetail {
+    /// Advertise the exact build, e.g. `dig-node/0.99.1`. The default: the diagnostic value is why
+    /// the field exists, and an operator who disagrees opts down explicitly.
+    #[default]
+    Full,
+    /// Advertise only the major and minor level, e.g. `dig-node/0.99.0`. Hides the patch level, and
+    /// any pre-release or build metadata, while remaining READABLE at the far end.
+    Minor,
+    /// Advertise nothing. Indistinguishable from a peer built before this field existed, and reads
+    /// as [`PeerSoftware::Unknown`].
+    Off,
+}
+
+impl SoftwareVersionDetail {
+    /// Render the advertisement a node with this setting puts on its handshake.
+    ///
+    /// The result is always either the empty string or a value
+    /// [`PeerSoftware::parse`] reads back as `Reported` — coarsening reduces PRECISION, never
+    /// readability. That is why [`Minor`](SoftwareVersionDetail::Minor) renders `MAJOR.MINOR.0`
+    /// rather than a bare `MAJOR.MINOR`: two-part versions are not valid semver, so the coarse
+    /// setting would collapse to Unknown and become a second, confusing spelling of
+    /// [`Off`](SoftwareVersionDetail::Off).
+    ///
+    /// A coarsened `1.4.0` is indistinguishable from a genuine `1.4.0`. That is the point of
+    /// coarsening, not a defect in it.
+    pub fn render(self, product: &str, version: &semver::Version) -> String {
+        match self {
+            Self::Full => format!("{product}/{version}"),
+            // A pre-release identifier (`-nightly.20260805`) is more precisely identifying than the
+            // patch number beside it, so a "coarse" advertisement that kept it would coarsen
+            // nothing for exactly the builds that most want it. `Version::new` drops both it and
+            // any build metadata.
+            Self::Minor => format!(
+                "{product}/{}",
+                semver::Version::new(version.major, version.minor, 0)
+            ),
+            Self::Off => String::new(),
+        }
+    }
+}
+
 /// A peer's advertised SOFTWARE build, as read from the gossip handshake (dig_ecosystem#2215).
 ///
 /// dig-gossip carries the peer's `Handshake.software_version` as an opaque sanitized string and
@@ -687,5 +739,112 @@ mod tests {
             !DefaultProbe::<PeerSoftware>::is_default(),
             "PeerSoftware must not implement Default"
         );
+    }
+
+    // ---- SoftwareVersionDetail (dig_ecosystem#2215) ----
+
+    /// Each mode renders a value the PARSER reads back at the intended level of detail.
+    ///
+    /// The fixture uses a version with a non-zero minor AND a non-zero patch, because that is the
+    /// only shape where `Full` and `Minor` differ — a `1.0.0` fixture would let a renderer that
+    /// ignores the mode entirely pass.
+    #[test]
+    fn each_detail_mode_round_trips_to_the_intended_precision() {
+        let v = semver::Version::new(0, 99, 1);
+
+        let full = SoftwareVersionDetail::Full.render("dig-node", &v);
+        assert_eq!(full, "dig-node/0.99.1");
+        assert_eq!(
+            PeerSoftware::parse(&full),
+            PeerSoftware::parse("dig-node/0.99.1")
+        );
+
+        let minor = SoftwareVersionDetail::Minor.render("dig-node", &v);
+        assert_ne!(minor, full, "Minor must actually coarsen");
+        let PeerSoftware::Reported { version, .. } = PeerSoftware::parse(&minor) else {
+            panic!("a coarsened advertisement must still be READABLE, not Unknown");
+        };
+        assert_eq!(version.major, 0);
+        assert_eq!(version.minor, 99);
+        assert_eq!(version.patch, 0, "the patch level is what Minor hides");
+
+        let off = SoftwareVersionDetail::Off.render("dig-node", &v);
+        assert_eq!(off, "");
+        assert_eq!(PeerSoftware::parse(&off), PeerSoftware::Unknown);
+    }
+
+    /// `Minor` renders `MAJOR.MINOR.0`, NOT `MAJOR.MINOR`.
+    ///
+    /// A bare two-part `0.99` is not valid semver, so the parser would classify a peer that
+    /// coarsened its build as Unknown — turning "tell them less" into "tell them nothing", which
+    /// is what `Off` is for. This test is the guard on that distinction.
+    #[test]
+    fn minor_mode_stays_valid_semver_rather_than_collapsing_to_unknown() {
+        let rendered =
+            SoftwareVersionDetail::Minor.render("dig-node", &semver::Version::new(1, 4, 7));
+        assert_eq!(rendered, "dig-node/1.4.0");
+        assert_ne!(
+            PeerSoftware::parse(&rendered),
+            PeerSoftware::Unknown,
+            "a coarsened build must remain readable; `product/1.4` would not be"
+        );
+    }
+
+    /// Coarsening strips pre-release and build metadata. A nightly's identifier is more precisely
+    /// identifying than the patch number it accompanies, so leaving it in place would make `Minor`
+    /// coarsen nothing at all for exactly the builds that most want it.
+    #[test]
+    fn minor_mode_strips_prerelease_and_build_metadata() {
+        let v: semver::Version = "1.0.0-nightly.20260805+sha.abc123".parse().unwrap();
+        let rendered = SoftwareVersionDetail::Minor.render("dig-node", &v);
+        assert_eq!(rendered, "dig-node/1.0.0");
+        assert!(
+            !rendered.contains("nightly"),
+            "the nightly identifier must not survive coarsening"
+        );
+        assert!(
+            !rendered.contains("abc123"),
+            "build metadata must not survive coarsening"
+        );
+    }
+
+    /// `Off` renders the empty string for ANY version, which is what makes it indistinguishable
+    /// from a peer built before the field existed.
+    #[test]
+    fn off_mode_reveals_nothing_for_any_version() {
+        for v in ["0.0.1", "1.2.3", "99.99.99-rc.1"] {
+            let rendered = SoftwareVersionDetail::Off.render("dig-node", &v.parse().unwrap());
+            assert_eq!(
+                rendered, "",
+                "Off must reveal nothing, including the product name"
+            );
+        }
+    }
+
+    /// The default is the most informative setting: the diagnostic value is the reason the field
+    /// exists, and an operator who disagrees opts down explicitly.
+    #[test]
+    fn detail_defaults_to_full() {
+        assert_eq!(
+            SoftwareVersionDetail::default(),
+            SoftwareVersionDetail::Full
+        );
+    }
+
+    /// The wire tokens are the lowercase words an operator writes in a config file, and they are a
+    /// published contract once a config carries them.
+    #[test]
+    fn detail_uses_lowercase_wire_tokens() {
+        for (mode, token) in [
+            (SoftwareVersionDetail::Full, "\"full\""),
+            (SoftwareVersionDetail::Minor, "\"minor\""),
+            (SoftwareVersionDetail::Off, "\"off\""),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), token);
+            assert_eq!(
+                serde_json::from_str::<SoftwareVersionDetail>(token).unwrap(),
+                mode
+            );
+        }
     }
 }
