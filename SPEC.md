@@ -93,7 +93,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
-| `control.wallet.balance` | yes | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, synced, peak_height}` |
+| `control.wallet.balance` | yes | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
@@ -111,11 +111,21 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 - **`CapsuleEntry`**: `{capsule:"storeId:root", root:string, size_bytes:u64, last_used_unix_ms:u64}`.
 - **`pairing.poll` token**: the `token` field MUST be omitted while `status` is not `approved`, and
   present exactly once after approval.
-- **`WalletBalanceResult`**: `{balance:u64, pending:u64, synced:bool, peak_height:u32|null}`. A
+- **`WalletBalanceResult`**: `{balance:u64, pending:u64, source:"db"|"fallback"|null, synced:bool,
+  peak_height:u32|null}`. A
   READ-only chain read over the loopback control plane — it reports state, never moves funds. `balance`
   is the CONFIRMED spendable amount in the asset's base unit (mojos for XCH, base units for DIG);
-  `pending` is incoming-unconfirmed; `synced:false` means the figures are STALE; `peak_height` is the
-  block height the figures reflect (present as `null`, never omitted, when the node has no height yet).
+  `pending` is incoming-unconfirmed.
+
+  `source` names the TIER that produced the figures, and every freshness field describes THAT tier:
+  `"db"` is the node's own chain replica (`synced:true`, `peak_height` = the replica's peak);
+  `"fallback"` is a third-party coinset HTTP oracle, which MUST report `synced:false` and
+  `peak_height:null` however caught-up the node's own replica is, because the replica neither
+  produced that figure nor bounds its freshness. A `"fallback"` answer also means the queried address
+  WAS DISCLOSED off-node. `source` is ABSENT/`null` only from a node predating tier disclosure — a
+  third state meaning "tier unknown", never a defaulted tier; consumers MUST NOT treat it as either.
+  `synced:false` means the figures are STALE or fallback-served; `peak_height` is the block height
+  the figures reflect (present as `null`, never omitted, when no height applies).
   The `asset` request field is the lowercase wire token `"xch"`/`"dig"`. This result is a strict
   SUPERSET of dig-app's `BalanceResponse {balance}`: a consumer reading only `{balance}` deserializes
   it losslessly (unknown fields ignored), which is the no-consumer-change guarantee pinned by a KAT.

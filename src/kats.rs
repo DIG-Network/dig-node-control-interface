@@ -164,12 +164,53 @@ fn golden_response_result_vectors_are_byte_stable() {
         "status": "approved", "token": "deadbeef"
     }));
     assert_result_round_trips::<results::WalletBalanceResult>(json!({
-        "balance": 1234u64, "pending": 0u64, "synced": true, "peak_height": 5000000u32
+        "balance": 1234u64, "pending": 0u64,
+        "source": "db", "synced": true, "peak_height": 5000000u32
     }));
-    // `peak_height` is present as `null` (never omitted) when the node has no height yet.
+    // A fallback-tier answer: `synced` is false and `peak_height` is present as `null` (never
+    // omitted), because neither describes a figure the node's own replica did not produce.
     assert_result_round_trips::<results::WalletBalanceResult>(json!({
-        "balance": 0u64, "pending": 7u64, "synced": false, "peak_height": null
+        "balance": 0u64, "pending": 7u64,
+        "source": "fallback", "synced": false, "peak_height": null
     }));
+}
+
+/// `source` is ADDITIVE in BOTH directions (dig_ecosystem#2233), which is the property that lets
+/// this crate ship ahead of the nodes that emit the field.
+///
+/// The fixture that matters is the one WITHOUT the key: a node released before tier disclosure
+/// emits no `source` at all, and 0.5.0 must still parse that payload. A test that only round-trips
+/// a payload carrying the field cannot see a missing `#[serde(default)]` — the field is required on
+/// deserialize, every fixture supplies it, and the break surfaces only against a real older node.
+#[test]
+fn a_pre_disclosure_nodes_payload_still_parses_with_the_tier_unknown() {
+    let legacy = json!({
+        "balance": 1234u64, "pending": 0u64, "synced": true, "peak_height": 5000000u32
+    });
+    let parsed: results::WalletBalanceResult =
+        serde_json::from_value(legacy).expect("a node predating `source` must still deserialize");
+
+    assert_eq!(parsed.balance, 1234);
+    assert_eq!(
+        parsed.source, None,
+        "an absent tier is UNKNOWN -- never silently reported as one of the two tiers"
+    );
+}
+
+/// The two tiers spell themselves on the wire as the lowercase tokens dig-node emits, pinned
+/// literally so a Rust variant rename cannot silently change what a consumer must match on.
+#[test]
+fn the_tier_tokens_are_the_lowercase_wire_spellings() {
+    for (src, wire) in [
+        (results::WalletReadSource::Db, "db"),
+        (results::WalletReadSource::Fallback, "fallback"),
+    ] {
+        assert_eq!(serde_json::to_value(src).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<results::WalletReadSource>(json!(wire)).unwrap(),
+            src
+        );
+    }
 }
 
 /// The "no dig-app code change" guarantee, pinned: the node's richer `WalletBalanceResult` is a
@@ -179,7 +220,7 @@ fn golden_response_result_vectors_are_byte_stable() {
 #[test]
 fn node_balance_superset_is_readable_by_dig_apps_balance_struct() {
     /// Byte-identical mirror of dig-app's frozen `BalanceResponse` — NO `deny_unknown_fields`, so the
-    /// node's extra fields (`pending`/`synced`/`peak_height`) are ignored, not rejected.
+    /// node's extra fields (`pending`/`source`/`synced`/`peak_height`) are ignored, not rejected.
     #[derive(serde::Deserialize)]
     struct DigAppBalanceResponse {
         balance: u64,
@@ -189,6 +230,7 @@ fn node_balance_superset_is_readable_by_dig_apps_balance_struct() {
     let node_payload = serde_json::to_value(results::WalletBalanceResult {
         balance: 9_999,
         pending: 42,
+        source: Some(results::WalletReadSource::Db),
         synced: true,
         peak_height: Some(6_123_456),
     })
@@ -427,6 +469,7 @@ impl ControlHandler for MockNode {
         Ok(results::WalletBalanceResult {
             balance: 1234,
             pending: 0,
+            source: Some(results::WalletReadSource::Db),
             synced: true,
             peak_height: Some(5_000_000),
         })
