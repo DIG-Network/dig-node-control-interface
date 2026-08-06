@@ -87,7 +87,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.pairing.list` | master | owned | — | (pending + issued tokens) |
 | `control.pairing.approve` | master | owned | `{pairing_id:string}` | `{approved, client_name, token_id}` |
 | `control.pairing.revoke` | master | owned | `{token_id:string}` | `{revoked, token_id}` |
-| `control.peerStatus` | yes | delegated | — | (peer-pool snapshot) |
+| `control.peerStatus` | yes | delegated | — | (peer-pool snapshot; each peer entry carries `software`) |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
 | `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
@@ -123,6 +123,50 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 Proxied results (`control.updater.*`, `control.pairing.list`, `control.peerStatus`) carry the
 underlying source's shape verbatim and are modelled as an opaque JSON value; consumers MUST NOT freeze
 a struct over them.
+
+- **`PeerSoftware`** — a peer's advertised SOFTWARE build, the one member of the otherwise-proxied
+  `control.peerStatus` snapshot whose shape this contract owns. Every entry of the snapshot's
+  `connected` array MUST carry a `software` member; a peer entry that omits it is a serialization
+  defect, NOT a peer of unknown build. Two forms, tagged by `kind`:
+
+  ```json
+  {"kind": "unknown"}
+  {"kind": "reported", "product": "dig-node", "version": "0.99.1", "raw": "dig-node/0.99.1"}
+  ```
+
+  `unknown` MUST carry no `version` member — never `"0.0.0"`, never `""`, never `null`.
+
+  The node derives it from the peer's gossip `Handshake.software_version` string. The mapping is
+  normative:
+
+  | Advertised string | Result |
+  |---|---|
+  | `product/semver`, both parts non-empty, version parsing as semver | `reported` |
+  | `""` (the peer advertised nothing, or coarsened its build off) | `unknown` |
+  | `"0.0.0"` — the LEGACY SENTINEL | `unknown` |
+  | `product/0.0.0` | `unknown` |
+  | anything else unparseable | `unknown` |
+
+  The product/version split is at the LAST `/`, so a product name may itself contain one.
+  Surrounding whitespace is trimmed before parsing.
+
+  **Why `"0.0.0"` is `unknown` and not a version.** Every dig-node built before this contract
+  advertises the literal `"0.0.0"`: three of dig-gossip's four handshake send sites hardcoded it. A
+  reader that treated it as a version would classify the entire live network as running software
+  0.0.0, and any `>=` comparison would call all of it ancient.
+
+  **`PeerSoftware` MUST NOT implement `Ord`, `PartialOrd`, or `Default`.** `unknown` has no position
+  on a version line, and most peers are `unknown` today; a comparison is reachable only after
+  destructuring `reported`, which forces a caller to decide what `unknown` means for its question.
+
+  **Privacy.** Reporting a peer's exact build is a fingerprinting aid — it identifies which peers run
+  a version with a publicly disclosed defect. Accepted for the diagnostic value on a pre-release
+  network. A node that declines to advertise sends an empty string, which reads as `unknown` here and
+  is indistinguishable from a build predating the field.
+
+- **`StatusResult.version`** already reports THIS node's own build; there is no separate method for
+  it, and `control.peerStatus` covers both the point lookup ("what is that peer running") and the
+  census (a group-by over the returned array).
 
 ## 5. Error taxonomy
 

@@ -583,6 +583,88 @@ fn every_catalog_method_dispatches_without_panicking() {
     }
 }
 
+/// **dig_ecosystem#2215** — the `software` member every `control.peerStatus` peer entry carries.
+///
+/// `control.peerStatus` is a PROXIED result: SPEC §4.1 forbids freezing a struct over the snapshot,
+/// because its shape belongs to the node's peer pool. So this KAT pins the one member this contract
+/// DOES own — `software` — in situ, inside a representative `connected` array, rather than pinning
+/// the envelope around it.
+///
+/// The vector carries one REPORTED peer and one UNKNOWN peer together. A vector with only a
+/// reported peer would pass against an implementation that omits `software` whenever it is Unknown,
+/// which is precisely the bug the always-present rule exists to prevent.
+#[test]
+fn peer_status_software_member_golden_vector() {
+    let snapshot = json!({
+        "connected": [
+            {
+                "peer_id": "aa00",
+                "address": "[2001:db8::1]:9444",
+                "outbound": true,
+                "software": {
+                    "kind": "reported",
+                    "product": "dig-node",
+                    "version": "0.99.1",
+                    "raw": "dig-node/0.99.1"
+                }
+            },
+            {
+                "peer_id": "bb11",
+                "address": "[2001:db8::2]:9444",
+                "outbound": false,
+                "software": { "kind": "unknown" }
+            }
+        ]
+    });
+
+    let entries = snapshot["connected"].as_array().expect("connected array");
+
+    // Always present: EVERY entry carries `software`, including the peer whose build is unknown.
+    for entry in entries {
+        assert!(
+            entry.get("software").is_some(),
+            "every peerStatus entry must carry `software`; omitting it is a serialization bug,              not an Unknown peer"
+        );
+    }
+
+    // Each member decodes to the typed value and re-encodes byte-identically.
+    for entry in entries {
+        let wire = entry["software"].clone();
+        let parsed: results::PeerSoftware =
+            serde_json::from_value(wire.clone()).expect("software member must decode");
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            wire,
+            "the software member is not byte-stable"
+        );
+    }
+
+    // And the decoded values are the ones the vector names, so a decode that silently collapsed
+    // both entries to the same value could not pass.
+    let reported: results::PeerSoftware =
+        serde_json::from_value(entries[0]["software"].clone()).unwrap();
+    assert_eq!(reported, results::PeerSoftware::parse("dig-node/0.99.1"));
+    let unknown: results::PeerSoftware =
+        serde_json::from_value(entries[1]["software"].clone()).unwrap();
+    assert_eq!(unknown, results::PeerSoftware::Unknown);
+    assert_ne!(reported, unknown);
+}
+
+/// The legacy sentinel a peer is advertising RIGHT NOW must reach a reader as Unknown, not as a
+/// version — the whole live fleet depends on this one mapping (dig_ecosystem#2215).
+#[test]
+fn a_legacy_peer_entry_reads_as_unknown_not_as_version_zero() {
+    let software = results::PeerSoftware::parse("0.0.0");
+    assert_eq!(software, results::PeerSoftware::Unknown);
+    let wire = serde_json::to_value(&software).unwrap();
+    assert_eq!(wire, json!({"kind": "unknown"}));
+    assert_eq!(
+        wire.to_string().find("0.0.0"),
+        None,
+        "no rendering of a legacy peer may contain the sentinel as a version"
+    );
+}
+
 /// The smallest valid params object for a method, so the coverage sweep above never trips
 /// `INVALID_PARAMS` for a param-taking method.
 fn minimal_params(m: ControlMethod) -> Value {

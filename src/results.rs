@@ -28,6 +28,108 @@ pub struct SyncAvailability {
     pub available: bool,
 }
 
+/// A peer's advertised SOFTWARE build, as read from the gossip handshake (dig_ecosystem#2215).
+///
+/// dig-gossip carries the peer's `Handshake.software_version` as an opaque sanitized string and
+/// deliberately does not interpret it. This type is where that string becomes meaning, once, at the
+/// control boundary — so the interpretation is defined in one place and every client agrees.
+///
+/// # This is NOT the protocol version
+///
+/// Wire compatibility is a separate field that dig-gossip gates connections on. Two peers can speak
+/// the same protocol while running builds months apart; this type reports the latter. It MUST NOT
+/// be used to decide whether to talk to a peer.
+///
+/// # Why there is no `Ord` and no `Default`
+///
+/// [`Unknown`](PeerSoftware::Unknown) has no position on a version line: it is the absence of a
+/// measurement, not a low value. Deriving `Ord` would place it somewhere — and every peer built
+/// before #2215 is Unknown, so "somewhere" would silently become a verdict about most of the live
+/// network. Comparison is therefore reachable only by destructuring
+/// [`Reported`](PeerSoftware::Reported), which forces the caller to say what Unknown means for
+/// their question. There is no `Default` for the same reason: a defaulted Unknown that appears from
+/// nowhere is a different fact from one that was measured, and the two must not be confusable.
+///
+/// # JSON
+///
+/// ```json
+/// {"kind": "unknown"}
+/// {"kind": "reported", "product": "dig-node", "version": "0.99.1", "raw": "dig-node/0.99.1"}
+/// ```
+///
+/// Unknown carries no `version` member at all — never `"0.0.0"`, never `""`, never `null` in a
+/// field a consumer might read as a version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerSoftware {
+    /// The peer's build is not known: it advertised nothing, advertised the legacy `"0.0.0"`
+    /// sentinel, or advertised something this contract cannot parse. See [`PeerSoftware::parse`]
+    /// for why those three are one case.
+    Unknown,
+    /// The peer advertised a well-formed `product/semver` build.
+    Reported {
+        /// The product name, e.g. `dig-node`. Everything before the LAST `/`.
+        product: String,
+        /// The parsed semantic version, e.g. `0.99.1`. Serializes as its string form.
+        version: semver::Version,
+        /// Exactly what the peer advertised, after trimming.
+        ///
+        /// **Currently reconstructible, deliberately kept.** The grammar this parser accepts is
+        /// lossless — `semver::Version` re-renders every string it accepts byte-identically — so
+        /// today `raw` always equals `format!("{product}/{version}")`, and no test can distinguish
+        /// this field from that expression. It is retained as the honest source: the moment the
+        /// grammar accepts anything non-canonical (a `v` prefix, a two-part version, a vendor
+        /// suffix), a diagnostic reader must see what the peer actually sent rather than this
+        /// parser's opinion of it, and callers that already read `raw` will not need to change.
+        raw: String,
+    },
+}
+
+/// The legacy sentinel every peer built before dig_ecosystem#2215 advertises.
+///
+/// Three of dig-gossip's four handshake send sites hardcoded this literal (the outbound dial and
+/// both introducer dials), so it is not a hypothetical value — it is what the live fleet is sending
+/// right now. It means "this build predates the field", which is [`PeerSoftware::Unknown`], and
+/// mapping it to a *version* would make the whole existing network read as ancient.
+const LEGACY_UNVERSIONED_SENTINEL: &str = "0.0.0";
+
+/// The separator between the product and the version in a `product/semver` advertisement.
+const PRODUCT_VERSION_SEPARATOR: char = '/';
+
+impl PeerSoftware {
+    /// Interpret a peer's advertised `software_version` string.
+    ///
+    /// Returns [`Unknown`](PeerSoftware::Unknown) for an empty or blank string, for the legacy
+    /// `"0.0.0"` sentinel, and for anything that is not `product/semver` with both
+    /// parts non-empty and the version parsing as semver. A version that is *itself* the legacy
+    /// sentinel (`dig-node/0.0.0`) is also Unknown: the sentinel means "unversioned" whether or not
+    /// a product name was attached to it.
+    ///
+    /// A product name may contain `/`; the split is at the LAST separator.
+    pub fn parse(advertised: &str) -> Self {
+        let raw = advertised.trim();
+
+        // No separator at all: an empty advertisement, a bare version, a product with no version,
+        // or the bare legacy `"0.0.0"` sentinel — which contains no `/` and so lands here rather
+        // than needing a clause of its own. None of them name a build.
+        let Some((product, version)) = raw.rsplit_once(PRODUCT_VERSION_SEPARATOR) else {
+            return Self::Unknown;
+        };
+        if product.is_empty() || version == LEGACY_UNVERSIONED_SENTINEL {
+            return Self::Unknown;
+        }
+        let Ok(version) = version.parse::<semver::Version>() else {
+            return Self::Unknown;
+        };
+
+        Self::Reported {
+            product: product.to_string(),
+            version,
+            raw: raw.to_string(),
+        }
+    }
+}
+
 /// `control.status` — a rich node status snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResult {
@@ -374,6 +476,216 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&approved).unwrap(),
             json!({"status": "approved", "token": "deadbeef"})
+        );
+    }
+
+    // ---- PeerSoftware (dig_ecosystem#2215) ----
+
+    /// The mapping that matters most. Every peer built before #2215 advertises the LITERAL
+    /// `"0.0.0"` — three of dig-gossip's four handshake send sites hardcoded it. A parser that
+    /// maps only `""` to Unknown would therefore read the entire live fleet as "software version
+    /// 0.0.0", which any later `>=` comparison treats as ancient. `""`, `"0.0.0"`, and anything
+    /// unparseable must all be Unknown, and this test is that mapping's guard.
+    #[test]
+    fn unknown_covers_empty_the_legacy_sentinel_and_garbage() {
+        for raw in [
+            "",                       // a peer advertising nothing, or `off` coarsening
+            "0.0.0",                  // the pre-#2215 legacy sentinel
+            "   ",                    // whitespace only
+            "dig-node",               // no version part
+            "dig-node/",              // empty version part
+            "dig-node/not-a-version", // unparseable version
+            "/1.2.3",                 // empty product part
+            "1.2.3",                  // bare version, no product
+            "dig-node/0.0.0",         // the sentinel, however it is dressed up
+        ] {
+            assert_eq!(
+                PeerSoftware::parse(raw),
+                PeerSoftware::Unknown,
+                "{raw:?} must map to Unknown"
+            );
+        }
+    }
+
+    /// A well-formed `product/semver` advertisement is reported with all three parts, and `raw`
+    /// preserves exactly what the peer sent so a diagnostic reader is never shown a value the peer
+    /// did not actually advertise.
+    #[test]
+    fn reported_carries_product_version_and_the_raw_advertisement() {
+        let parsed = PeerSoftware::parse("dig-node/0.99.1");
+        let PeerSoftware::Reported {
+            product,
+            version,
+            raw,
+        } = parsed
+        else {
+            panic!("a well-formed advertisement must be Reported");
+        };
+        assert_eq!(product, "dig-node");
+        assert_eq!(version, semver::Version::new(0, 99, 1));
+        assert_eq!(raw, "dig-node/0.99.1");
+    }
+
+    /// A product name may itself contain a `/`; only the LAST separator splits product from
+    /// version. Pinning this stops a future reader from switching to a first-separator split,
+    /// which would silently reclassify such a peer as Unknown.
+    #[test]
+    fn product_is_split_at_the_last_separator() {
+        let PeerSoftware::Reported {
+            product, version, ..
+        } = PeerSoftware::parse("acme/dig-node/1.2.3")
+        else {
+            panic!("expected Reported");
+        };
+        assert_eq!(product, "acme/dig-node");
+        assert_eq!(version, semver::Version::new(1, 2, 3));
+    }
+
+    /// Surrounding whitespace is trimmed before parsing, and `raw` records the TRIMMED
+    /// advertisement. CON-008 sanitization strips Unicode Cc/Cf from the wire value but not
+    /// spaces, so a padded advertisement reaches this parser intact and must not be classified as
+    /// unparseable merely for having been padded.
+    #[test]
+    fn surrounding_whitespace_is_trimmed_before_parsing() {
+        let PeerSoftware::Reported {
+            product,
+            version,
+            raw,
+        } = PeerSoftware::parse("  dig-node/1.2.3	")
+        else {
+            panic!("a padded advertisement must still be Reported");
+        };
+        assert_eq!(product, "dig-node");
+        assert_eq!(version, semver::Version::new(1, 2, 3));
+        assert_eq!(raw, "dig-node/1.2.3", "raw must record the trimmed value");
+    }
+
+    /// A pre-release/build-metadata semver survives intact, because that is what a nightly build
+    /// advertises and dropping it would make every nightly indistinguishable from its release.
+    #[test]
+    fn prerelease_versions_are_preserved() {
+        let PeerSoftware::Reported { version, raw, .. } =
+            PeerSoftware::parse("dig-node/1.0.0-nightly.20260805")
+        else {
+            panic!("expected Reported");
+        };
+        assert_eq!(version.to_string(), "1.0.0-nightly.20260805");
+        assert_eq!(raw, "dig-node/1.0.0-nightly.20260805");
+    }
+
+    /// Unknown's JSON is a tagged object — never `"0.0.0"`, never `""`, never a null sitting in a
+    /// version field where a consumer might read it as a number.
+    #[test]
+    fn unknown_serializes_as_a_tagged_object_with_no_version_field() {
+        let v = serde_json::to_value(PeerSoftware::Unknown).unwrap();
+        assert_eq!(v, json!({"kind": "unknown"}));
+        assert!(
+            v.get("version").is_none(),
+            "Unknown must not carry a version field at all"
+        );
+    }
+
+    /// Both variants round-trip byte-identically, which is what lets a client re-encode a node's
+    /// response unchanged.
+    #[test]
+    fn both_variants_round_trip_byte_identically() {
+        for wire in [
+            json!({"kind": "unknown"}),
+            json!({
+                "kind": "reported",
+                "product": "dig-node",
+                "version": "0.99.1",
+                "raw": "dig-node/0.99.1"
+            }),
+        ] {
+            let parsed: PeerSoftware = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+        }
+    }
+
+    /// Parsing a wire string and serializing the result produces the documented JSON, so the two
+    /// halves of the contract cannot drift from each other.
+    #[test]
+    fn parse_then_serialize_matches_the_documented_json() {
+        assert_eq!(
+            serde_json::to_value(PeerSoftware::parse("dig-node/0.99.1")).unwrap(),
+            json!({
+                "kind": "reported",
+                "product": "dig-node",
+                "version": "0.99.1",
+                "raw": "dig-node/0.99.1"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(PeerSoftware::parse("0.0.0")).unwrap(),
+            json!({"kind": "unknown"})
+        );
+    }
+
+    // ---- Trait-absence probes (dig_ecosystem#2215) ----
+    //
+    // `PeerSoftware` deriving `Ord` or `Default` would be a silent correctness regression rather
+    // than a compile error anywhere, so it is pinned here. The probe exploits inherent-impl
+    // precedence: `Probe::<T>::has_it()` resolves to the inherent impl (returning `true`) only when
+    // `T` satisfies the bound, and otherwise falls back to the blanket trait impl (`false`).
+    //
+    // Each probe carries a CONTROL on a type that DOES implement the trait. Without the control, a
+    // probe broken so that it always answers `false` would pass while proving nothing.
+
+    struct Probe<T>(core::marker::PhantomData<T>);
+
+    trait ProbeFallback {
+        fn is_ord() -> bool {
+            false
+        }
+    }
+    impl<T> ProbeFallback for Probe<T> {}
+
+    impl<T: Ord> Probe<T> {
+        fn is_ord() -> bool {
+            true
+        }
+    }
+
+    /// A version comparison must be unreachable without first destructuring `Reported`, so that a
+    /// caller cannot order `Unknown` against a real version — which, since every pre-#2215 peer is
+    /// Unknown, would quietly become a verdict about most of the live network.
+    #[test]
+    fn peer_software_is_not_ordered() {
+        assert!(
+            Probe::<u32>::is_ord(),
+            "control: the probe must detect a type that IS Ord, or it proves nothing"
+        );
+        assert!(
+            !Probe::<PeerSoftware>::is_ord(),
+            "PeerSoftware must not implement Ord — comparison belongs after destructuring Reported"
+        );
+    }
+
+    /// A defaulted `Unknown` appearing from nowhere is a different fact from a measured one, and
+    /// `Default` would make the two indistinguishable at the point of construction.
+    #[test]
+    fn peer_software_has_no_default() {
+        struct DefaultProbe<T>(core::marker::PhantomData<T>);
+        trait DefaultFallback {
+            fn is_default() -> bool {
+                false
+            }
+        }
+        impl<T> DefaultFallback for DefaultProbe<T> {}
+        impl<T: Default> DefaultProbe<T> {
+            fn is_default() -> bool {
+                true
+            }
+        }
+
+        assert!(
+            DefaultProbe::<String>::is_default(),
+            "control: the probe must detect a type that IS Default, or it proves nothing"
+        );
+        assert!(
+            !DefaultProbe::<PeerSoftware>::is_default(),
+            "PeerSoftware must not implement Default"
         );
     }
 }

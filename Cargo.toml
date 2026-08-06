@@ -29,6 +29,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `async fn` in the node-facing `ControlHandler` trait (matches the sibling contract crates).
 async-trait = "0.1"
+# The parsed `version` inside `results::PeerSoftware::Reported`. Serializes as its string form, so
+# it adds a type to the contract without changing the JSON a peer-status reader sees.
+semver = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 # Drive the async `ControlHandler` KATs to completion without pulling a full runtime dependency
