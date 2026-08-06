@@ -55,12 +55,16 @@ pub enum SoftwareVersionDetail {
 impl SoftwareVersionDetail {
     /// Render the advertisement a node with this setting puts on its handshake.
     ///
-    /// The result is always either the empty string or a value
-    /// [`PeerSoftware::parse`] reads back as `Reported` — coarsening reduces PRECISION, never
-    /// readability. That is why [`Minor`](SoftwareVersionDetail::Minor) renders `MAJOR.MINOR.0`
-    /// rather than a bare `MAJOR.MINOR`: two-part versions are not valid semver, so the coarse
-    /// setting would collapse to Unknown and become a second, confusing spelling of
-    /// [`Off`](SoftwareVersionDetail::Off).
+    /// The result is ALWAYS either the empty string or a value [`PeerSoftware::parse`] reads back
+    /// as `Reported`. Coarsening reduces PRECISION; it never produces a value that reads as
+    /// Unknown while pretending to be a report. Two consequences follow, and both are tested:
+    ///
+    /// - [`Minor`](SoftwareVersionDetail::Minor) renders `MAJOR.MINOR.0`, never a bare
+    ///   `MAJOR.MINOR` — two-part versions are not valid semver, so that spelling would read as
+    ///   Unknown and become a second, confusing spelling of [`Off`](SoftwareVersionDetail::Off).
+    /// - `Minor` of a `0.0.x` build renders the EMPTY STRING, because its coarsening is version
+    ///   zero and version zero is the "unknown" sentinel. There is no coarser representable value,
+    ///   so it advertises nothing rather than advertising the sentinel as if it were a report.
     ///
     /// A coarsened `1.4.0` is indistinguishable from a genuine `1.4.0`. That is the point of
     /// coarsening, not a defect in it.
@@ -71,10 +75,18 @@ impl SoftwareVersionDetail {
             // patch number beside it, so a "coarse" advertisement that kept it would coarsen
             // nothing for exactly the builds that most want it. `Version::new` drops both it and
             // any build metadata.
-            Self::Minor => format!(
-                "{product}/{}",
-                semver::Version::new(version.major, version.minor, 0)
-            ),
+            Self::Minor => {
+                let coarsened = semver::Version::new(version.major, version.minor, 0);
+                // Hiding the patch of a `0.0.x` build leaves version zero, which the wire reserves
+                // as the "unknown" sentinel. There is no coarser representable value, so advertise
+                // nothing rather than advertise the sentinel dressed up as a report. (This differs
+                // from the rejected two-part `MAJOR.MINOR` spelling: there a representable coarse
+                // value existed and the wrong one was chosen; here none exists.)
+                if is_version_zero(&coarsened) {
+                    return String::new();
+                }
+                format!("{product}/{coarsened}")
+            }
             Self::Off => String::new(),
         }
     }
@@ -109,14 +121,14 @@ impl SoftwareVersionDetail {
 /// {"kind": "reported", "product": "dig-node", "version": "0.99.1", "raw": "dig-node/0.99.1"}
 /// ```
 ///
-/// Unknown carries no `version` member at all — never `"0.0.0"`, never `""`, never `null` in a
+/// Unknown carries no `version` member at all — never version zero, never `""`, never `null` in a
 /// field a consumer might read as a version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PeerSoftware {
-    /// The peer's build is not known: it advertised nothing, advertised the legacy `"0.0.0"`
-    /// sentinel, or advertised something this contract cannot parse. See [`PeerSoftware::parse`]
-    /// for why those three are one case.
+    /// The peer's build is not known: it advertised nothing, advertised VERSION ZERO — the legacy
+    /// sentinel, in any decoration (`0.0.0`, `0.0.0-rc.1`, `0.0.0+build`) — or advertised something
+    /// this contract cannot parse. See [`PeerSoftware::parse`] for why those three are one case.
     Unknown,
     /// The peer advertised a well-formed `product/semver` build.
     Reported {
@@ -137,13 +149,19 @@ pub enum PeerSoftware {
     },
 }
 
-/// The legacy sentinel every peer built before dig_ecosystem#2215 advertises.
+/// Is this VERSION ZERO — the legacy "no version" sentinel, whatever it is dressed in?
 ///
-/// Three of dig-gossip's four handshake send sites hardcoded this literal (the outbound dial and
-/// both introducer dials), so it is not a hypothetical value — it is what the live fleet is sending
-/// right now. It means "this build predates the field", which is [`PeerSoftware::Unknown`], and
-/// mapping it to a *version* would make the whole existing network read as ancient.
-const LEGACY_UNVERSIONED_SENTINEL: &str = "0.0.0";
+/// Three of dig-gossip's four handshake send sites hardcoded `"0.0.0"` before dig_ecosystem#2215,
+/// so version zero is not a hypothetical value: it is what the live fleet is sending right now. It
+/// means "this build predates the field", which is [`PeerSoftware::Unknown`]; mapping it to a
+/// *version* would make the whole existing network read as ancient.
+///
+/// The test is over the major/minor/patch TRIPLE, ignoring any pre-release or build metadata. A
+/// peer advertising `0.0.0-rc.1` is no more versioned than one advertising `0.0.0`, and matching
+/// the bare string would let the decorated forms through as real builds at version zero.
+fn is_version_zero(version: &semver::Version) -> bool {
+    version.major == 0 && version.minor == 0 && version.patch == 0
+}
 
 /// The separator between the product and the version in a `product/semver` advertisement.
 const PRODUCT_VERSION_SEPARATOR: char = '/';
@@ -151,28 +169,37 @@ const PRODUCT_VERSION_SEPARATOR: char = '/';
 impl PeerSoftware {
     /// Interpret a peer's advertised `software_version` string.
     ///
-    /// Returns [`Unknown`](PeerSoftware::Unknown) for an empty or blank string, for the legacy
-    /// `"0.0.0"` sentinel, and for anything that is not `product/semver` with both
-    /// parts non-empty and the version parsing as semver. A version that is *itself* the legacy
-    /// sentinel (`dig-node/0.0.0`) is also Unknown: the sentinel means "unversioned" whether or not
-    /// a product name was attached to it.
+    /// Returns [`Unknown`](PeerSoftware::Unknown) for an empty or blank string, for anything that
+    /// is not `product/semver` with both parts non-empty and the version parsing as semver, and for
+    /// any advertisement whose version is VERSION ZERO.
+    ///
+    /// Version zero is the legacy sentinel and is matched as a CLASS, not as a string: the bare
+    /// `0.0.0`, a product-qualified `dig-node/0.0.0`, and every decorated form (`0.0.0-rc.1`,
+    /// `0.0.0+build`, `0.0.0-0`) all mean "unversioned". A peer advertising `0.0.0-rc.1` is no more
+    /// versioned than one advertising `0.0.0`.
     ///
     /// A product name may contain `/`; the split is at the LAST separator.
     pub fn parse(advertised: &str) -> Self {
         let raw = advertised.trim();
 
         // No separator at all: an empty advertisement, a bare version, a product with no version,
-        // or the bare legacy `"0.0.0"` sentinel — which contains no `/` and so lands here rather
-        // than needing a clause of its own. None of them name a build.
+        // or a bare version-zero sentinel (`0.0.0`, `0.0.0-rc.1`) — none of which contain a `/`, so
+        // they land here rather than needing a clause of their own. None of them name a build.
         let Some((product, version)) = raw.rsplit_once(PRODUCT_VERSION_SEPARATOR) else {
             return Self::Unknown;
         };
-        if product.is_empty() || version == LEGACY_UNVERSIONED_SENTINEL {
+        if product.is_empty() {
             return Self::Unknown;
         }
         let Ok(version) = version.parse::<semver::Version>() else {
             return Self::Unknown;
         };
+        // The sentinel is VERSION ZERO, a class — not the three-character string. Comparing the
+        // PARSED version is what makes `0.0.0+build`, `0.0.0-rc.1`, and `0.0.0-0` Unknown too; a
+        // string comparison would report each of them as a real build at version zero.
+        if is_version_zero(&version) {
+            return Self::Unknown;
+        }
 
         Self::Reported {
             product: product.to_string(),
@@ -699,6 +726,19 @@ mod tests {
         }
     }
 
+    struct PartialOrdProbe<T>(core::marker::PhantomData<T>);
+    trait PartialOrdFallback {
+        fn is_partial_ord() -> bool {
+            false
+        }
+    }
+    impl<T> PartialOrdFallback for PartialOrdProbe<T> {}
+    impl<T: PartialOrd> PartialOrdProbe<T> {
+        fn is_partial_ord() -> bool {
+            true
+        }
+    }
+
     /// A version comparison must be unreachable without first destructuring `Reported`, so that a
     /// caller cannot order `Unknown` against a real version — which, since every pre-#2215 peer is
     /// Unknown, would quietly become a verdict about most of the live network.
@@ -844,6 +884,153 @@ mod tests {
             assert_eq!(
                 serde_json::from_str::<SoftwareVersionDetail>(token).unwrap(),
                 mode
+            );
+        }
+    }
+
+    // ---- Gate round 1 regressions (dig_ecosystem#2215) ----
+
+    /// **`PartialOrd` is the hazard the `Ord` probe misses.** `Ord: PartialOrd`, so a type can
+    /// derive only `PartialOrd` — satisfying an `Ord`-only probe — while `Unknown < Reported(..)`
+    /// still compiles and evaluates. That one-word derive would sort `Unknown` below every real
+    /// version, which is the verdict-about-the-live-network the contract forbids. SPEC §4.1 names
+    /// all three traits; this pins the weakest of them, which subsumes `Ord`.
+    #[test]
+    fn peer_software_is_not_partially_ordered_either() {
+        assert!(
+            PartialOrdProbe::<f64>::is_partial_ord(),
+            "control: the probe must detect a type that IS PartialOrd but NOT Ord, or it proves              nothing about the gap between the two"
+        );
+        assert!(
+            PartialOrdProbe::<u32>::is_partial_ord(),
+            "control: a fully-ordered type must also be detected"
+        );
+        assert!(
+            !PartialOrdProbe::<PeerSoftware>::is_partial_ord(),
+            "PeerSoftware must implement neither PartialOrd nor Ord"
+        );
+    }
+
+    /// **The sentinel is VERSION ZERO, a class — not the three-character string `\"0.0.0\"`.**
+    /// The constant's doc, `parse`'s doc, and SPEC §4.1 all state the rule over the class, so a
+    /// string comparison lets `0.0.0+build`, `0.0.0-rc.1`, and `0.0.0-0` through as a *reported*
+    /// version zero — the exact reading every one of those three prose statements forbids.
+    #[test]
+    fn version_zero_is_unknown_however_it_is_decorated() {
+        for raw in [
+            "dig-node/0.0.0",
+            "dig-node/0.0.0+build",
+            "dig-node/0.0.0-rc.1",
+            "x/0.0.0-0",
+            "dig-node/0.0.0-alpha+sha.abc123",
+        ] {
+            assert_eq!(
+                PeerSoftware::parse(raw),
+                PeerSoftware::Unknown,
+                "{raw:?} is version zero and must be Unknown"
+            );
+        }
+    }
+
+    /// A version that is merely CLOSE to zero is still a real build and must be reported — without
+    /// this, a parser that mapped everything below `0.1.0` to Unknown would pass the test above.
+    #[test]
+    fn a_nonzero_version_near_zero_is_still_reported() {
+        for raw in ["dig-node/0.0.1", "dig-node/0.1.0", "dig-node/0.0.1-rc.1"] {
+            assert_ne!(
+                PeerSoftware::parse(raw),
+                PeerSoftware::Unknown,
+                "{raw:?} is a real build, not the sentinel"
+            );
+        }
+    }
+
+    /// **`render`'s stated invariant, tested over the class it is stated over.**
+    ///
+    /// The doc promises: every rendering is either the empty string or a value `parse` reads back
+    /// as `Reported`. A `1.4.7` fixture cannot see the case that breaks it — a `0.0.x` build, whose
+    /// `MAJOR.MINOR.0` coarsening IS version zero and therefore reads as Unknown. That is the same
+    /// Minor-collapses-into-Off defect as the two-part spelling, arriving through the other door.
+    #[test]
+    fn every_rendering_is_empty_or_readable() {
+        let versions = [
+            "0.0.1",
+            "0.0.7",
+            "0.0.99", // the class the 1.4.7 fixture cannot see
+            "0.1.0",
+            "0.99.1",
+            "1.0.0",
+            "1.4.7",
+            "10.20.30",
+            "1.0.0-nightly.20260805+sha.abc123",
+            "0.0.1-rc.1",
+        ];
+        for mode in [
+            SoftwareVersionDetail::Full,
+            SoftwareVersionDetail::Minor,
+            SoftwareVersionDetail::Off,
+        ] {
+            for v in versions {
+                let rendered = mode.render("dig-node", &v.parse().unwrap());
+                if rendered.is_empty() {
+                    continue;
+                }
+                assert_ne!(
+                    PeerSoftware::parse(&rendered),
+                    PeerSoftware::Unknown,
+                    "{mode:?} rendered {rendered:?} for {v}, which reads back as Unknown — a                      non-empty rendering must always be readable"
+                );
+            }
+        }
+    }
+
+    /// `Minor` on a `0.0.x` build advertises NOTHING, deliberately.
+    ///
+    /// Hiding the patch of a `0.0.x` version leaves only version zero, which the wire reserves as
+    /// the "unknown" sentinel. There is no coarser representable value, so the honest rendering is
+    /// the empty string rather than the sentinel dressed up as a report. This differs from the
+    /// `0.99` case: there a representable coarse value existed and the wrong spelling was chosen;
+    /// here none exists.
+    #[test]
+    fn minor_of_a_zero_zero_build_advertises_nothing_rather_than_the_sentinel() {
+        let rendered = SoftwareVersionDetail::Minor.render("dig-node", &"0.0.7".parse().unwrap());
+        assert_eq!(rendered, "");
+        assert_ne!(
+            rendered, "dig-node/0.0.0",
+            "the sentinel must never be ADVERTISED; it is only ever received from a legacy peer"
+        );
+    }
+
+    /// **Tripwire, not a guard.** `raw` is reconstructible from `product` + `version` for every
+    /// string the current grammar accepts, because `semver::Version` re-renders losslessly. This
+    /// asserts that equivalence deliberately.
+    ///
+    /// **When this test FAILS, `raw` has become load-bearing** — the grammar has started accepting
+    /// something non-canonical (a `v` prefix, a two-part version, a vendor suffix) and `raw` is now
+    /// the only record of what the peer actually sent. Do not "fix" it by deleting the field;
+    /// replace this test with real assertions on the divergent inputs.
+    #[test]
+    fn raw_is_still_reconstructible_from_the_parsed_parts() {
+        for advertised in [
+            "dig-node/0.0.1",
+            "dig-node/0.99.1",
+            "dig-node/1.0.0-nightly.20260805",
+            "dig-node/1.0.0+sha.abc123",
+            "dig-node/1.0.0-rc.1+build.7",
+            "acme/dig-node/1.2.3",
+        ] {
+            let PeerSoftware::Reported {
+                product,
+                version,
+                raw,
+            } = PeerSoftware::parse(advertised)
+            else {
+                panic!("{advertised:?} must be Reported");
+            };
+            assert_eq!(
+                raw,
+                format!("{product}/{version}"),
+                "raw diverged from the parsed parts for {advertised:?} — `raw` is now                  load-bearing; see this test's doc comment before changing anything"
             );
         }
     }

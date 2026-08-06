@@ -143,17 +143,26 @@ a struct over them.
   |---|---|
   | `product/semver`, both parts non-empty, version parsing as semver | `reported` |
   | `""` (the peer advertised nothing, or coarsened its build off) | `unknown` |
-  | `"0.0.0"` — the LEGACY SENTINEL | `unknown` |
-  | `product/0.0.0` | `unknown` |
+  | any advertisement whose version is VERSION ZERO — the LEGACY SENTINEL | `unknown` |
   | anything else unparseable | `unknown` |
 
   The product/version split is at the LAST `/`, so a product name may itself contain one.
   Surrounding whitespace is trimmed before parsing.
 
-  **Why `"0.0.0"` is `unknown` and not a version.** Every dig-node built before this contract
+  **Version zero is a CLASS, not a string.** The rule MUST be applied to the parsed
+  major/minor/patch triple, ignoring pre-release and build metadata: the bare `0.0.0`, a
+  product-qualified `dig-node/0.0.0`, and every decorated form (`0.0.0-rc.1`, `0.0.0+build`,
+  `0.0.0-0`) are all `unknown`. A string comparison would let the decorated forms through as real
+  builds at version zero.
+
+  **Why version zero is `unknown` and not a version.** Every dig-node built before this contract
   advertises the literal `"0.0.0"`: three of dig-gossip's four handshake send sites hardcoded it. A
   reader that treated it as a version would classify the entire live network as running software
   0.0.0, and any `>=` comparison would call all of it ancient.
+
+  **Version zero MUST NEVER BE ADVERTISED.** It is a value received from a legacy peer, never one a
+  conforming node sends — see `SoftwareVersionDetail` below for the one place that constraint
+  binds.
 
   **`PeerSoftware` MUST NOT implement `Ord`, `PartialOrd`, or `Default`.** `unknown` has no position
   on a version line, and most peers are `unknown` today; a comparison is reachable only after
@@ -172,10 +181,17 @@ a struct over them.
   | `full` | `dig-node/0.99.1` | `reported`, exact |
   | `minor` | `dig-node/0.99.0` | `reported`, patch level hidden |
   | `off` | `""` | `unknown` |
+  | `minor` of a `0.0.x` build | `""` | `unknown` |
 
   `minor` MUST render `MAJOR.MINOR.0`, never a bare `MAJOR.MINOR`: a two-part version is not valid
   semver, so the coarse setting would be read as `unknown` and become a confusing second spelling of
-  `off`. `minor` MUST also strip pre-release and build metadata — a nightly identifier is more
+  `off`. For the same reason, `minor` of a `0.0.x` build MUST render the EMPTY STRING: its
+  coarsening is version zero, which is the `unknown` sentinel, and there is no coarser representable
+  value — so it advertises nothing rather than advertising the sentinel as if it were a report.
+
+  The binding invariant: **every rendering is either the empty string or a value that reads back as
+  `reported`.** Coarsening reduces precision; it never yields a value that reads as `unknown` while
+  looking like a report. `minor` MUST also strip pre-release and build metadata — a nightly identifier is more
   precisely identifying than the patch number beside it, so retaining it would coarsen nothing for
   exactly the builds that most want it. A coarsened `1.4.0` is indistinguishable from a genuine
   `1.4.0`; that is the purpose of coarsening, not a defect in it.
