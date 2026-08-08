@@ -229,6 +229,45 @@ pub struct WalletBalanceParams {
 }
 control_call!(WalletBalanceParams => ControlMethod::WalletBalance, results::WalletBalanceResult);
 
+/// `control.wallet.coins` params: which address + asset to read spendable coins for.
+///
+/// Field-for-field identical to [`WalletBalanceParams`] — a balance is this read reduced to a sum —
+/// and byte-identical to dig-app's frozen `CoinsRequest`, so adopting the method is a body swap
+/// rather than a re-shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinsParams {
+    /// The `xch1…` address to read coins for.
+    pub address: String,
+    /// The asset to read coins for.
+    pub asset: Asset,
+}
+control_call!(WalletCoinsParams => ControlMethod::WalletCoins, results::WalletCoinsResult);
+
+/// `control.wallet.peak` params — none.
+///
+/// The peak is a property of the node's chain view, not of any address, which is exactly why it is
+/// its own method: [`results::WalletBalanceResult::peak_height`] is `null` on every fallback-tier
+/// answer, so a caller bounding a claimed confirmation cannot rely on getting one from a balance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletPeakParams {}
+control_call!(WalletPeakParams => ControlMethod::WalletPeak, results::WalletPeakResult);
+
+/// `control.wallet.broadcast` params: an ALREADY-SIGNED spend bundle to push.
+///
+/// # The custody boundary (§908)
+///
+/// This carries signed bytes and nothing else. There is deliberately no key, no seed, no phrase and
+/// no unsigned-spend-plus-key field here, and there never may be: the node's role on the money path
+/// is to read chain state and to push what somebody else signed. A parameter that let the node
+/// produce a signature would move custody into an identity-agnostic daemon, which is the one thing
+/// the boundary exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletBroadcastParams {
+    /// The signed spend bundle: lowercase hex of its chia `Streamable` serialization.
+    pub signed_bundle_hex: String,
+}
+control_call!(WalletBroadcastParams => ControlMethod::WalletBroadcast, results::WalletBroadcastResult);
+
 /// `pairing.request` params (OPEN — no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestParams {

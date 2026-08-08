@@ -51,7 +51,8 @@ pub enum Category {
     Peers,
     /// The node's subscribed-store set.
     Subscriptions,
-    /// Read-only wallet chain reads (balance).
+    /// Wallet chain transport: the read-only chain views (balance, coins, peak) plus the push of
+    /// an already-signed spend bundle.
     Wallet,
 }
 
@@ -133,9 +134,15 @@ pub enum ControlMethod {
     /// `control.listSubscriptions` — the node's persisted subscription set.
     ListSubscriptions,
 
-    // ---- Wallet (READ-only, delegated to the engine) ----
+    // ---- Wallet chain transport (delegated to the engine) ----
     /// `control.wallet.balance` — read an address's confirmed spendable balance for an asset.
     WalletBalance,
+    /// `control.wallet.coins` — read an address's spendable coin records for an asset.
+    WalletCoins,
+    /// `control.wallet.peak` — read the node's current chain peak height.
+    WalletPeak,
+    /// `control.wallet.broadcast` — push an ALREADY-SIGNED spend bundle to the network.
+    WalletBroadcast,
 
     // ---- Pairing bootstrap (OPEN — no token) ----
     /// `pairing.request` — request a control-token pairing (returns a code to compare).
@@ -176,6 +183,9 @@ impl ControlMethod {
             ControlMethod::Unsubscribe => "control.unsubscribe",
             ControlMethod::ListSubscriptions => "control.listSubscriptions",
             ControlMethod::WalletBalance => "control.wallet.balance",
+            ControlMethod::WalletCoins => "control.wallet.coins",
+            ControlMethod::WalletPeak => "control.wallet.peak",
+            ControlMethod::WalletBroadcast => "control.wallet.broadcast",
             ControlMethod::PairingRequest => "pairing.request",
             ControlMethod::PairingPoll => "pairing.poll",
         }
@@ -191,12 +201,37 @@ impl ControlMethod {
 
     /// Does calling this method require the local control token?
     ///
-    /// Every `control.*` method is token-gated; the two OPEN pairing-bootstrap methods
-    /// (`pairing.request` / `pairing.poll`) are not, so a token-less client can obtain a token.
+    /// Three groups are reachable WITHOUT one, and they are open for two different reasons:
+    ///
+    /// - the pairing bootstrap (`pairing.request` / `pairing.poll`), so a token-less client can
+    ///   obtain a token at all;
+    /// - the wallet CHAIN READS ([`Category::Wallet`] minus the push), because each needs only a
+    ///   PUBLIC address — never a seed, a key, or a signature — and dig-node has served
+    ///   `control.wallet.balance` open since #1851. A person whose node runs as a service with an
+    ///   unreadable token file can still see their own money.
+    ///
+    /// `control.wallet.broadcast` is deliberately NOT in that second group. It puts bytes on the
+    /// network, so the token is what stands between a local process and a broadcast, and its
+    /// refusal genuinely means *unauthorized* — see [`ControlMethod::is_open_read`].
     pub const fn requires_auth(self) -> bool {
-        !matches!(
+        !self.is_open_read()
+            && !matches!(
+                self,
+                ControlMethod::PairingRequest | ControlMethod::PairingPoll
+            )
+    }
+
+    /// Is this an OPEN chain read — served without a control token?
+    ///
+    /// Stated on the contract rather than discovered by calling, because the two refusals a client
+    /// can get here demand OPPOSITE remedies. On an open read, `UNAUTHORIZED` can only come from a
+    /// node build that predates the method and gates it generically, so the remedy is an upgrade.
+    /// On a gated method — the push — `UNAUTHORIZED` means exactly what it says, and the remedy is
+    /// the token. A client that maps the two the same way sends somebody to fix the wrong thing.
+    pub const fn is_open_read(self) -> bool {
+        matches!(
             self,
-            ControlMethod::PairingRequest | ControlMethod::PairingPoll
+            ControlMethod::WalletBalance | ControlMethod::WalletCoins | ControlMethod::WalletPeak
         )
     }
 
@@ -223,7 +258,10 @@ impl ControlMethod {
             | ControlMethod::Subscribe
             | ControlMethod::Unsubscribe
             | ControlMethod::ListSubscriptions
-            | ControlMethod::WalletBalance => Routing::Delegated,
+            | ControlMethod::WalletBalance
+            | ControlMethod::WalletCoins
+            | ControlMethod::WalletPeak
+            | ControlMethod::WalletBroadcast => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
             _ => Routing::Owned,
         }
@@ -259,7 +297,10 @@ impl ControlMethod {
             ControlMethod::Subscribe
             | ControlMethod::Unsubscribe
             | ControlMethod::ListSubscriptions => Category::Subscriptions,
-            ControlMethod::WalletBalance => Category::Wallet,
+            ControlMethod::WalletBalance
+            | ControlMethod::WalletCoins
+            | ControlMethod::WalletPeak
+            | ControlMethod::WalletBroadcast => Category::Wallet,
         }
     }
 
@@ -293,6 +334,9 @@ impl ControlMethod {
             ControlMethod::Subscribe => "Subscribe the node to a store it actively watches and gap-fills.",
             ControlMethod::Unsubscribe => "Stop watching a store.",
             ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
+            ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
+            ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
+            ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
@@ -330,6 +374,9 @@ impl ControlMethod {
         ControlMethod::Unsubscribe,
         ControlMethod::ListSubscriptions,
         ControlMethod::WalletBalance,
+        ControlMethod::WalletCoins,
+        ControlMethod::WalletPeak,
+        ControlMethod::WalletBroadcast,
         ControlMethod::PairingRequest,
         ControlMethod::PairingPoll,
     ];
@@ -360,16 +407,51 @@ mod tests {
     }
 
     #[test]
-    fn only_pairing_bootstrap_is_open() {
+    fn the_token_less_surface_is_exactly_the_bootstrap_plus_the_chain_reads() {
+        // Written out rather than derived from `is_open_read`, so this pins the SET and not the
+        // implementation's opinion of itself. A method added to the open surface must be added
+        // here deliberately -- which is the review step a broadcast must never slip past.
+        let expected_open: BTreeSet<&str> = [
+            "pairing.request",
+            "pairing.poll",
+            "control.wallet.balance",
+            "control.wallet.coins",
+            "control.wallet.peak",
+        ]
+        .into_iter()
+        .collect();
+        let actual_open: BTreeSet<&str> = ControlMethod::ALL
+            .iter()
+            .filter(|m| !m.requires_auth())
+            .map(|m| m.name())
+            .collect();
+        assert_eq!(actual_open, expected_open);
+    }
+
+    /// **The push is token-gated, and no other wallet method is.** The fixture varies one thing --
+    /// which wallet method is asked -- against a category whose other three members ARE open, so an
+    /// implementation that opened the whole category (the nearest wrong one) fails here.
+    #[test]
+    fn the_push_is_the_one_wallet_method_behind_the_token() {
+        let gated: Vec<&str> = ControlMethod::ALL
+            .iter()
+            .filter(|m| m.category() == Category::Wallet && m.requires_auth())
+            .map(|m| m.name())
+            .collect();
+        assert_eq!(gated, vec!["control.wallet.broadcast"]);
+        assert!(!ControlMethod::WalletBroadcast.is_open_read());
+    }
+
+    #[test]
+    fn only_pairing_bootstrap_is_open_bootstrap_routed() {
         for &m in ControlMethod::ALL {
-            let open = matches!(
+            let open_bootstrap = matches!(
                 m,
                 ControlMethod::PairingRequest | ControlMethod::PairingPoll
             );
-            assert_eq!(m.requires_auth(), !open, "{} auth mismatch", m.name());
             assert_eq!(
                 m.routing() == Routing::OpenBootstrap,
-                open,
+                open_bootstrap,
                 "{} routing mismatch",
                 m.name()
             );
@@ -401,6 +483,9 @@ mod tests {
             .map(|m| m.name())
             .collect();
         let expected: BTreeSet<&str> = [
+            "control.wallet.coins",
+            "control.wallet.peak",
+            "control.wallet.broadcast",
             "control.peerStatus",
             "control.peers.connect",
             "control.peers.disconnect",

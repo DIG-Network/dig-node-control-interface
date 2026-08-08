@@ -197,6 +197,25 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletBalanceParams,
     ) -> Result<results::WalletBalanceResult, ControlError>;
+    /// `control.wallet.coins` (READ-only, OPEN)
+    ///
+    /// An empty `coins` list MUST mean "a chain was consulted and this address holds nothing".
+    /// A read that could not consult a chain MUST return the matching catalogued error instead.
+    async fn wallet_coins(
+        &self,
+        params: params::WalletCoinsParams,
+    ) -> Result<results::WalletCoinsResult, ControlError>;
+    /// `control.wallet.peak` (READ-only, OPEN)
+    async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
+    /// `control.wallet.broadcast` (TOKEN-GATED)
+    ///
+    /// Pushes an ALREADY-SIGNED bundle: the implementation never signs, and never receives anything
+    /// it could sign with (§908). A mempool refusal is `Ok` with `accepted: false`; failing to
+    /// reach a mempool is `Err`.
+    async fn wallet_broadcast(
+        &self,
+        params: params::WalletBroadcastParams,
+    ) -> Result<results::WalletBroadcastResult, ControlError>;
     /// `pairing.request` (OPEN)
     async fn pairing_request(
         &self,
@@ -285,6 +304,9 @@ pub trait ControlHandler: Sync {
             ControlMethod::Unsubscribe => encode(self.unsubscribe(decode(params)?).await?),
             ControlMethod::ListSubscriptions => encode(self.list_subscriptions().await?),
             ControlMethod::WalletBalance => encode(self.wallet_balance(decode(params)?).await?),
+            ControlMethod::WalletCoins => encode(self.wallet_coins(decode(params)?).await?),
+            ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
+            ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),
             ControlMethod::PairingPoll => encode(self.pairing_poll(decode(params)?).await?),
         }
