@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.6.0] - 2026-08-08
+
+### Features
+- **control:** Wallet coin read, peak height and signed-bundle push (#6)
+
 ## [0.5.0] - 2026-08-06
 
 ### Features
