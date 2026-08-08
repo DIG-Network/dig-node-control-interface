@@ -16,6 +16,10 @@ use crate::params::*;
 use crate::results;
 use crate::traits::{build_request, parse_response, ControlHandler};
 
+/// The one bundle [`MockNode`] refuses, so the accepted and rejected branches are both reachable
+/// from the SAME handler — a mock that could only accept could not express a refusal at all.
+const REJECTED_BUNDLE: &str = "beef";
+
 const STORE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ROOT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -116,6 +120,23 @@ fn golden_request_vectors() {
         },
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.balance","params":{"address":"xch1exampleaddr","asset":"dig"}}),
     );
+    assert_request(
+        &WalletCoinsParams {
+            address: "xch1exampleaddr".into(),
+            asset: Asset::Xch,
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coins","params":{"address":"xch1exampleaddr","asset":"xch"}}),
+    );
+    assert_request(
+        &WalletPeakParams {},
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.peak","params":{}}),
+    );
+    assert_request(
+        &WalletBroadcastParams {
+            signed_bundle_hex: "deadbeef".into(),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.broadcast","params":{"signed_bundle_hex":"deadbeef"}}),
+    );
 }
 
 #[test]
@@ -166,6 +187,31 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::WalletBalanceResult>(json!({
         "balance": 1234u64, "pending": 0u64,
         "source": "db", "synced": true, "peak_height": 5000000u32
+    }));
+    assert_result_round_trips::<results::WalletCoinsResult>(json!({
+        "coins": [{
+            "coin_id": "aa".repeat(32), "asset": "xch", "amount": 1_750_000_000_000u64,
+            "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
+            "created_height": 5_000_000u32, "spent_height": null
+        }],
+        "source": "db", "synced": true, "peak_height": 5_000_000u32
+    }));
+    // A chain that was consulted and holds nothing. It must be expressible as a SUCCESS, because
+    // that is the only shape that leaves "unreachable" free to be an error.
+    assert_result_round_trips::<results::WalletCoinsResult>(json!({
+        "coins": [], "source": "fallback", "synced": false, "peak_height": null
+    }));
+    assert_result_round_trips::<results::WalletPeakResult>(json!({
+        "peak_height": 5_000_000u32, "synced": true
+    }));
+    assert_result_round_trips::<results::WalletPeakResult>(json!({
+        "peak_height": null, "synced": false
+    }));
+    assert_result_round_trips::<results::WalletBroadcastResult>(json!({
+        "accepted": true, "transaction_id": "dd".repeat(32), "rejection": null
+    }));
+    assert_result_round_trips::<results::WalletBroadcastResult>(json!({
+        "accepted": false, "transaction_id": null, "rejection": "DOUBLE_SPEND"
     }));
     // A fallback-tier answer: `synced` is false and `peak_height` is present as `null` (never
     // omitted), because neither describes a figure the node's own replica did not produce.
@@ -474,6 +520,55 @@ impl ControlHandler for MockNode {
             peak_height: Some(5_000_000),
         })
     }
+    /// Echoes the REQUEST into the coin so a mis-routed dispatch cannot look like a hit: the coin
+    /// id carries the address and the amount carries the asset.
+    async fn wallet_coins(
+        &self,
+        params: WalletCoinsParams,
+    ) -> Result<results::WalletCoinsResult, ControlError> {
+        Ok(results::WalletCoinsResult {
+            coins: vec![results::WalletCoinRecord {
+                coin_id: params.address,
+                asset: params.asset,
+                amount: match params.asset {
+                    Asset::Xch => 1,
+                    Asset::Dig => 2,
+                },
+                parent_coin_info: "11".repeat(32),
+                puzzle_hash: "22".repeat(32),
+                created_height: Some(5_000_000),
+                spent_height: None,
+            }],
+            source: Some(results::WalletReadSource::Db),
+            synced: true,
+            peak_height: Some(5_000_000),
+        })
+    }
+    async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError> {
+        Ok(results::WalletPeakResult {
+            peak_height: Some(5_000_000),
+            synced: true,
+        })
+    }
+    /// Accepts anything except [`REJECTED_BUNDLE`], which it refuses the way a mempool does — as a
+    /// successful call reporting a refusal, never as an error.
+    async fn wallet_broadcast(
+        &self,
+        params: WalletBroadcastParams,
+    ) -> Result<results::WalletBroadcastResult, ControlError> {
+        if params.signed_bundle_hex == REJECTED_BUNDLE {
+            return Ok(results::WalletBroadcastResult {
+                accepted: false,
+                transaction_id: None,
+                rejection: Some("DOUBLE_SPEND".into()),
+            });
+        }
+        Ok(results::WalletBroadcastResult {
+            accepted: true,
+            transaction_id: Some("cc".repeat(32)),
+            rejection: None,
+        })
+    }
     async fn pairing_request(
         &self,
         _params: RequestParams,
@@ -729,5 +824,165 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::PairingPoll => json!({"pairing_id": "x"}),
         ControlMethod::WalletBalance => json!({"address": "xch1abc", "asset": "dig"}),
         _ => json!({}),
+    }
+}
+
+/// **The three new methods reach their own handlers, over the real dispatcher.**
+///
+/// Each assertion is keyed to something only THAT handler could have produced — the coin echoes the
+/// address and asset it was asked for — so an arm wired to the neighbouring method fails here
+/// rather than passing on a shape both happen to share.
+#[test]
+fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
+    let coins = round_trip(&WalletCoinsParams {
+        address: "xch1mintfunder".into(),
+        asset: Asset::Dig,
+    })
+    .expect("coins must route");
+    assert_eq!(coins.coins[0].coin_id, "xch1mintfunder");
+    assert_eq!(coins.coins[0].asset, Asset::Dig);
+    assert_eq!(
+        coins.coins[0].amount, 2,
+        "the DIG amount proves the ASSET reached the handler, not just the address"
+    );
+
+    assert_eq!(
+        round_trip(&WalletPeakParams {})
+            .expect("peak must route")
+            .peak_height,
+        Some(5_000_000)
+    );
+
+    let pushed = round_trip(&WalletBroadcastParams {
+        signed_bundle_hex: "deadbeef".into(),
+    })
+    .expect("broadcast must route");
+    assert!(pushed.accepted);
+    assert_eq!(pushed.rejection, None);
+}
+
+/// **A mempool refusal is a successful call.** The nearest wrong implementation maps a refusal onto
+/// the error channel, where it becomes indistinguishable from a network that could not be reached —
+/// and the two demand opposite remedies (retry this bundle, versus build a different one).
+///
+/// The fixture varies ONE thing against the accepting case above: which bundle is pushed.
+#[test]
+fn a_mempool_refusal_arrives_as_a_value_not_as_an_error() {
+    let outcome = round_trip(&WalletBroadcastParams {
+        signed_bundle_hex: REJECTED_BUNDLE.into(),
+    })
+    .expect("a refusal must arrive on the Ok channel, never as a control error");
+
+    assert!(!outcome.accepted);
+    assert_eq!(outcome.rejection.as_deref(), Some("DOUBLE_SPEND"));
+    assert_eq!(
+        outcome.transaction_id, None,
+        "a refused bundle has no transaction to report"
+    );
+}
+
+/// **dig-app's frozen shapes read our results losslessly.** These local structs are transcribed
+/// from `dig-app-core::wallet::engine` — the consumer's own types, which this crate cannot depend
+/// on — so the superset relationship is proven here rather than assumed at adoption time.
+///
+/// Written as SEPARATE structs, not as a field-name string comparison: a name check would pass on a
+/// field whose TYPE had drifted, and `amount: u64` versus a string is exactly the drift a
+/// hand-copied contract produces.
+#[test]
+fn dig_apps_frozen_engine_shapes_deserialize_our_wallet_results() {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct AppCoinRecord {
+        coin_id: String,
+        asset: Asset,
+        amount: u64,
+    }
+    #[derive(Debug, Deserialize)]
+    struct AppCoinsResponse {
+        coins: Vec<AppCoinRecord>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct AppBroadcastResponse {
+        accepted: bool,
+        #[serde(default)]
+        transaction_id: Option<String>,
+    }
+
+    let coins = serde_json::to_value(results::WalletCoinsResult {
+        coins: vec![results::WalletCoinRecord {
+            coin_id: "aa".repeat(32),
+            asset: Asset::Dig,
+            amount: 2_000_000_000_000,
+            parent_coin_info: "bb".repeat(32),
+            puzzle_hash: "cc".repeat(32),
+            created_height: Some(5_000_000),
+            spent_height: None,
+        }],
+        source: Some(results::WalletReadSource::Db),
+        synced: true,
+        peak_height: Some(5_000_000),
+    })
+    .unwrap();
+    let read: AppCoinsResponse =
+        serde_json::from_value(coins).expect("dig-app must read our coins");
+    assert_eq!(
+        read.coins,
+        vec![AppCoinRecord {
+            coin_id: "aa".repeat(32),
+            asset: Asset::Dig,
+            amount: 2_000_000_000_000,
+        }]
+    );
+
+    let pushed = serde_json::to_value(results::WalletBroadcastResult {
+        accepted: true,
+        transaction_id: Some("dd".repeat(32)),
+        rejection: None,
+    })
+    .unwrap();
+    let read: AppBroadcastResponse =
+        serde_json::from_value(pushed).expect("dig-app must read our broadcast outcome");
+    assert!(read.accepted);
+    assert_eq!(read.transaction_id, Some("dd".repeat(32)));
+}
+
+/// The wallet failure codes are the ones dig-node already emits, pinned by NUMBER and SYMBOL.
+///
+/// They live here so a client branches on the contract's constant instead of retyping the literal —
+/// the drift dig-app's own review caught itself doing (dig-app#109), and which no fixture could
+/// have caught, because the fixture would have retyped the same literal.
+#[test]
+fn the_wallet_failure_codes_match_the_nodes_catalogue() {
+    for (code, number, symbol) in [
+        (
+            ControlErrorCode::WalletNoChainSource,
+            -32040,
+            "WALLET_NO_CHAIN_SOURCE",
+        ),
+        (
+            ControlErrorCode::WalletNotSynced,
+            -32041,
+            "WALLET_NOT_SYNCED",
+        ),
+        (
+            ControlErrorCode::WalletReadFailed,
+            -32042,
+            "WALLET_READ_FAILED",
+        ),
+        (
+            ControlErrorCode::WalletRateLimited,
+            -32043,
+            "WALLET_RATE_LIMITED",
+        ),
+    ] {
+        assert_eq!(code.code(), number, "{symbol} number drifted");
+        assert_eq!(code.name(), symbol);
+        assert_eq!(ControlErrorCode::from_code(number), Some(code));
+        assert_eq!(
+            code.origin(),
+            "node",
+            "a wallet read is served by the node's backend, not the shell"
+        );
     }
 }

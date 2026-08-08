@@ -517,6 +517,90 @@ pub enum WalletReadSource {
     Fallback,
 }
 
+/// One spendable coin, as the node's chain read saw it (`control.wallet.coins`).
+///
+/// The first three fields are byte-identical to dig-app's frozen `CoinRecord`, so its
+/// `CoinsResponse` deserializes this losslessly and ignores the rest. The rest is what a spend
+/// actually needs: a coin cannot be spent from an id and an amount alone — the parent and the
+/// puzzle hash are what reconstruct the `Coin` — and the heights are how a caller tells a confirmed
+/// coin from one it only saw in the mempool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinRecord {
+    /// The coin id, lowercase 64-hex, unprefixed.
+    pub coin_id: String,
+    /// The asset this coin is denominated in.
+    pub asset: crate::params::Asset,
+    /// The coin's amount, in the asset's base unit.
+    pub amount: u64,
+    /// The parent coin's id, lowercase 64-hex, unprefixed.
+    pub parent_coin_info: String,
+    /// The coin's puzzle hash, lowercase 64-hex, unprefixed.
+    pub puzzle_hash: String,
+    /// The height the coin was created at, or `null` while it is still only in the mempool.
+    pub created_height: Option<u32>,
+    /// The height the coin was spent at, or `null` when it is unspent.
+    pub spent_height: Option<u32>,
+}
+
+/// `control.wallet.coins` — an address's spendable coins for one asset.
+///
+/// # An empty list is an ANSWER, never a fallback
+///
+/// `coins: []` means the node consulted a chain and that address holds nothing. It is NEVER what a
+/// caller gets when the chain could not be reached: those are catalogued errors
+/// ([`crate::error::ControlErrorCode::WalletNoChainSource`] / `WalletNotSynced` /
+/// `WalletReadFailed` / `WalletRateLimited`). The distinction is the whole point of the method —
+/// a well-shaped empty result on an unreachable chain would tell somebody who holds funds that they
+/// hold nothing, and a spend built on that answer refuses with a shortfall that is not true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinsResult {
+    /// The spendable coins found at the address, possibly empty (see the type docs).
+    pub coins: Vec<WalletCoinRecord>,
+    /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
+    pub source: Option<WalletReadSource>,
+    /// Whether THESE coins reflect a caught-up local view; always `false` for a fallback answer.
+    pub synced: bool,
+    /// The peak height these coins reflect, or `null` when none applies (every fallback answer).
+    pub peak_height: Option<u32>,
+}
+
+/// `control.wallet.peak` — the node's current chain peak height.
+///
+/// `peak_height: null` is an honest "this node tracks no height yet", not a zero. A caller bounding
+/// a claimed confirmation MUST treat it as unknown rather than as height 0, which every block is
+/// trivially above.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletPeakResult {
+    /// The peak block height the node's chain view has reached, or `null` when it has none.
+    pub peak_height: Option<u32>,
+    /// Whether the node's own chain replica is caught up to that peak.
+    pub synced: bool,
+}
+
+/// `control.wallet.broadcast` — the outcome of pushing an already-signed bundle.
+///
+/// # A rejection is a VALUE; an unreachable network is an ERROR
+///
+/// A mempool that looked at the bundle and said no is a successful call with `accepted: false` and
+/// a [`rejection`](Self::rejection) reason — the bundle was seen and judged. Failing to REACH a
+/// mempool is a catalogued error instead. Collapsing the two turns "your wifi dropped" into "your
+/// mint failed", and the remedies are opposite: retry the same bundle, versus build a new one.
+///
+/// # Accepted is not confirmed
+///
+/// `accepted: true` says the mempool took the bundle. It is not evidence that anything reached a
+/// block, and a caller must never record an outcome from it — only a buried confirmation of the
+/// created coin is evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletBroadcastResult {
+    /// Whether the network accepted the bundle into its mempool.
+    pub accepted: bool,
+    /// The transaction id (the spend bundle's name), lowercase 64-hex, when accepted.
+    pub transaction_id: Option<String>,
+    /// Why the mempool refused, when it refused. `null` on acceptance.
+    pub rejection: Option<String>,
+}
+
 /// `pairing.request` — the pairing handshake bootstrap (OPEN, no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequestResult {

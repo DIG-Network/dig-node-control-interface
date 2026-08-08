@@ -93,9 +93,17 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
-| `control.wallet.balance` | yes | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
+| `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
+| `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
+| `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
+| `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
+
+The three wallet CHAIN READS are served WITHOUT a control token, because each needs only a public
+address — never a seed, a key, or a signature. `control.wallet.broadcast` is token-gated: it puts
+bytes on the network. That difference is normative for clients, because the two refusals demand
+opposite remedies — see §4.2.
 
 ### 4.1 Result field definitions
 
@@ -111,6 +119,35 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 - **`CapsuleEntry`**: `{capsule:"storeId:root", root:string, size_bytes:u64, last_used_unix_ms:u64}`.
 - **`pairing.poll` token**: the `token` field MUST be omitted while `status` is not `approved`, and
   present exactly once after approval.
+- **`WalletCoinsResult`**: `{coins:[WalletCoinRecord], source:"db"|"fallback"|null, synced:bool,
+  peak_height:u32|null}`. `source`/`synced`/`peak_height` carry exactly the meanings defined for
+  `WalletBalanceResult` below. `coins` MUST list the address's spendable coins for the requested
+  asset (XCH coins sit AT the puzzle hash; CAT coins are HINTED to it).
+
+  `coins:[]` MUST mean the node consulted a chain and the address holds nothing. A node that could
+  NOT consult a chain MUST return the matching §5 wallet error instead — never an empty list. This
+  is normative and not a quality-of-implementation note: an empty list on an unreachable chain tells
+  a holder of funds that they hold nothing, and a spend built on that answer refuses with a
+  shortfall that is not true.
+- **`WalletCoinRecord`**: `{coin_id:string, asset:"xch"|"dig", amount:u64, parent_coin_info:string,
+  puzzle_hash:string, created_height:u32|null, spent_height:u32|null}`. All hashes are lowercase
+  64-hex, unprefixed. `created_height:null` means the coin is known only from the mempool;
+  `spent_height:null` means unspent. The first three fields are a strict SUPERSET of dig-app's
+  frozen `CoinRecord`.
+- **`WalletPeakResult`**: `{peak_height:u32|null, synced:bool}`. The node's chain peak, independent
+  of any address. `peak_height:null` means the node tracks NO height — it MUST NOT be read as height
+  zero, which every block is trivially above. A caller bounding a claimed confirmation MUST treat
+  `null` as unknown and fail closed.
+- **`WalletBroadcastResult`**: `{accepted:bool, transaction_id:string|null, rejection:string|null}`.
+  The node pushes an ALREADY-SIGNED bundle; it MUST NOT sign, and MUST NOT accept any parameter it
+  could sign with (§4.3).
+
+  A mempool that examined the bundle and refused it is a SUCCESSFUL call reporting
+  `accepted:false` with a `rejection` reason. Failing to REACH a mempool MUST be a §5 error instead.
+  These MUST NOT be collapsed: the first says build a different bundle, the second says retry this
+  one. `accepted:true` reports mempool admission ONLY — it is NOT evidence that anything reached a
+  block, and a caller MUST NOT record an outcome from it. Only a buried confirmation of the created
+  coin is evidence.
 - **`WalletBalanceResult`**: `{balance:u64, pending:u64, source:"db"|"fallback"|null, synced:bool,
   peak_height:u32|null}`. A
   READ-only chain read over the loopback control plane — it reports state, never moves funds. `balance`
@@ -213,6 +250,26 @@ a struct over them.
   it, and `control.peerStatus` covers both the point lookup ("what is that peer running") and the
   census (a group-by over the returned array).
 
+### 4.2 `UNAUTHORIZED` on an open read means an OLD NODE, not a permission problem
+
+A client MUST branch on which method it called:
+
+- On an OPEN read (`control.wallet.balance` / `.coins` / `.peak`), `-32030 UNAUTHORIZED` can only
+  come from a node build that predates the method and gates the whole `control.*` namespace. The
+  truth is "this node cannot do that yet" and the remedy is an UPGRADE.
+- On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is
+  the CONTROL TOKEN.
+
+A client that maps both to the same outcome sends a person to fix the wrong thing. `-32601
+METHOD_NOT_FOUND` always means the method is absent, on either.
+
+### 4.3 The custody boundary (§908)
+
+The node holds no user key and produces no signature. `control.wallet.broadcast` carries signed bytes
+and nothing else: there is no key, seed, phrase, or unsigned-spend-plus-key parameter in this catalog,
+and none may be added. The node's role on the money path is to read chain state and to push what
+somebody else signed.
+
 ## 5. Error taxonomy
 
 The numeric codes are a published wire contract and never change once assigned. `origin` classifies
@@ -228,6 +285,15 @@ where the error was minted.
 | `-32030` | `UNAUTHORIZED` | shell | a `control.*` method called without a valid token |
 | `-32031` | `NOT_SUPPORTED` | shell | control op unsupported on this build (e.g. §21 sync with no identity) |
 | `-32032` | `CONTROL_ERROR` | shell | a control op failed at runtime |
+| `-32040` | `WALLET_NO_CHAIN_SOURCE` | node | a wallet chain read had no live chain source to answer |
+| `-32041` | `WALLET_NOT_SYNCED` | node | a wallet chain read of the wallet's own address is still syncing, with no fallback |
+| `-32042` | `WALLET_READ_FAILED` | node | a wallet chain read failed at the DB / chain-source layer |
+| `-32043` | `WALLET_RATE_LIMITED` | node | a wallet chain read was refused: the open fallback rate bound is spent |
+
+The `-3204x` band is the wallet's. All four wallet codes mean the answer is UNKNOWN. A client MUST
+NOT degrade any of them into an empty or zero result, and MUST NOT report a mint, a spend or a
+balance as having failed on their strength alone — they say the node could not look, not that the
+chain said no.
 
 The `-32020..-32022` band is RESERVED for onion routing (dig-rpc-protocol); the control-plane errors
 use `-32030..-32032`.

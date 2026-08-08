@@ -45,6 +45,17 @@ pub enum ControlErrorCode {
     NotSupported,
     /// `-32032` — a control operation failed at runtime (e.g. a config write or cache op errored).
     ControlError,
+    /// `-32040` — a wallet chain read had NO live chain source able to answer. Reported instead of
+    /// a fabricated empty answer: nothing was consulted, so nothing is known.
+    WalletNoChainSource,
+    /// `-32041` — a wallet chain read of the wallet's OWN address while its local replica is still
+    /// syncing and no fallback is attached: nothing can answer YET.
+    WalletNotSynced,
+    /// `-32042` — a wallet chain read failed at the underlying DB / chain-source layer.
+    WalletReadFailed,
+    /// `-32043` — a wallet chain read was refused because the global fallback rate bound is spent.
+    /// The caller should back off and retry; the answer is unknown, not empty.
+    WalletRateLimited,
 }
 
 impl ControlErrorCode {
@@ -59,6 +70,10 @@ impl ControlErrorCode {
             ControlErrorCode::Unauthorized => -32030,
             ControlErrorCode::NotSupported => -32031,
             ControlErrorCode::ControlError => -32032,
+            ControlErrorCode::WalletNoChainSource => -32040,
+            ControlErrorCode::WalletNotSynced => -32041,
+            ControlErrorCode::WalletReadFailed => -32042,
+            ControlErrorCode::WalletRateLimited => -32043,
         }
     }
 
@@ -73,6 +88,10 @@ impl ControlErrorCode {
             ControlErrorCode::Unauthorized => "UNAUTHORIZED",
             ControlErrorCode::NotSupported => "NOT_SUPPORTED",
             ControlErrorCode::ControlError => "CONTROL_ERROR",
+            ControlErrorCode::WalletNoChainSource => "WALLET_NO_CHAIN_SOURCE",
+            ControlErrorCode::WalletNotSynced => "WALLET_NOT_SYNCED",
+            ControlErrorCode::WalletReadFailed => "WALLET_READ_FAILED",
+            ControlErrorCode::WalletRateLimited => "WALLET_RATE_LIMITED",
         }
     }
 
@@ -80,7 +99,12 @@ impl ControlErrorCode {
     pub const fn origin(self) -> &'static str {
         match self {
             ControlErrorCode::MethodNotFound => "boundary",
-            ControlErrorCode::InvalidParams => "node",
+            // Minted by the node's own wallet backend, matching dig-node's classification.
+            ControlErrorCode::InvalidParams
+            | ControlErrorCode::WalletNoChainSource
+            | ControlErrorCode::WalletNotSynced
+            | ControlErrorCode::WalletReadFailed
+            | ControlErrorCode::WalletRateLimited => "node",
             _ => "shell",
         }
     }
@@ -102,6 +126,18 @@ impl ControlErrorCode {
                 "The requested control operation is not supported on this node build."
             }
             ControlErrorCode::ControlError => "A control operation failed at runtime.",
+            ControlErrorCode::WalletNoChainSource => {
+                "A wallet chain read had no live chain source to answer."
+            }
+            ControlErrorCode::WalletNotSynced => {
+                "A wallet chain read of the wallet's own address is still syncing with no fallback."
+            }
+            ControlErrorCode::WalletReadFailed => {
+                "A wallet chain read failed at the DB / chain-source layer."
+            }
+            ControlErrorCode::WalletRateLimited => {
+                "A wallet chain read was refused: the open fallback rate bound is exhausted."
+            }
         }
     }
 
@@ -123,6 +159,10 @@ impl ControlErrorCode {
         ControlErrorCode::Unauthorized,
         ControlErrorCode::NotSupported,
         ControlErrorCode::ControlError,
+        ControlErrorCode::WalletNoChainSource,
+        ControlErrorCode::WalletNotSynced,
+        ControlErrorCode::WalletReadFailed,
+        ControlErrorCode::WalletRateLimited,
     ];
 }
 
