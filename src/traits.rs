@@ -23,8 +23,8 @@ use crate::results;
 
 /// A typed control call: a params struct that knows its [`ControlMethod`] and its result type.
 ///
-/// Implemented by every struct in [`crate::params`]; this is what makes [`ControlClient::request`]
-/// return the right typed result for each method at compile time.
+/// Implemented by every struct in [`crate::params`]; this is what makes
+/// [`ControlClient::parse_response`] return the right typed result for each method at compile time.
 pub trait ControlCall: Serialize {
     /// The wire method this call invokes.
     const METHOD: ControlMethod;

@@ -20,6 +20,13 @@ use crate::traits::{build_request, parse_response, ControlHandler};
 /// from the SAME handler — a mock that could only accept could not express a refusal at all.
 const REJECTED_BUNDLE: &str = "beef";
 
+/// The one upstream [`MockNode`] refuses, so a handler error stays reachable from the SAME handler
+/// even though `every_catalog_method_dispatches_without_panicking` requires every method to SUCCEED
+/// under its minimal params. The refusal has to hang off a value the minimal fixture never uses;
+/// making a whole method unsupported instead would trip that test, and silencing it there would put
+/// back the tolerate-any-error hole the test exists to close.
+const UNSUPPORTED_UPSTREAM: &str = "__not_supported__";
+
 /// The one coin id [`MockNode`] knows about — SPENT, which is the state `control.wallet.coins`
 /// can never report and the state a mint observation turns on.
 const SPENT_COIN: &str = "abababababababababababababababababababababababababababababababab";
@@ -384,7 +391,7 @@ impl ControlHandler for MockNode {
         &self,
         params: SetUpstreamParams,
     ) -> Result<results::SetUpstreamResult, ControlError> {
-        if params.upstream == "__not_supported__" {
+        if params.upstream == UNSUPPORTED_UPSTREAM {
             return Err(unimpl("config_set_upstream"));
         }
         Ok(results::SetUpstreamResult {
@@ -774,7 +781,7 @@ fn dispatcher_surfaces_a_handler_error_verbatim() {
     let req = build_request(
         RequestId::Number(1),
         &SetUpstreamParams {
-            upstream: "__not_supported__".into(),
+            upstream: UNSUPPORTED_UPSTREAM.into(),
         },
     );
     let resp = block_on(node.dispatch(req));

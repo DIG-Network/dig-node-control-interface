@@ -537,11 +537,16 @@ pub struct WalletCoinRecord {
     /// `null` never means "no asset" and never means XCH by default. It means the answering read
     /// had no basis to say: a singleton, a CAT and a plain XCH coin are indistinguishable from a
     /// coin id alone — telling them apart requires inspecting the puzzle, and the node reads only
-    /// the coin record. So `control.wallet.coinById` always reports `null` here, while
-    /// `control.wallet.coins` reports the concrete asset it was SCOPED to and therefore knows.
+    /// the coin record. So `control.wallet.coinById` MUST report `null` here — emitting a concrete
+    /// asset on an unclassified read would make the node assert a classification it never verified,
+    /// which a caller would then spend against.
     ///
-    /// Emitting a concrete asset on an unclassified read would make the node assert a
-    /// classification it never verified, which a caller would then spend against.
+    /// `control.wallet.coins` MUST report the concrete asset it was SCOPED to and MUST NOT emit
+    /// `null`. This field is optional only to serve the by-id read; the coins read has no
+    /// unclassified case, and dig-app's frozen `CoinRecord` requires a non-null asset there, so a
+    /// `null` breaks that read outright rather than degrading it. The type cannot enforce the split
+    /// because ONE record shape deliberately serves both reads (see the type docs), which is why the
+    /// rule is stated here and pinned by a KAT.
     pub asset: Option<crate::params::Asset>,
     /// The coin's amount, in the asset's base unit.
     pub amount: u64,

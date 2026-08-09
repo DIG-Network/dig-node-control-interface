@@ -1,5 +1,5 @@
 //! Typed request params for the control methods, each bound to its method + result via
-//! [`ControlCall`](crate::traits::ControlCall).
+//! [`crate::traits::ControlCall`].
 //!
 //! One params type per method (even where two methods share the same field shape, e.g. the four
 //! `{ store }` methods) so the compile-time method↔params↔result binding is exact: a caller passes
