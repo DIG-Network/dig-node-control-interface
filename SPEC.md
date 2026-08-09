@@ -34,9 +34,13 @@ rides over it.
 
 ### 2.1 Authorization
 
-- Every `control.*` method is **token-gated** EXCEPT the open surface enumerated in §4 — the pairing
-  bootstrap (`pairing.request`, `pairing.poll`) and the four wallet chain reads, which need only
-  public chain data. For every other method the caller MUST present the node's local control token
+- Every `control.*` method is **token-gated** EXCEPT the open surface, which is whatever the §4
+  method table marks `no` in its Token column — that table is authoritative and this sentence must
+  never restate it as a count. Today it is the pairing bootstrap (`pairing.request`,
+  `pairing.poll`), the wallet chain reads (`control.wallet.balance` / `.coins` / `.coinById` /
+  `.peak` / `.syncStatus`), which need only public chain data, and `control.peerCounts`, which
+  discloses two integers about this node's own connectivity. For every other method the caller MUST
+  present the node's local control token
   as the `X-Dig-Control-Token` request header (preferred) or a `params._control_token` field. The
   token is a 64-hex value the node mints at first run into its machine-wide state dir with a
   restrictive ACL; possession of the on-disk token is authorization. A call without a valid token MUST
@@ -90,6 +94,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.pairing.approve` | master | owned | `{pairing_id:string}` | `{approved, client_name, token_id}` |
 | `control.pairing.revoke` | master | owned | `{token_id:string}` | `{revoked, token_id}` |
 | `control.peerStatus` | yes | delegated | — | (peer-pool snapshot; each peer entry carries `software`) |
+| `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null}` |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
 | `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
@@ -99,12 +104,17 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
+| `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The four wallet CHAIN READS are served WITHOUT a control token, because each needs only public chain
-data — an address or a coin id, never a seed, a key, or a signature. `control.wallet.broadcast` is token-gated: it puts
+The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` / `.syncStatus`)
+are served WITHOUT a control token, because each needs only public chain data — an address or a coin
+id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
+discloses two integers about this node's own connectivity and no address, endpoint or secret. The
+`Token` column above is authoritative; the open set is deliberately named here rather than counted,
+so that adding a method cannot leave a stale number behind. `control.wallet.broadcast` is token-gated: it puts
 bytes on the network. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
 
@@ -185,6 +195,84 @@ opposite remedies — see §4.2.
   of any address. `peak_height:null` means the node tracks NO height — it MUST NOT be read as height
   zero, which every block is trivially above. A caller bounding a claimed confirmation MUST treat
   `null` as unknown and fail closed.
+
+  `synced` here reports ONLY that the replica's initial catch-up completed; it MUST NOT be read as
+  "the wallet is caught up AND connected", which is `WalletSyncStatusResult.phase == "synced"` and
+  is strictly stronger. Neither is a freshness guarantee.
+- **`PeerCountsResult`**: `{dig_peer_count:u32|null, chia_peer_count:u32|null}`. How many peers
+  this node holds on EACH network. The two networks are unrelated and their counts move
+  independently.
+
+  `dig_peer_count` MUST be the count of peers on the DIG content/gossip network (port 9445) — the
+  node's `connected_peers`, the same figure `control.peerStatus` reports. `chia_peer_count` MUST be
+  the count of CHIA full-node peers the wallet's chain sync holds, and MUST be the SAME observation
+  `WalletSyncStatusResult.chia_peer_count` reports: a conforming node MUST serve both from ONE
+  source, and the two MUST agree within a single node's view.
+
+  Neither field may be named `peers`, `connected_peers` or `peer_count`. A name that does not state
+  its network forces a consumer to know which number it is holding, and a consumer that guesses
+  wrong fails SILENTLY — a plausible integer in a right-looking place.
+
+  For each count, `0` MUST mean the node observed that network and found nothing connected, and
+  `null` MUST mean the node cannot observe the count. A network that is not running is UNKNOWN and
+  MUST NOT be reported as `0`, which would assert that nothing is connected to a network never asked.
+
+  `control.peerStatus`'s `relay.peer_count` counts peers connected to THE RELAY, not to this node.
+  It is frequently the only non-zero number on a node connected to nothing, and it is NEVER the
+  answer to "how many peers does this node have" — `dig_peer_count` is.
+- **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced", peak_height:u32|null,
+  chia_peer_count:u32|null}`. Whether the node's WALLET CHAIN replica is being kept current, how far
+  it has got, and how many CHIA full-node peers its sync is using. This is NOT `control.sync.status`,
+  which reports §21 DIG store sync and is unrelated.
+
+  `phase` MUST be one of the three tokens above, spelled exactly. `"synced"` MUST require BOTH that
+  the initial catch-up completed AND that at least one Chia peer connection is live at the time of
+  the read; a wallet that caught up earlier and has since lost every peer MUST report `"syncing"`.
+  `"synced"` is therefore STRICTLY STRONGER than `WalletPeakResult.synced`, which reflects only the
+  completed-catch-up flag: `"synced"` implies that flag, the flag does not imply `"synced"`. A
+  boolean MUST NOT be substituted for the three phases — "never started" and "synced at height 0"
+  are different facts and MUST NOT render the same.
+
+  `peak_height` MUST be the node's OWN replica's height, or `null` when it has none. It MUST NOT
+  fall back to the coinset oracle, which `control.wallet.peak` deliberately does: that method answers
+  what height the chain is at, this field answers how far this replica has got, and an oracle's
+  number here would report a caller's own progress using a height the replica never reached.
+  `null` MUST NOT be read as height zero.
+
+  `chia_peer_count` counts CHIA FULL-NODE peers the wallet's chain sync is connected to. `0` is an
+  OBSERVED zero and is not a fourth phase: a running sync connected to nothing reports `"syncing"`
+  with `0`, which a consumer SHOULD render as "syncing — no peers". `null` means the node cannot
+  observe the count and licenses no claim about connectivity. This count is NOT the DIG
+  gossip/content peer count from `control.peerStatus` (`connected_peers` / `relay_peer_count`); the
+  two are unrelated numbers, and a surface labelling either one bare "peers" beside a wallet sync
+  status asserts something false. A caller wanting both networks' counts reads
+  `control.peerCounts`, whose `chia_peer_count` is this same observation under the same key and MUST
+  agree with it. The field is duplicated across the two methods rather than moved, because
+  `chia_peer_count:0` beside `"syncing"` is the honest "syncing — no peers" state and a phase
+  separated from its count reads as a contradiction; a DIG content-network count, by contrast, is not
+  a wallet fact and MUST NOT be added here for symmetry.
+
+  `"synced"` MUST NOT be read as a guarantee that the replica's data is FRESH. A live connection to
+  a stalled or lagging peer satisfies the predicate while the replica goes stale; the phase reports
+  that catch-up finished and a peer is attached, i.e. that nothing KNOWN is preventing the replica
+  from being kept current.
+
+  **Field combinations.** `{phase:"synced", peak_height:null}` MUST NOT be emitted: a node records
+  its peak before it marks the initial catch-up complete, so a completed catch-up always has a
+  height behind it, and the pair describes a state no conforming node can be in.
+
+  `{phase:"not_started", peak_height:<n>}` is NOT a contradiction and MUST be permitted. The height
+  is persisted in the wallet database while the phase describes whether a sync is running IN THIS
+  PROCESS, so a node that synced earlier and has just RESTARTED reports this pair truthfully: here
+  is the height I reached, and no sync is running right now. A node MUST NOT suppress the height or
+  fabricate a phase to avoid emitting it. `{phase:"not_started", peak_height:null}` is equally
+  legitimate and means a wallet that has never synced.
+
+  The height reported is the height of the LAST EXISTING block the peer view reported
+  (`NewPeakWallet.height` / `RespondPuzzleState.height` from a real full node). This surface performs
+  no confirmation-depth arithmetic; a consumer computing depth MUST floor its own input rather than
+  assume a convention, because `peak_height` means the NEXT height on a simulator and the last
+  existing block on a full node.
 - **`WalletBroadcastResult`**: `{accepted:bool, transaction_id:string|null, rejection:string|null}`.
   The node pushes an ALREADY-SIGNED bundle; it MUST NOT sign, and MUST NOT accept any parameter it
   could sign with (§4.3).
@@ -301,7 +389,8 @@ a struct over them.
 
 A client MUST branch on which method it called:
 
-- On an OPEN read (`control.wallet.balance` / `.coins` / `.coinById` / `.peak`), `-32030 UNAUTHORIZED` can only
+- On an OPEN read — every method the §4 table marks `no`, today `control.wallet.balance` / `.coins` /
+  `.coinById` / `.peak` / `.syncStatus` and `control.peerCounts` — `-32030 UNAUTHORIZED` can only
   come from a node build that predates the method and gates the whole `control.*` namespace. The
   truth is "this node cannot do that yet" and the remedy is an UPGRADE.
 - On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is

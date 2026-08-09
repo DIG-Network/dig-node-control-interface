@@ -47,12 +47,12 @@ pub enum Category {
     Updater,
     /// Control-token pairing lifecycle.
     Pairing,
-    /// The L7 peer network.
+    /// The L7 peer network: the live pool snapshot, the per-network peer counts, and dial/drop.
     Peers,
     /// The node's subscribed-store set.
     Subscriptions,
-    /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak)
-    /// plus the push of an already-signed spend bundle.
+    /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak,
+    /// sync status) plus the push of an already-signed spend bundle.
     Wallet,
 }
 
@@ -121,6 +121,8 @@ pub enum ControlMethod {
     // ---- Peers (delegated to the engine) ----
     /// `control.peerStatus` — live peer-pool + relay-reservation snapshot.
     PeerStatus,
+    /// `control.peerCounts` — how many peers this node holds on EACH network (DIG and Chia).
+    PeerCounts,
     /// `control.peers.connect` — dial a peer by address / resolve a connected peer_id.
     PeersConnect,
     /// `control.peers.disconnect` — drop a pooled peer by peer_id.
@@ -143,6 +145,8 @@ pub enum ControlMethod {
     WalletCoinById,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
+    /// `control.wallet.syncStatus` — read whether the wallet's chain replica is being kept current.
+    WalletSyncStatus,
     /// `control.wallet.broadcast` — push an ALREADY-SIGNED spend bundle to the network.
     WalletBroadcast,
 
@@ -179,6 +183,7 @@ impl ControlMethod {
             ControlMethod::PairingApprove => "control.pairing.approve",
             ControlMethod::PairingRevoke => "control.pairing.revoke",
             ControlMethod::PeerStatus => "control.peerStatus",
+            ControlMethod::PeerCounts => "control.peerCounts",
             ControlMethod::PeersConnect => "control.peers.connect",
             ControlMethod::PeersDisconnect => "control.peers.disconnect",
             ControlMethod::Subscribe => "control.subscribe",
@@ -188,6 +193,7 @@ impl ControlMethod {
             ControlMethod::WalletCoins => "control.wallet.coins",
             ControlMethod::WalletCoinById => "control.wallet.coinById",
             ControlMethod::WalletPeak => "control.wallet.peak",
+            ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
             ControlMethod::PairingRequest => "pairing.request",
             ControlMethod::PairingPoll => "pairing.poll",
@@ -208,6 +214,8 @@ impl ControlMethod {
     ///
     /// - the pairing bootstrap (`pairing.request` / `pairing.poll`), so a token-less client can
     ///   obtain a token at all;
+    /// - the PEER COUNTS (`control.peerCounts`), which disclose two integers about this node's own
+    ///   connectivity and no address, endpoint or secret;
     /// - the wallet CHAIN READS ([`Category::Wallet`] minus the push), because each needs only
     ///   PUBLIC chain data — an address, or a coin id on `control.wallet.coinById`; never a seed, a
     ///   key, or a signature — and dig-node has served
@@ -225,7 +233,22 @@ impl ControlMethod {
             )
     }
 
-    /// Is this an OPEN chain read — served without a control token?
+    /// Is this an OPEN READ — served without a control token?
+    ///
+    /// Two kinds of method qualify, and they are open for different reasons:
+    ///
+    /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
+    ///   `.syncStatus`), which need only PUBLIC chain data — an address, or a coin id; never a seed,
+    ///   a key, or a signature;
+    /// - `control.peerCounts`, which is NOT a chain read: it discloses two integers about this
+    ///   node's own connectivity, and no address, endpoint, peer identity or secret. The identity
+    ///   and topology half of the same subject stays gated behind `control.peerStatus`.
+    ///
+    /// Naming both reasons matters more than it looks. The test for membership is *does this
+    /// disclose only data that is already public, or a bare count of this node's own state?* — NOT
+    /// *is it a chain read?* A future method judged against the narrower phrasing, and found to
+    /// contradict a member that was already there, invites widening the predicate by analogy rather
+    /// than against the rule.
     ///
     /// Stated on the contract rather than discovered by calling, because the two refusals a client
     /// can get here demand OPPOSITE remedies. On an open read, `UNAUTHORIZED` can only come from a
@@ -239,6 +262,8 @@ impl ControlMethod {
                 | ControlMethod::WalletCoins
                 | ControlMethod::WalletCoinById
                 | ControlMethod::WalletPeak
+                | ControlMethod::WalletSyncStatus
+                | ControlMethod::PeerCounts
         )
     }
 
@@ -260,6 +285,7 @@ impl ControlMethod {
     pub const fn routing(self) -> Routing {
         match self {
             ControlMethod::PeerStatus
+            | ControlMethod::PeerCounts
             | ControlMethod::PeersConnect
             | ControlMethod::PeersDisconnect
             | ControlMethod::Subscribe
@@ -269,6 +295,7 @@ impl ControlMethod {
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
             | ControlMethod::WalletPeak
+            | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
             _ => Routing::Owned,
@@ -300,6 +327,7 @@ impl ControlMethod {
             | ControlMethod::PairingRequest
             | ControlMethod::PairingPoll => Category::Pairing,
             ControlMethod::PeerStatus
+            | ControlMethod::PeerCounts
             | ControlMethod::PeersConnect
             | ControlMethod::PeersDisconnect => Category::Peers,
             ControlMethod::Subscribe
@@ -309,6 +337,7 @@ impl ControlMethod {
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
             | ControlMethod::WalletPeak
+            | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Category::Wallet,
         }
     }
@@ -337,7 +366,8 @@ impl ControlMethod {
             ControlMethod::PairingList => "List pending pairing requests and issued paired tokens (MASTER token only).",
             ControlMethod::PairingApprove => "Approve a pending pairing, minting a scoped token (MASTER token only).",
             ControlMethod::PairingRevoke => "Revoke an issued paired token by token_id (MASTER token only).",
-            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array; each entry carries an always-present `software` field (the peer's advertised build).",
+            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array; each entry carries an always-present `software` field (the peer's advertised build). Its `relay.peer_count` counts peers connected to THE RELAY, not to this node, and is never the answer to \"how many peers does this node have\" -- that is control.peerCounts.",
+            ControlMethod::PeerCounts => "READ-only: how many peers this node holds on EACH network -- dig_peer_count (DIG content/gossip, port 9445) and chia_peer_count (Chia full nodes serving the wallet chain sync). Two unrelated numbers, each named for its network.",
             ControlMethod::PeersConnect => "Dial a peer by address, or resolve an already-connected peer_id, via the live gossip pool.",
             ControlMethod::PeersDisconnect => "Drop a pooled peer by peer_id, closing its mTLS link (idempotent).",
             ControlMethod::Subscribe => "Subscribe the node to a store it actively watches and gap-fills.",
@@ -346,6 +376,7 @@ impl ControlMethod {
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
             ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
+            ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
@@ -378,6 +409,7 @@ impl ControlMethod {
         ControlMethod::PairingApprove,
         ControlMethod::PairingRevoke,
         ControlMethod::PeerStatus,
+        ControlMethod::PeerCounts,
         ControlMethod::PeersConnect,
         ControlMethod::PeersDisconnect,
         ControlMethod::Subscribe,
@@ -387,6 +419,7 @@ impl ControlMethod {
         ControlMethod::WalletCoins,
         ControlMethod::WalletCoinById,
         ControlMethod::WalletPeak,
+        ControlMethod::WalletSyncStatus,
         ControlMethod::WalletBroadcast,
         ControlMethod::PairingRequest,
         ControlMethod::PairingPoll,
@@ -429,13 +462,15 @@ mod tests {
             "control.wallet.coins",
             "control.wallet.coinById",
             "control.wallet.peak",
+            "control.wallet.syncStatus",
+            "control.peerCounts",
         ]
         .into_iter()
         .collect();
         assert_eq!(
             expected_open.len(),
-            6,
-            "the open surface is six named methods"
+            8,
+            "the open surface is eight named methods"
         );
         let actual_open: BTreeSet<&str> = ControlMethod::ALL
             .iter()
@@ -503,8 +538,10 @@ mod tests {
             "control.wallet.coins",
             "control.wallet.coinById",
             "control.wallet.peak",
+            "control.wallet.syncStatus",
             "control.wallet.broadcast",
             "control.peerStatus",
+            "control.peerCounts",
             "control.peers.connect",
             "control.peers.disconnect",
             "control.subscribe",

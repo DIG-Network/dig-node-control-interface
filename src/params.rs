@@ -332,6 +332,25 @@ impl WalletCoinByIdParams {
 pub struct WalletPeakParams {}
 control_call!(WalletPeakParams => ControlMethod::WalletPeak, results::WalletPeakResult);
 
+/// `control.peerCounts` params — none.
+///
+/// The counts describe this node's own connectivity on each network, so there is nothing to scope
+/// the question by. One call answers for BOTH networks deliberately: a consumer that had to collect
+/// the DIG count from a peer method and the Chia count from a wallet method is a consumer that can
+/// reach for the wrong one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerCountsParams {}
+control_call!(PeerCountsParams => ControlMethod::PeerCounts, results::PeerCountsResult);
+
+/// `control.wallet.syncStatus` params — none.
+///
+/// The wallet's sync progress is a property of the node's own chain replica, not of any address, so
+/// there is nothing to scope the question by. Deliberately NOT confused with `control.sync.status`,
+/// which reports §21 DIG STORE sync and has nothing to do with the chain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSyncStatusParams {}
+control_call!(WalletSyncStatusParams => ControlMethod::WalletSyncStatus, results::WalletSyncStatusResult);
+
 /// `control.wallet.broadcast` params: an ALREADY-SIGNED spend bundle to push.
 ///
 /// # The custody boundary (§908)

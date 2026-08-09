@@ -220,6 +220,20 @@ pub trait ControlHandler: Sync {
     ) -> Result<results::WalletCoinByIdResult, ControlError>;
     /// `control.wallet.peak` (READ-only, OPEN)
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
+    /// `control.peerCounts` (READ-only, OPEN)
+    ///
+    /// `dig_peer_count` MUST be dig-node-core's `connected_peers` — the same figure
+    /// `control.peerStatus` reports — and `chia_peer_count` MUST be the SAME observation
+    /// `wallet_sync_status` reports, served from ONE source so the two answers agree. `None` means
+    /// the count cannot be observed; a network that is not running is UNKNOWN, never `Some(0)`.
+    async fn peer_counts(&self) -> Result<results::PeerCountsResult, ControlError>;
+    /// `control.wallet.syncStatus` (READ-only, OPEN)
+    ///
+    /// `WalletSyncPhase::Synced` MUST require BOTH that the initial catch-up completed and that at
+    /// least one Chia peer connection is live now, which makes it strictly stronger than
+    /// `WalletPeakResult::synced`. `peak_height` MUST be the node's OWN replica's height or `None`,
+    /// never an oracle's, and `chia_peer_count` counts CHIA full-node peers -- never DIG peers.
+    async fn wallet_sync_status(&self) -> Result<results::WalletSyncStatusResult, ControlError>;
     /// `control.wallet.broadcast` (TOKEN-GATED)
     ///
     /// Pushes an ALREADY-SIGNED bundle: the implementation never signs, and never receives anything
@@ -311,6 +325,7 @@ pub trait ControlHandler: Sync {
             ControlMethod::PairingApprove => encode(self.pairing_approve(decode(params)?).await?),
             ControlMethod::PairingRevoke => encode(self.pairing_revoke(decode(params)?).await?),
             ControlMethod::PeerStatus => self.peer_status().await,
+            ControlMethod::PeerCounts => encode(self.peer_counts().await?),
             ControlMethod::PeersConnect => encode(self.peers_connect(decode(params)?).await?),
             ControlMethod::PeersDisconnect => encode(self.peers_disconnect(decode(params)?).await?),
             ControlMethod::Subscribe => encode(self.subscribe(decode(params)?).await?),
@@ -324,6 +339,7 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_coin_by_id(params.validated()?).await?)
             }
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
+            ControlMethod::WalletSyncStatus => encode(self.wallet_sync_status().await?),
             ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),
             ControlMethod::PairingPoll => encode(self.pairing_poll(decode(params)?).await?),
