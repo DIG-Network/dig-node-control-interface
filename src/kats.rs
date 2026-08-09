@@ -153,6 +153,10 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.peak","params":{}}),
     );
     assert_request(
+        &PeerCountsParams {},
+        json!({"jsonrpc":"2.0","id":1,"method":"control.peerCounts","params":{}}),
+    );
+    assert_request(
         &WalletSyncStatusParams {},
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.syncStatus","params":{}}),
     );
@@ -278,6 +282,26 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "syncing", "peak_height": null, "chia_peer_count": null
     }));
+    // `control.peerCounts` — the two networks, each named. A node connected to both.
+    assert_result_round_trips::<results::PeerCountsResult>(json!({
+        "dig_peer_count": 6u32, "chia_peer_count": 3u32
+    }));
+    // Observed zeros on BOTH networks: the node looked and found nothing connected. Pinned
+    // separately from the null case below, because a node with no peer network RUNNING has an
+    // unknown count and must not report it as a measured zero.
+    assert_result_round_trips::<results::PeerCountsResult>(json!({
+        "dig_peer_count": 0u32, "chia_peer_count": 0u32
+    }));
+    // Unobservable on BOTH networks. `null` is not `0` for either count.
+    assert_result_round_trips::<results::PeerCountsResult>(json!({
+        "dig_peer_count": null, "chia_peer_count": null
+    }));
+    // One of each, and this vector is the one that matters: it varies the two counts INDEPENDENTLY,
+    // so a serialization that transposed the two field names — the nearest wrong implementation, and
+    // exactly the confusion this method exists to end — cannot survive it.
+    assert_result_round_trips::<results::PeerCountsResult>(json!({
+        "dig_peer_count": 6u32, "chia_peer_count": null
+    }));
     assert_result_round_trips::<results::WalletBroadcastResult>(json!({
         "accepted": true, "transaction_id": "dd".repeat(32), "rejection": null
     }));
@@ -382,6 +406,108 @@ fn never_started_is_distinguishable_from_synced_at_height_zero() {
         json!(0),
         "height 0 is a real height and must survive the round trip as one"
     );
+}
+
+/// **Each count names its own network, and the two are not interchangeable.**
+///
+/// The wire keys are pinned as LITERALS rather than derived from the struct, because the whole
+/// reason this method exists is that a consumer reaching for a bare `peers`/`connected_peers`/
+/// `peer_count` eventually reaches for the wrong network and gets a plausible number. A rename that
+/// dropped a network out of a key would be invisible to a derived assertion.
+///
+/// The fixture gives the two counts DIFFERENT values, so an implementation that transposed the
+/// fields — the nearest wrong one — fails here rather than passing on a shape both share.
+#[test]
+fn each_peer_count_key_names_its_network() {
+    let wire = serde_json::to_value(results::PeerCountsResult {
+        dig_peer_count: Some(6),
+        chia_peer_count: Some(3),
+    })
+    .unwrap();
+
+    assert_eq!(wire["dig_peer_count"], json!(6));
+    assert_eq!(wire["chia_peer_count"], json!(3));
+    // The KEY SET, exactly -- so a bare `peers` / `connected_peers` / `peer_count` cannot appear
+    // alongside the named pair either. (`serde_json::Value` orders its map, so this is a set
+    // assertion by construction; the emitted TEXT below is what a consumer actually parses.)
+    let keys: Vec<&str> = wire
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["chia_peer_count", "dig_peer_count"]);
+    assert_eq!(
+        serde_json::to_string(&results::PeerCountsResult {
+            dig_peer_count: Some(6),
+            chia_peer_count: Some(3),
+        })
+        .unwrap(),
+        r#"{"dig_peer_count":6,"chia_peer_count":3}"#,
+        "the emitted bytes name each network and give the two counts independently"
+    );
+}
+
+/// **The two `chia_peer_count` fields are ONE observation under ONE key.**
+///
+/// The field is deliberately duplicated across `control.peerCounts` and
+/// `control.wallet.syncStatus`, and the contract's answer to that duplication is that a conforming
+/// node serves both from a single source. That is a node obligation this crate cannot execute — but
+/// it can pin the half that makes the obligation expressible: the two payloads must spell the count
+/// with the IDENTICAL key, so a node reading one type's field name and emitting the other's cannot
+/// arise, and a consumer can compare the two answers at all.
+#[test]
+fn both_results_spell_the_chia_count_with_the_same_key() {
+    const KEY: &str = "chia_peer_count";
+
+    let counts = serde_json::to_value(results::PeerCountsResult {
+        dig_peer_count: None,
+        chia_peer_count: Some(3),
+    })
+    .unwrap();
+    let sync = serde_json::to_value(results::WalletSyncStatusResult {
+        phase: results::WalletSyncPhase::Syncing,
+        peak_height: Some(4_000_000),
+        chia_peer_count: Some(3),
+    })
+    .unwrap();
+
+    assert_eq!(counts[KEY], json!(3));
+    assert_eq!(sync[KEY], json!(3));
+    assert_eq!(
+        counts[KEY], sync[KEY],
+        "a single node's two answers describe the same observation and must agree"
+    );
+}
+
+/// **`null` and `0` are different answers for each count, independently.**
+///
+/// Varies ONE count at a time against a truthful control, so a shape that collapsed absent into zero
+/// on either field alone is caught. A node with no peer network running has an UNKNOWN count; a
+/// zero there would report "nothing is connected" about a network it never asked.
+#[test]
+fn an_unobservable_count_is_null_not_zero_on_either_network() {
+    let dig_unknown = serde_json::to_value(results::PeerCountsResult {
+        dig_peer_count: None,
+        chia_peer_count: Some(0),
+    })
+    .unwrap();
+    assert_eq!(dig_unknown["dig_peer_count"], json!(null));
+    assert_eq!(
+        dig_unknown["chia_peer_count"],
+        json!(0),
+        "an observed zero must survive as a zero beside an unknown"
+    );
+
+    let chia_unknown = serde_json::to_value(results::PeerCountsResult {
+        dig_peer_count: Some(0),
+        chia_peer_count: None,
+    })
+    .unwrap();
+    assert_eq!(chia_unknown["dig_peer_count"], json!(0));
+    assert_eq!(chia_unknown["chia_peer_count"], json!(null));
+
+    assert_ne!(dig_unknown, chia_unknown);
 }
 
 /// The "no dig-app code change" guarantee, pinned: the node's richer `WalletBalanceResult` is a
@@ -721,6 +847,15 @@ impl ControlHandler for MockNode {
             synced: true,
         })
     }
+    /// Reports two DIFFERENT counts, so a handler that answered one number twice — or a dispatch
+    /// arm wired to the wallet's sync status, whose chia count this deliberately matches — is
+    /// distinguishable from a correct one by the DIG count alone.
+    async fn peer_counts(&self) -> Result<results::PeerCountsResult, ControlError> {
+        Ok(results::PeerCountsResult {
+            dig_peer_count: Some(6),
+            chia_peer_count: Some(3),
+        })
+    }
     /// Reports a phase and a height NEITHER neighbouring wallet read can produce — `syncing` beside
     /// a height the peak handler never returns — so a dispatch arm wired to `control.wallet.peak`
     /// (whose payload is otherwise a plausible sync status) fails the routing test below.
@@ -1050,6 +1185,16 @@ fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
     assert_eq!(sync.phase, results::WalletSyncPhase::Syncing);
     assert_eq!(sync.peak_height, Some(4_999_000));
     assert_eq!(sync.chia_peer_count, Some(3));
+
+    // `control.peerCounts` reaches its OWN handler: it is the only one that produces a DIG count at
+    // all, so an arm wired to the sync status (whose chia count is the same 3) cannot land here.
+    let counts = round_trip(&PeerCountsParams {}).expect("peerCounts must route");
+    assert_eq!(counts.dig_peer_count, Some(6));
+    assert_eq!(
+        counts.chia_peer_count,
+        Some(3),
+        "the same observation control.wallet.syncStatus reports"
+    );
 
     let pushed = round_trip(&WalletBroadcastParams {
         signed_bundle_hex: "deadbeef".into(),

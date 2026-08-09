@@ -90,6 +90,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.pairing.approve` | master | owned | `{pairing_id:string}` | `{approved, client_name, token_id}` |
 | `control.pairing.revoke` | master | owned | `{token_id:string}` | `{revoked, token_id}` |
 | `control.peerStatus` | yes | delegated | — | (peer-pool snapshot; each peer entry carries `software`) |
+| `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null}` |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
 | `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
@@ -105,7 +106,9 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
 The five wallet CHAIN READS are served WITHOUT a control token, because each needs only public chain
-data — an address or a coin id, never a seed, a key, or a signature. `control.wallet.broadcast` is token-gated: it puts
+data — an address or a coin id, never a seed, a key, or a signature. `control.peerCounts` is open for
+a second reason: it discloses two integers about this node's own connectivity and no address,
+endpoint or secret. `control.wallet.broadcast` is token-gated: it puts
 bytes on the network. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
 
@@ -190,6 +193,27 @@ opposite remedies — see §4.2.
   `synced` here reports ONLY that the replica's initial catch-up completed; it MUST NOT be read as
   "the wallet is being kept current", which is `WalletSyncStatusResult.phase == "synced"` and is
   strictly stronger.
+- **`PeerCountsResult`**: `{dig_peer_count:u32|null, chia_peer_count:u32|null}`. How many peers
+  this node holds on EACH network. The two networks are unrelated and their counts move
+  independently.
+
+  `dig_peer_count` MUST be the count of peers on the DIG content/gossip network (port 9445) — the
+  node's `connected_peers`, the same figure `control.peerStatus` reports. `chia_peer_count` MUST be
+  the count of CHIA full-node peers the wallet's chain sync holds, and MUST be the SAME observation
+  `WalletSyncStatusResult.chia_peer_count` reports: a conforming node MUST serve both from ONE
+  source, and the two MUST agree within a single node's view.
+
+  Neither field may be named `peers`, `connected_peers` or `peer_count`. A name that does not state
+  its network forces a consumer to know which number it is holding, and a consumer that guesses
+  wrong fails SILENTLY — a plausible integer in a right-looking place.
+
+  For each count, `0` MUST mean the node observed that network and found nothing connected, and
+  `null` MUST mean the node cannot observe the count. A network that is not running is UNKNOWN and
+  MUST NOT be reported as `0`, which would assert that nothing is connected to a network never asked.
+
+  `control.peerStatus`'s `relay.peer_count` counts peers connected to THE RELAY, not to this node.
+  It is frequently the only non-zero number on a node connected to nothing, and it is NEVER the
+  answer to "how many peers does this node have" — `dig_peer_count` is.
 - **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced", peak_height:u32|null,
   chia_peer_count:u32|null}`. Whether the node's WALLET CHAIN replica is being kept current, how far
   it has got, and how many CHIA full-node peers its sync is using. This is NOT `control.sync.status`,
@@ -215,7 +239,12 @@ opposite remedies — see §4.2.
   observe the count and licenses no claim about connectivity. This count is NOT the DIG
   gossip/content peer count from `control.peerStatus` (`connected_peers` / `relay_peer_count`); the
   two are unrelated numbers, and a surface labelling either one bare "peers" beside a wallet sync
-  status asserts something false.
+  status asserts something false. A caller wanting both networks' counts reads
+  `control.peerCounts`, whose `chia_peer_count` is this same observation under the same key and MUST
+  agree with it. The field is duplicated across the two methods rather than moved, because
+  `chia_peer_count:0` beside `"syncing"` is the honest "syncing — no peers" state and a phase
+  separated from its count reads as a contradiction; a DIG content-network count, by contrast, is not
+  a wallet fact and MUST NOT be added here for symmetry.
 
   The height reported is the height of the LAST EXISTING block the peer view reported
   (`NewPeakWallet.height` / `RespondPuzzleState.height` from a real full node). This surface performs

@@ -415,6 +415,42 @@ pub struct PairingRevokeResult {
     pub token_id: String,
 }
 
+/// `control.peerCounts` — how many peers this node holds on EACH network.
+///
+/// # Two networks, two numbers, and neither is "peers"
+///
+/// A DIG node is connected to two entirely separate networks at once: the DIG content/gossip
+/// network (port 9445), and the Chia full nodes its wallet chain sync talks to. The counts are
+/// unrelated and move independently — a node with many DIG peers and no Chia peer is serving content
+/// while its wallet is not syncing at all, and the reverse is equally possible.
+///
+/// So neither field is spelled `peers`, `connected_peers` or `peer_count`. A bare name forces a
+/// consumer to KNOW which network a number describes, and the failure when it guesses wrong is
+/// silent: a plausible integer in a right-looking place. This method exists so that one call answers
+/// for both networks and each answer names its own.
+///
+/// # `relay.peer_count` from `control.peerStatus` is NOT this
+///
+/// That field counts the peers connected to THE RELAY, not to this node, and it is frequently the
+/// only non-zero number on a node connected to nothing. It is never the answer to "how many peers
+/// does this node have"; [`dig_peer_count`](Self::dig_peer_count) is.
+///
+/// # `Some(0)` is measured; `null` is unknown
+///
+/// `0` means the node looked at that network and found nothing connected. `null` means it cannot
+/// observe the count at all — which is what a node whose peer network is not running reports, since
+/// a zero there would claim "nothing is connected" about a network it never asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerCountsResult {
+    /// Peers on the DIG content/gossip network (port 9445) — dig-node-core's `connected_peers`, the
+    /// same figure `control.peerStatus` reports. `0` is an observed zero; `null` is unobservable.
+    pub dig_peer_count: Option<u32>,
+    /// CHIA full-node peers the wallet's chain sync holds. The SAME observation
+    /// [`WalletSyncStatusResult::chia_peer_count`] reports — a conforming node MUST serve both from
+    /// one source, and the two MUST agree within a single node's view.
+    pub chia_peer_count: Option<u32>,
+}
+
 /// `control.peers.connect` — the connected peer's id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeersConnectResult {
@@ -763,7 +799,18 @@ impl WalletSyncPhase {
 /// (`connected_peers` / `relay_peer_count`); the two are unrelated numbers that move independently.
 /// A surface that placed one of them beside a wallet sync status under a bare label of "peers" would
 /// assert something false — a node with many DIG peers and no Chia peer is a wallet that is not
-/// syncing at all.
+/// syncing at all. A caller that wants BOTH networks' counts reads [`PeerCountsResult`], which is
+/// the one call that answers for each network by name.
+///
+/// # The duplicated field is ONE observation
+///
+/// [`chia_peer_count`](Self::chia_peer_count) also appears on [`PeerCountsResult`], and the two are
+/// the SAME observation: a conforming node MUST serve them from one source, and they MUST agree
+/// within a single node's view. The field is duplicated rather than moved because it is load-bearing
+/// HERE — `chia_peer_count: 0` beside `Syncing` is the honest "syncing — no peers" state, and a
+/// phase separated from its count reads as a contradiction. A DIG content-network count, by
+/// contrast, is not a wallet fact and does not vary with wallet state, which is why it is absent
+/// from this type rather than added for symmetry.
 ///
 /// # No confirmation-depth arithmetic happens here
 ///

@@ -220,6 +220,13 @@ pub trait ControlHandler: Sync {
     ) -> Result<results::WalletCoinByIdResult, ControlError>;
     /// `control.wallet.peak` (READ-only, OPEN)
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
+    /// `control.peerCounts` (READ-only, OPEN)
+    ///
+    /// `dig_peer_count` MUST be dig-node-core's `connected_peers` — the same figure
+    /// `control.peerStatus` reports — and `chia_peer_count` MUST be the SAME observation
+    /// `wallet_sync_status` reports, served from ONE source so the two answers agree. `None` means
+    /// the count cannot be observed; a network that is not running is UNKNOWN, never `Some(0)`.
+    async fn peer_counts(&self) -> Result<results::PeerCountsResult, ControlError>;
     /// `control.wallet.syncStatus` (READ-only, OPEN)
     ///
     /// `WalletSyncPhase::Synced` MUST require BOTH that the initial catch-up completed and that at
@@ -318,6 +325,7 @@ pub trait ControlHandler: Sync {
             ControlMethod::PairingApprove => encode(self.pairing_approve(decode(params)?).await?),
             ControlMethod::PairingRevoke => encode(self.pairing_revoke(decode(params)?).await?),
             ControlMethod::PeerStatus => self.peer_status().await,
+            ControlMethod::PeerCounts => encode(self.peer_counts().await?),
             ControlMethod::PeersConnect => encode(self.peers_connect(decode(params)?).await?),
             ControlMethod::PeersDisconnect => encode(self.peers_disconnect(decode(params)?).await?),
             ControlMethod::Subscribe => encode(self.subscribe(decode(params)?).await?),

@@ -47,7 +47,7 @@ pub enum Category {
     Updater,
     /// Control-token pairing lifecycle.
     Pairing,
-    /// The L7 peer network.
+    /// The L7 peer network: the live pool snapshot, the per-network peer counts, and dial/drop.
     Peers,
     /// The node's subscribed-store set.
     Subscriptions,
@@ -121,6 +121,8 @@ pub enum ControlMethod {
     // ---- Peers (delegated to the engine) ----
     /// `control.peerStatus` — live peer-pool + relay-reservation snapshot.
     PeerStatus,
+    /// `control.peerCounts` — how many peers this node holds on EACH network (DIG and Chia).
+    PeerCounts,
     /// `control.peers.connect` — dial a peer by address / resolve a connected peer_id.
     PeersConnect,
     /// `control.peers.disconnect` — drop a pooled peer by peer_id.
@@ -181,6 +183,7 @@ impl ControlMethod {
             ControlMethod::PairingApprove => "control.pairing.approve",
             ControlMethod::PairingRevoke => "control.pairing.revoke",
             ControlMethod::PeerStatus => "control.peerStatus",
+            ControlMethod::PeerCounts => "control.peerCounts",
             ControlMethod::PeersConnect => "control.peers.connect",
             ControlMethod::PeersDisconnect => "control.peers.disconnect",
             ControlMethod::Subscribe => "control.subscribe",
@@ -211,6 +214,8 @@ impl ControlMethod {
     ///
     /// - the pairing bootstrap (`pairing.request` / `pairing.poll`), so a token-less client can
     ///   obtain a token at all;
+    /// - the PEER COUNTS (`control.peerCounts`), which disclose two integers about this node's own
+    ///   connectivity and no address, endpoint or secret;
     /// - the wallet CHAIN READS ([`Category::Wallet`] minus the push), because each needs only
     ///   PUBLIC chain data — an address, or a coin id on `control.wallet.coinById`; never a seed, a
     ///   key, or a signature — and dig-node has served
@@ -243,6 +248,7 @@ impl ControlMethod {
                 | ControlMethod::WalletCoinById
                 | ControlMethod::WalletPeak
                 | ControlMethod::WalletSyncStatus
+                | ControlMethod::PeerCounts
         )
     }
 
@@ -264,6 +270,7 @@ impl ControlMethod {
     pub const fn routing(self) -> Routing {
         match self {
             ControlMethod::PeerStatus
+            | ControlMethod::PeerCounts
             | ControlMethod::PeersConnect
             | ControlMethod::PeersDisconnect
             | ControlMethod::Subscribe
@@ -305,6 +312,7 @@ impl ControlMethod {
             | ControlMethod::PairingRequest
             | ControlMethod::PairingPoll => Category::Pairing,
             ControlMethod::PeerStatus
+            | ControlMethod::PeerCounts
             | ControlMethod::PeersConnect
             | ControlMethod::PeersDisconnect => Category::Peers,
             ControlMethod::Subscribe
@@ -343,7 +351,8 @@ impl ControlMethod {
             ControlMethod::PairingList => "List pending pairing requests and issued paired tokens (MASTER token only).",
             ControlMethod::PairingApprove => "Approve a pending pairing, minting a scoped token (MASTER token only).",
             ControlMethod::PairingRevoke => "Revoke an issued paired token by token_id (MASTER token only).",
-            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array; each entry carries an always-present `software` field (the peer's advertised build).",
+            ControlMethod::PeerStatus => "Live peer-pool + relay-reservation snapshot, including the per-peer connected array; each entry carries an always-present `software` field (the peer's advertised build). Its `relay.peer_count` counts peers connected to THE RELAY, not to this node, and is never the answer to \"how many peers does this node have\" -- that is control.peerCounts.",
+            ControlMethod::PeerCounts => "READ-only: how many peers this node holds on EACH network -- dig_peer_count (DIG content/gossip, port 9445) and chia_peer_count (Chia full nodes serving the wallet chain sync). Two unrelated numbers, each named for its network.",
             ControlMethod::PeersConnect => "Dial a peer by address, or resolve an already-connected peer_id, via the live gossip pool.",
             ControlMethod::PeersDisconnect => "Drop a pooled peer by peer_id, closing its mTLS link (idempotent).",
             ControlMethod::Subscribe => "Subscribe the node to a store it actively watches and gap-fills.",
@@ -385,6 +394,7 @@ impl ControlMethod {
         ControlMethod::PairingApprove,
         ControlMethod::PairingRevoke,
         ControlMethod::PeerStatus,
+        ControlMethod::PeerCounts,
         ControlMethod::PeersConnect,
         ControlMethod::PeersDisconnect,
         ControlMethod::Subscribe,
@@ -438,13 +448,14 @@ mod tests {
             "control.wallet.coinById",
             "control.wallet.peak",
             "control.wallet.syncStatus",
+            "control.peerCounts",
         ]
         .into_iter()
         .collect();
         assert_eq!(
             expected_open.len(),
-            7,
-            "the open surface is seven named methods"
+            8,
+            "the open surface is eight named methods"
         );
         let actual_open: BTreeSet<&str> = ControlMethod::ALL
             .iter()
@@ -515,6 +526,7 @@ mod tests {
             "control.wallet.syncStatus",
             "control.wallet.broadcast",
             "control.peerStatus",
+            "control.peerCounts",
             "control.peers.connect",
             "control.peers.disconnect",
             "control.subscribe",
