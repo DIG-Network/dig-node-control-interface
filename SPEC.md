@@ -35,7 +35,7 @@ rides over it.
 ### 2.1 Authorization
 
 - Every `control.*` method is **token-gated** EXCEPT the open surface enumerated in §4 — the pairing
-  bootstrap (`pairing.request`, `pairing.poll`) and the four wallet chain reads, which need only
+  bootstrap (`pairing.request`, `pairing.poll`) and the five wallet chain reads, which need only
   public chain data. For every other method the caller MUST present the node's local control token
   as the `X-Dig-Control-Token` request header (preferred) or a `params._control_token` field. The
   token is a 64-hex value the node mints at first run into its machine-wide state dir with a
@@ -338,7 +338,7 @@ a struct over them.
 
 A client MUST branch on which method it called:
 
-- On an OPEN read (`control.wallet.balance` / `.coins` / `.coinById` / `.peak`), `-32030 UNAUTHORIZED` can only
+- On an OPEN read (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` / `.syncStatus`), `-32030 UNAUTHORIZED` can only
   come from a node build that predates the method and gates the whole `control.*` namespace. The
   truth is "this node cannot do that yet" and the remedy is an UPGRADE.
 - On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is
