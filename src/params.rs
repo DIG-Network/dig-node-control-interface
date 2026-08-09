@@ -243,6 +243,62 @@ pub struct WalletCoinsParams {
 }
 control_call!(WalletCoinsParams => ControlMethod::WalletCoins, results::WalletCoinsResult);
 
+/// The length of a coin id in lowercase hex characters: a 32-byte hash.
+const COIN_ID_HEX_LEN: usize = 64;
+
+/// `control.wallet.coinById` params: WHICH coin, named by its own id.
+///
+/// # Why there is no `asset` here
+///
+/// A coin id names one coin on one chain. It is not scoped to an address and not scoped to an
+/// asset, and a node reading a coin record learns neither — so an asset parameter here could only
+/// be a claim the read never checks. The answer's
+/// [`asset`](crate::results::WalletCoinRecord::asset) is `null` for the same reason.
+///
+/// # Why the method exists at all
+///
+/// [`WalletCoinsParams`] answers by ADDRESS and lists UNSPENT coins only. A mint's evidence is the
+/// opposite shape: the created DID coin (which sits at nobody's wallet address) and the funding
+/// coin the mint SPENT (which is, by then, gone from every unspent list). Without a by-id read a
+/// pushed mint can never be observed — a permanent "pending" with the money already spent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinByIdParams {
+    /// The coin id: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input (block
+    /// explorers print one) and normalized away by [`Self::validated`]; it is never emitted.
+    pub coin_id: String,
+}
+control_call!(WalletCoinByIdParams => ControlMethod::WalletCoinById, results::WalletCoinByIdResult);
+
+impl WalletCoinByIdParams {
+    /// Normalize and check the coin id, or reject the request as `-32602 INVALID_PARAMS`.
+    ///
+    /// A malformed id is a malformed REQUEST, and the node refuses it here — before consulting any
+    /// chain. That ordering is normative rather than an optimisation: were a bad id allowed through,
+    /// the read would come back with no such coin, and the caller would be told the honest-looking
+    /// answer `coin: null` about a coin it never actually asked after. An unanswerable question and
+    /// a chain that answered "no" must never wear the same shape.
+    ///
+    /// Accepts exactly two spellings — 64 lowercase hex characters, or the same 64 preceded by
+    /// `0x`. Uppercase, whitespace and every other length are refused, because the contract's hex
+    /// wire form is lowercase and unprefixed everywhere else in this crate.
+    pub fn validated(self) -> Result<Self, crate::error::ControlError> {
+        let normalized = self.coin_id.strip_prefix("0x").unwrap_or(&self.coin_id);
+        let well_formed = normalized.len() == COIN_ID_HEX_LEN
+            && normalized
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !well_formed {
+            return Err(crate::error::ControlError::of(
+                crate::error::ControlErrorCode::InvalidParams,
+                "coin_id must be lowercase 64-hex, optionally 0x-prefixed",
+            ));
+        }
+        Ok(WalletCoinByIdParams {
+            coin_id: normalized.to_owned(),
+        })
+    }
+}
+
 /// `control.wallet.peak` params — none.
 ///
 /// The peak is a property of the node's chain view, not of any address, which is exactly why it is

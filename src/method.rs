@@ -51,8 +51,8 @@ pub enum Category {
     Peers,
     /// The node's subscribed-store set.
     Subscriptions,
-    /// Wallet chain transport: the read-only chain views (balance, coins, peak) plus the push of
-    /// an already-signed spend bundle.
+    /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak)
+    /// plus the push of an already-signed spend bundle.
     Wallet,
 }
 
@@ -139,6 +139,8 @@ pub enum ControlMethod {
     WalletBalance,
     /// `control.wallet.coins` — read an address's spendable coin records for an asset.
     WalletCoins,
+    /// `control.wallet.coinById` — read ONE coin record by coin id, spent or unspent.
+    WalletCoinById,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
     /// `control.wallet.broadcast` — push an ALREADY-SIGNED spend bundle to the network.
@@ -184,6 +186,7 @@ impl ControlMethod {
             ControlMethod::ListSubscriptions => "control.listSubscriptions",
             ControlMethod::WalletBalance => "control.wallet.balance",
             ControlMethod::WalletCoins => "control.wallet.coins",
+            ControlMethod::WalletCoinById => "control.wallet.coinById",
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
             ControlMethod::PairingRequest => "pairing.request",
@@ -231,7 +234,10 @@ impl ControlMethod {
     pub const fn is_open_read(self) -> bool {
         matches!(
             self,
-            ControlMethod::WalletBalance | ControlMethod::WalletCoins | ControlMethod::WalletPeak
+            ControlMethod::WalletBalance
+                | ControlMethod::WalletCoins
+                | ControlMethod::WalletCoinById
+                | ControlMethod::WalletPeak
         )
     }
 
@@ -260,6 +266,7 @@ impl ControlMethod {
             | ControlMethod::ListSubscriptions
             | ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
+            | ControlMethod::WalletCoinById
             | ControlMethod::WalletPeak
             | ControlMethod::WalletBroadcast => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
@@ -299,6 +306,7 @@ impl ControlMethod {
             | ControlMethod::ListSubscriptions => Category::Subscriptions,
             ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
+            | ControlMethod::WalletCoinById
             | ControlMethod::WalletPeak
             | ControlMethod::WalletBroadcast => Category::Wallet,
         }
@@ -335,6 +343,7 @@ impl ControlMethod {
             ControlMethod::Unsubscribe => "Stop watching a store.",
             ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
+            ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
@@ -375,6 +384,7 @@ impl ControlMethod {
         ControlMethod::ListSubscriptions,
         ControlMethod::WalletBalance,
         ControlMethod::WalletCoins,
+        ControlMethod::WalletCoinById,
         ControlMethod::WalletPeak,
         ControlMethod::WalletBroadcast,
         ControlMethod::PairingRequest,
@@ -416,10 +426,16 @@ mod tests {
             "pairing.poll",
             "control.wallet.balance",
             "control.wallet.coins",
+            "control.wallet.coinById",
             "control.wallet.peak",
         ]
         .into_iter()
         .collect();
+        assert_eq!(
+            expected_open.len(),
+            6,
+            "the open surface is six named methods"
+        );
         let actual_open: BTreeSet<&str> = ControlMethod::ALL
             .iter()
             .filter(|m| !m.requires_auth())
@@ -484,6 +500,7 @@ mod tests {
             .collect();
         let expected: BTreeSet<&str> = [
             "control.wallet.coins",
+            "control.wallet.coinById",
             "control.wallet.peak",
             "control.wallet.broadcast",
             "control.peerStatus",

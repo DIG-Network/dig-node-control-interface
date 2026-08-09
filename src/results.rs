@@ -517,19 +517,32 @@ pub enum WalletReadSource {
     Fallback,
 }
 
-/// One spendable coin, as the node's chain read saw it (`control.wallet.coins`).
+/// One coin, as the node's chain read saw it (`control.wallet.coins` / `control.wallet.coinById`).
 ///
 /// The first three fields are byte-identical to dig-app's frozen `CoinRecord`, so its
 /// `CoinsResponse` deserializes this losslessly and ignores the rest. The rest is what a spend
 /// actually needs: a coin cannot be spent from an id and an amount alone — the parent and the
 /// puzzle hash are what reconstruct the `Coin` — and the heights are how a caller tells a confirmed
 /// coin from one it only saw in the mempool.
+///
+/// ONE record type serves both reads deliberately. A second coin shape would be a second thing to
+/// keep in step with dig-app's frozen struct, and the two would drift byte-wise the first time only
+/// one of them was touched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletCoinRecord {
     /// The coin id, lowercase 64-hex, unprefixed.
     pub coin_id: String,
-    /// The asset this coin is denominated in.
-    pub asset: crate::params::Asset,
+    /// The asset this coin is denominated in, or `null` when THIS READ DID NOT CLASSIFY THE COIN.
+    ///
+    /// `null` never means "no asset" and never means XCH by default. It means the answering read
+    /// had no basis to say: a singleton, a CAT and a plain XCH coin are indistinguishable from a
+    /// coin id alone — telling them apart requires inspecting the puzzle, and the node reads only
+    /// the coin record. So `control.wallet.coinById` always reports `null` here, while
+    /// `control.wallet.coins` reports the concrete asset it was SCOPED to and therefore knows.
+    ///
+    /// Emitting a concrete asset on an unclassified read would make the node assert a
+    /// classification it never verified, which a caller would then spend against.
+    pub asset: Option<crate::params::Asset>,
     /// The coin's amount, in the asset's base unit.
     pub amount: u64,
     /// The parent coin's id, lowercase 64-hex, unprefixed.
@@ -561,6 +574,44 @@ pub struct WalletCoinsResult {
     /// Whether THESE coins reflect a caught-up local view; always `false` for a fallback answer.
     pub synced: bool,
     /// The peak height these coins reflect, or `null` when none applies (every fallback answer).
+    pub peak_height: Option<u32>,
+}
+
+/// `control.wallet.coinById` — ONE coin, named by its own id, spent or unspent.
+///
+/// # An absent coin is an ANSWER; an unreachable chain is an ERROR
+///
+/// `coin: null` means a chain WAS consulted and holds no such coin. It is NEVER what a caller gets
+/// when the chain could not be reached: those are the catalogued errors
+/// ([`crate::error::ControlErrorCode::WalletNoChainSource`] / `WalletReadFailed` /
+/// `WalletRateLimited`). Collapsing the two turns "your wifi dropped" into "your mint never
+/// happened", and the remedies are opposite: retry the read, versus stop waiting.
+///
+/// # Why this method exists — observing a mint
+///
+/// `control.wallet.broadcast`'s `accepted: true` reports mempool admission only; only a buried
+/// confirmation of the CREATED COIN is evidence that a mint happened. `control.wallet.coins`
+/// cannot supply it — it answers by ADDRESS and lists UNSPENT coins only, so it can see neither the
+/// created DID coin nor the funding coin the mint spent. This method is how that evidence is
+/// obtained: read the created coin's id for a `created_height`, and the funding coin's id for a
+/// [`spent_height`](WalletCoinRecord::spent_height). Without it a mint can be pushed, real XCH can
+/// leave the wallet, and the outcome stays permanently "pending".
+///
+/// # The freshness fields are honest, not decorative
+///
+/// A by-id read is served from the fallback tier, so [`synced`](Self::synced) is `false` and
+/// [`peak_height`](Self::peak_height) is `null` — the oracle's chain view produced these figures
+/// and the node's own replica neither produced them nor bounds their freshness. A caller that needs
+/// a height to bound a confirmation against asks `control.wallet.peak` for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinByIdResult {
+    /// The coin, or `null` when the consulted chain holds no coin with that id (see the type docs).
+    pub coin: Option<WalletCoinRecord>,
+    /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
+    pub source: Option<WalletReadSource>,
+    /// Whether this answer reflects a caught-up local view; `false` for every fallback answer.
+    pub synced: bool,
+    /// The peak height this answer reflects, or `null` when none applies (every fallback answer).
     pub peak_height: Option<u32>,
 }
 

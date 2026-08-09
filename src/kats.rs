@@ -20,6 +20,14 @@ use crate::traits::{build_request, parse_response, ControlHandler};
 /// from the SAME handler — a mock that could only accept could not express a refusal at all.
 const REJECTED_BUNDLE: &str = "beef";
 
+/// The one coin id [`MockNode`] knows about — SPENT, which is the state `control.wallet.coins`
+/// can never report and the state a mint observation turns on.
+const SPENT_COIN: &str = "abababababababababababababababababababababababababababababababab";
+
+/// A well-formed coin id [`MockNode`] has never heard of, so "absent" is reachable from the same
+/// handler as "found" and the two answers can be told apart.
+const ABSENT_COIN: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+
 const STORE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ROOT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -128,6 +136,12 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coins","params":{"address":"xch1exampleaddr","asset":"xch"}}),
     );
     assert_request(
+        &WalletCoinByIdParams {
+            coin_id: "ab".repeat(32),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinById","params":{"coin_id":"ab".repeat(32)}}),
+    );
+    assert_request(
         &WalletPeakParams {},
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.peak","params":{}}),
     );
@@ -200,6 +214,22 @@ fn golden_response_result_vectors_are_byte_stable() {
     // that is the only shape that leaves "unreachable" free to be an error.
     assert_result_round_trips::<results::WalletCoinsResult>(json!({
         "coins": [], "source": "fallback", "synced": false, "peak_height": null
+    }));
+    // `control.wallet.coinById` — the SPENT coin. No `.coins` vector can carry one: that method
+    // answers with unspent coins only, which is exactly why observing a mint needs this method.
+    // `asset` is null because a coin id alone does not classify a coin (see `WalletCoinRecord`).
+    assert_result_round_trips::<results::WalletCoinByIdResult>(json!({
+        "coin": {
+            "coin_id": "ab".repeat(32), "asset": null, "amount": 1_000_000_000_000u64,
+            "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
+            "created_height": 5_000_000u32, "spent_height": 5_000_042u32
+        },
+        "source": "fallback", "synced": false, "peak_height": null
+    }));
+    // A chain that was consulted and holds no such coin. A SUCCESS, so that "unreachable" stays
+    // free to be an error.
+    assert_result_round_trips::<results::WalletCoinByIdResult>(json!({
+        "coin": null, "source": "fallback", "synced": false, "peak_height": null
     }));
     assert_result_round_trips::<results::WalletPeakResult>(json!({
         "peak_height": 5_000_000u32, "synced": true
@@ -529,7 +559,7 @@ impl ControlHandler for MockNode {
         Ok(results::WalletCoinsResult {
             coins: vec![results::WalletCoinRecord {
                 coin_id: params.address,
-                asset: params.asset,
+                asset: Some(params.asset),
                 amount: match params.asset {
                     Asset::Xch => 1,
                     Asset::Dig => 2,
@@ -542,6 +572,29 @@ impl ControlHandler for MockNode {
             source: Some(results::WalletReadSource::Db),
             synced: true,
             peak_height: Some(5_000_000),
+        })
+    }
+    /// Knows exactly one coin — [`SPENT_COIN`] — and reports every other id as absent. Two ids, not
+    /// one, so a handler that answered `coin: null` unconditionally (or echoed whatever it was
+    /// asked) could not pass the routing test below.
+    async fn wallet_coin_by_id(
+        &self,
+        params: WalletCoinByIdParams,
+    ) -> Result<results::WalletCoinByIdResult, ControlError> {
+        let coin = (params.coin_id == SPENT_COIN).then(|| results::WalletCoinRecord {
+            coin_id: SPENT_COIN.into(),
+            asset: None,
+            amount: 1_000_000_000_000,
+            parent_coin_info: "11".repeat(32),
+            puzzle_hash: "22".repeat(32),
+            created_height: Some(5_000_000),
+            spent_height: Some(5_000_042),
+        });
+        Ok(results::WalletCoinByIdResult {
+            coin,
+            source: Some(results::WalletReadSource::Fallback),
+            synced: false,
+            peak_height: None,
         })
     }
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError> {
@@ -822,7 +875,11 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::Subscribe | ControlMethod::Unsubscribe => json!({"store_id": STORE}),
         ControlMethod::PairingRequest => json!({"client_name": "c"}),
         ControlMethod::PairingPoll => json!({"pairing_id": "x"}),
-        ControlMethod::WalletBalance => json!({"address": "xch1abc", "asset": "dig"}),
+        ControlMethod::WalletBalance | ControlMethod::WalletCoins => {
+            json!({"address": "xch1abc", "asset": "dig"})
+        }
+        ControlMethod::WalletCoinById => json!({ "coin_id": ABSENT_COIN }),
+        ControlMethod::WalletBroadcast => json!({"signed_bundle_hex": "deadbeef"}),
         _ => json!({}),
     }
 }
@@ -840,7 +897,11 @@ fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
     })
     .expect("coins must route");
     assert_eq!(coins.coins[0].coin_id, "xch1mintfunder");
-    assert_eq!(coins.coins[0].asset, Asset::Dig);
+    assert_eq!(
+        coins.coins[0].asset,
+        Some(Asset::Dig),
+        "an address+asset read KNOWS the asset and must keep reporting it concretely --          `null` is reserved for a read that classified nothing"
+    );
     assert_eq!(
         coins.coins[0].amount, 2,
         "the DIG amount proves the ASSET reached the handler, not just the address"
@@ -859,6 +920,118 @@ fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
     .expect("broadcast must route");
     assert!(pushed.accepted);
     assert_eq!(pushed.rejection, None);
+}
+
+/// **`control.wallet.coinById` reaches its own handler, and reports a SPENT coin.**
+///
+/// The assertion is keyed to something only this handler could produce: a non-null `spent_height`.
+/// `control.wallet.coins` answers by address with unspent coins only, so an arm mis-wired to it
+/// could not report a spend height at all — which is the fact `mint_status` needs.
+#[test]
+fn the_dispatcher_routes_coin_by_id_to_its_own_handler() {
+    let found = round_trip(&WalletCoinByIdParams {
+        coin_id: SPENT_COIN.into(),
+    })
+    .expect("coinById must route");
+
+    let coin = found.coin.expect("the mock knows this coin");
+    assert_eq!(coin.coin_id, SPENT_COIN);
+    assert_eq!(
+        coin.spent_height,
+        Some(5_000_042),
+        "the spend height is the whole reason this method exists"
+    );
+    assert_eq!(
+        coin.asset, None,
+        "a by-id read classifies nothing; `null` says so rather than asserting a class"
+    );
+}
+
+/// **An absent coin is an ANSWER, not an error.**
+///
+/// The nearest wrong implementation maps "no such coin" onto the error channel, where a caller
+/// cannot tell it from an unreachable chain — and `mint_status` would then report a mint whose coin
+/// genuinely does not exist as merely pending, forever, with the money already gone.
+///
+/// The fixture varies ONE thing against the found case above: which coin id is asked for. Both
+/// answers come from the same handler, so a handler that could only ever answer one way fails here.
+#[test]
+fn an_absent_coin_is_a_result_not_an_error() {
+    let absent = round_trip(&WalletCoinByIdParams {
+        coin_id: ABSENT_COIN.into(),
+    })
+    .expect("an unknown coin must arrive on the Ok channel, never as a control error");
+
+    assert_eq!(absent.coin, None);
+
+    // And it is distinguishable, on the wire, from every error envelope: an error response carries
+    // no `result` at all, so a client can never read one as "the chain says no such coin".
+    let ok = JsonRpcResponse::success(RequestId::Number(1), serde_json::to_value(&absent).unwrap());
+    assert!(ok.error.is_none(), "an absent coin is not an error");
+    assert_eq!(ok.into_result().unwrap()["coin"], json!(null));
+
+    for code in [
+        ControlErrorCode::WalletNoChainSource,
+        ControlErrorCode::WalletReadFailed,
+        ControlErrorCode::WalletRateLimited,
+    ] {
+        let failed =
+            JsonRpcResponse::error(RequestId::Number(1), ControlError::of(code, "unreachable"));
+        assert!(
+            parse_response::<WalletCoinByIdParams>(failed).is_err(),
+            "{} must not decode into an absent-coin result",
+            code.name()
+        );
+    }
+}
+
+/// A coin id that is not lowercase 64-hex is refused BEFORE any chain is consulted, as
+/// `-32602 INVALID_PARAMS` — a malformed request, never a "no such coin" answer.
+///
+/// The `0x` prefix is the one tolerated decoration, because callers hand-copy ids out of block
+/// explorers that print it. It is normalized away, never echoed.
+#[test]
+fn a_malformed_coin_id_is_invalid_params_not_an_absent_coin() {
+    for bad in [
+        "",
+        "ab",                              // too short
+        &"ab".repeat(33),                  // too long
+        &"AB".repeat(32),                  // uppercase is not the wire form
+        &format!("{}zz", "ab".repeat(31)), // non-hex
+        &format!("0x{}", "ab".repeat(31)), // 0x-prefixed but short
+        &format!(" {} ", "ab".repeat(32)), // padded
+    ] {
+        let node = MockNode;
+        let req = JsonRpcRequest::new(
+            RequestId::Number(1),
+            ControlMethod::WalletCoinById.name(),
+            json!({ "coin_id": bad }),
+        );
+        let err = block_on(node.dispatch(req)).into_result().unwrap_err();
+        assert_eq!(
+            err.code_enum(),
+            Some(ControlErrorCode::InvalidParams),
+            "{bad:?} must be refused as malformed params"
+        );
+    }
+
+    // The tolerated decoration: `0x` + 64 hex reaches the handler as the unprefixed id.
+    let node = MockNode;
+    let req = JsonRpcRequest::new(
+        RequestId::Number(1),
+        ControlMethod::WalletCoinById.name(),
+        json!({ "coin_id": format!("0x{SPENT_COIN}") }),
+    );
+    let found: results::WalletCoinByIdResult =
+        serde_json::from_value(block_on(node.dispatch(req)).into_result().unwrap()).unwrap();
+    assert_eq!(
+        found
+            .coin
+            .expect("the 0x form names a coin the mock knows")
+            .coin_id,
+        SPENT_COIN,
+        "the prefix is normalized away and never emitted"
+    );
 }
 
 /// **A mempool refusal is a successful call.** The nearest wrong implementation maps a refusal onto
@@ -912,7 +1085,7 @@ fn dig_apps_frozen_engine_shapes_deserialize_our_wallet_results() {
     let coins = serde_json::to_value(results::WalletCoinsResult {
         coins: vec![results::WalletCoinRecord {
             coin_id: "aa".repeat(32),
-            asset: Asset::Dig,
+            asset: Some(Asset::Dig),
             amount: 2_000_000_000_000,
             parent_coin_info: "bb".repeat(32),
             puzzle_hash: "cc".repeat(32),

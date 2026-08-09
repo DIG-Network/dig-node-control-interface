@@ -205,6 +205,18 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletCoinsParams,
     ) -> Result<results::WalletCoinsResult, ControlError>;
+    /// `control.wallet.coinById` (READ-only, OPEN)
+    ///
+    /// `Ok(coin: None)` MUST mean "a chain was consulted and holds no such coin". A read that could
+    /// not consult a chain MUST return the matching catalogued error instead — a caller that cannot
+    /// tell those apart reports a spent mint as pending forever.
+    ///
+    /// The params arrive already validated (lowercase 64-hex, `0x` stripped): a malformed id is
+    /// refused by the dispatcher as `INVALID_PARAMS` before this method is called.
+    async fn wallet_coin_by_id(
+        &self,
+        params: params::WalletCoinByIdParams,
+    ) -> Result<results::WalletCoinByIdResult, ControlError>;
     /// `control.wallet.peak` (READ-only, OPEN)
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
     /// `control.wallet.broadcast` (TOKEN-GATED)
@@ -305,6 +317,12 @@ pub trait ControlHandler: Sync {
             ControlMethod::ListSubscriptions => encode(self.list_subscriptions().await?),
             ControlMethod::WalletBalance => encode(self.wallet_balance(decode(params)?).await?),
             ControlMethod::WalletCoins => encode(self.wallet_coins(decode(params)?).await?),
+            // Validated HERE, not in the handler: the refusal is part of the contract, so every
+            // node serving this surface refuses the same ids without re-deriving the rule.
+            ControlMethod::WalletCoinById => {
+                let params: params::WalletCoinByIdParams = decode(params)?;
+                encode(self.wallet_coin_by_id(params.validated()?).await?)
+            }
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
             ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),
