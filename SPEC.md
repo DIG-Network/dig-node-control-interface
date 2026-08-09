@@ -34,7 +34,9 @@ rides over it.
 
 ### 2.1 Authorization
 
-- Every `control.*` method is **token-gated**: the caller MUST present the node's local control token
+- Every `control.*` method is **token-gated** EXCEPT the open surface enumerated in §4 — the pairing
+  bootstrap (`pairing.request`, `pairing.poll`) and the four wallet chain reads, which need only
+  public chain data. For every other method the caller MUST present the node's local control token
   as the `X-Dig-Control-Token` request header (preferred) or a `params._control_token` field. The
   token is a 64-hex value the node mints at first run into its machine-wide state dir with a
   restrictive ACL; possession of the on-disk token is authorization. A call without a valid token MUST
@@ -95,13 +97,14 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
 | `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
+| `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The three wallet CHAIN READS are served WITHOUT a control token, because each needs only a public
-address — never a seed, a key, or a signature. `control.wallet.broadcast` is token-gated: it puts
+The four wallet CHAIN READS are served WITHOUT a control token, because each needs only public chain
+data — an address or a coin id, never a seed, a key, or a signature. `control.wallet.broadcast` is token-gated: it puts
 bytes on the network. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
 
@@ -129,11 +132,55 @@ opposite remedies — see §4.2.
   is normative and not a quality-of-implementation note: an empty list on an unreachable chain tells
   a holder of funds that they hold nothing, and a spend built on that answer refuses with a
   shortfall that is not true.
-- **`WalletCoinRecord`**: `{coin_id:string, asset:"xch"|"dig", amount:u64, parent_coin_info:string,
-  puzzle_hash:string, created_height:u32|null, spent_height:u32|null}`. All hashes are lowercase
-  64-hex, unprefixed. `created_height:null` means the coin is known only from the mempool;
-  `spent_height:null` means unspent. The first three fields are a strict SUPERSET of dig-app's
-  frozen `CoinRecord`.
+- **`WalletCoinRecord`**: `{coin_id:string, asset:"xch"|"dig"|null, amount:u64,
+  parent_coin_info:string, puzzle_hash:string, created_height:u32|null, spent_height:u32|null}`. All
+  hashes are lowercase 64-hex, unprefixed. `created_height:null` means the coin is known only from
+  the mempool; `spent_height:null` means unspent. The first three fields are a strict SUPERSET of
+  dig-app's frozen `CoinRecord`.
+
+  `asset:null` MUST mean THE READ DID NOT CLASSIFY THE COIN. It MUST NOT be read as "no asset" and
+  MUST NOT be defaulted to XCH. A singleton, a CAT and a plain XCH coin are indistinguishable from a
+  coin id alone — telling them apart requires inspecting the puzzle, which a coin-record read does
+  not do. `control.wallet.coins` MUST report the concrete asset it was SCOPED to and MUST NOT emit
+  `asset:null`: dig-app's frozen `CoinRecord` requires a non-null asset there, so `null` is a hard
+  deserialization failure, not a degraded read. `control.wallet.coinById` MUST report `null`.
+- **`WalletCoinByIdResult`**: `{coin:WalletCoinRecord|null, source:"db"|"fallback"|null, synced:bool,
+  peak_height:u32|null}`. ONE coin, named by its own id, SPENT OR UNSPENT.
+
+  `coin:null` MUST mean the node consulted a chain and it holds no coin with that id. A node that
+  could NOT consult a chain MUST return the matching §5 wallet error instead — never `coin:null`.
+  These MUST NOT be collapsed: the first says stop waiting, the second says retry the read. A caller
+  that conflates them reports a mint whose coin does not exist as pending forever, with the funds
+  already spent.
+
+  The `coin` key MUST be present on every response; `null` is a verdict and MUST NOT be conveyed by
+  omitting the field.
+
+  `coin_id` MUST be lowercase 64-hex; a `0x` prefix MUST be accepted on input and MUST NOT be
+  emitted. Any other value MUST be refused as `-32602 INVALID_PARAMS` BEFORE any chain is consulted,
+  so that an unanswerable question never wears the shape of an answer. There is no `asset`
+  parameter: a coin id is not asset-scoped.
+
+  `source` names which tier answered, and every freshness field describes THAT tier, exactly as for
+  `WalletBalanceResult` below: a `"fallback"` answer MUST report `synced:false` and
+  `peak_height:null`; a `"db"` answer means the node's own replica answered and MUST report
+  `synced:true` and that replica's peak. A caller needing a height to bound a confirmation against
+  reads `control.wallet.peak`.
+
+  **A node MUST NOT answer `coin:null` from a view that could not have held the coin.** A replica
+  that is not caught up, or a local index that is address-scoped rather than a full chain view, has
+  not established absence — only its own inability to see. Such a node MUST return `-32040
+  WALLET_NO_CHAIN_SOURCE` or `-32042 WALLET_READ_FAILED`. This is normative and load-bearing: the two
+  coins this method exists to observe are a created coin sitting at no wallet address and a funding
+  coin already spent, both of which an address-scoped view is GUARANTEED to miss, so a `coin:null`
+  from one would report a mint that really happened as never having happened, with the funds gone.
+  `-32041 WALLET_NOT_SYNCED` is not used here — it names a wallet-scoped branch this method does not
+  have — but a node that is not synced still MUST NOT manufacture a negative answer; it errors.
+
+  This method is how a pushed spend becomes OBSERVABLE. `control.wallet.broadcast`'s `accepted:true`
+  reports mempool admission only; only a buried confirmation of the created coin is evidence.
+  `control.wallet.coins` cannot supply it — it answers by ADDRESS and lists UNSPENT coins only, so it
+  sees neither a created coin sitting at no wallet address nor a funding coin the spend consumed.
 - **`WalletPeakResult`**: `{peak_height:u32|null, synced:bool}`. The node's chain peak, independent
   of any address. `peak_height:null` means the node tracks NO height — it MUST NOT be read as height
   zero, which every block is trivially above. A caller bounding a claimed confirmation MUST treat
@@ -254,7 +301,7 @@ a struct over them.
 
 A client MUST branch on which method it called:
 
-- On an OPEN read (`control.wallet.balance` / `.coins` / `.peak`), `-32030 UNAUTHORIZED` can only
+- On an OPEN read (`control.wallet.balance` / `.coins` / `.coinById` / `.peak`), `-32030 UNAUTHORIZED` can only
   come from a node build that predates the method and gates the whole `control.*` namespace. The
   truth is "this node cannot do that yet" and the remedy is an UPGRADE.
 - On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is

@@ -1,5 +1,5 @@
 //! Typed request params for the control methods, each bound to its method + result via
-//! [`ControlCall`](crate::traits::ControlCall).
+//! [`crate::traits::ControlCall`].
 //!
 //! One params type per method (even where two methods share the same field shape, e.g. the four
 //! `{ store }` methods) so the compile-time method↔params↔result binding is exact: a caller passes
@@ -242,6 +242,86 @@ pub struct WalletCoinsParams {
     pub asset: Asset,
 }
 control_call!(WalletCoinsParams => ControlMethod::WalletCoins, results::WalletCoinsResult);
+
+/// The length of a coin id in lowercase hex characters: a 32-byte hash.
+const COIN_ID_HEX_LEN: usize = 64;
+
+/// `control.wallet.coinById` params: WHICH coin, named by its own id.
+///
+/// # Why there is no `asset` here
+///
+/// A coin id names one coin on one chain. It is not scoped to an address and not scoped to an
+/// asset, and a node reading a coin record learns neither — so an asset parameter here could only
+/// be a claim the read never checks. The answer's
+/// [`asset`](crate::results::WalletCoinRecord::asset) is `null` for the same reason.
+///
+/// # Why the method exists at all
+///
+/// [`WalletCoinsParams`] answers by ADDRESS and lists UNSPENT coins only. A mint's evidence is the
+/// opposite shape: the created DID coin (which sits at nobody's wallet address) and the funding
+/// coin the mint SPENT (which is, by then, gone from every unspent list). Without a by-id read a
+/// pushed mint can never be observed — a permanent "pending" with the money already spent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalletCoinByIdParams {
+    /// The coin id: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input (block
+    /// explorers print one) and normalized away by [`Self::validated`]; it is never emitted.
+    pub coin_id: String,
+}
+control_call!(WalletCoinByIdParams => ControlMethod::WalletCoinById, results::WalletCoinByIdResult);
+
+const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
+
+fn normalize_coin_id(coin_id: &str) -> Option<&str> {
+    let normalized = coin_id.strip_prefix("0x").unwrap_or(coin_id);
+    let well_formed = normalized.len() == COIN_ID_HEX_LEN
+        && normalized
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    well_formed.then_some(normalized)
+}
+
+impl<'de> Deserialize<'de> for WalletCoinByIdParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawWalletCoinByIdParams {
+            coin_id: String,
+        }
+
+        let raw = RawWalletCoinByIdParams::deserialize(deserializer)?;
+        let coin_id = normalize_coin_id(&raw.coin_id)
+            .ok_or_else(|| serde::de::Error::custom(COIN_ID_ERROR))?
+            .to_owned();
+        Ok(Self { coin_id })
+    }
+}
+
+impl WalletCoinByIdParams {
+    /// Normalize and check the coin id, or reject the request as `-32602 INVALID_PARAMS`.
+    ///
+    /// A malformed id is a malformed REQUEST, and the node refuses it here — before consulting any
+    /// chain. That ordering is normative rather than an optimisation: were a bad id allowed through,
+    /// the read would come back with no such coin, and the caller would be told the honest-looking
+    /// answer `coin: null` about a coin it never actually asked after. An unanswerable question and
+    /// a chain that answered "no" must never wear the same shape.
+    ///
+    /// Accepts exactly two spellings — 64 lowercase hex characters, or the same 64 preceded by
+    /// `0x`. Uppercase, whitespace and every other length are refused, because the contract's hex
+    /// wire form is lowercase and unprefixed everywhere else in this crate.
+    pub fn validated(self) -> Result<Self, crate::error::ControlError> {
+        let normalized = normalize_coin_id(&self.coin_id).ok_or_else(|| {
+            crate::error::ControlError::of(
+                crate::error::ControlErrorCode::InvalidParams,
+                COIN_ID_ERROR,
+            )
+        })?;
+        Ok(WalletCoinByIdParams {
+            coin_id: normalized.to_owned(),
+        })
+    }
+}
 
 /// `control.wallet.peak` params — none.
 ///
