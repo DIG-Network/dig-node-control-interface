@@ -51,8 +51,8 @@ pub enum Category {
     Peers,
     /// The node's subscribed-store set.
     Subscriptions,
-    /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak)
-    /// plus the push of an already-signed spend bundle.
+    /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak,
+    /// sync status) plus the push of an already-signed spend bundle.
     Wallet,
 }
 
@@ -143,6 +143,8 @@ pub enum ControlMethod {
     WalletCoinById,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
+    /// `control.wallet.syncStatus` — read whether the wallet's chain replica is being kept current.
+    WalletSyncStatus,
     /// `control.wallet.broadcast` — push an ALREADY-SIGNED spend bundle to the network.
     WalletBroadcast,
 
@@ -188,6 +190,7 @@ impl ControlMethod {
             ControlMethod::WalletCoins => "control.wallet.coins",
             ControlMethod::WalletCoinById => "control.wallet.coinById",
             ControlMethod::WalletPeak => "control.wallet.peak",
+            ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
             ControlMethod::PairingRequest => "pairing.request",
             ControlMethod::PairingPoll => "pairing.poll",
@@ -239,6 +242,7 @@ impl ControlMethod {
                 | ControlMethod::WalletCoins
                 | ControlMethod::WalletCoinById
                 | ControlMethod::WalletPeak
+                | ControlMethod::WalletSyncStatus
         )
     }
 
@@ -269,6 +273,7 @@ impl ControlMethod {
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
             | ControlMethod::WalletPeak
+            | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
             _ => Routing::Owned,
@@ -309,6 +314,7 @@ impl ControlMethod {
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
             | ControlMethod::WalletPeak
+            | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Category::Wallet,
         }
     }
@@ -346,6 +352,7 @@ impl ControlMethod {
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
             ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
+            ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
@@ -387,6 +394,7 @@ impl ControlMethod {
         ControlMethod::WalletCoins,
         ControlMethod::WalletCoinById,
         ControlMethod::WalletPeak,
+        ControlMethod::WalletSyncStatus,
         ControlMethod::WalletBroadcast,
         ControlMethod::PairingRequest,
         ControlMethod::PairingPoll,
@@ -429,13 +437,14 @@ mod tests {
             "control.wallet.coins",
             "control.wallet.coinById",
             "control.wallet.peak",
+            "control.wallet.syncStatus",
         ]
         .into_iter()
         .collect();
         assert_eq!(
             expected_open.len(),
-            6,
-            "the open surface is six named methods"
+            7,
+            "the open surface is seven named methods"
         );
         let actual_open: BTreeSet<&str> = ControlMethod::ALL
             .iter()
@@ -503,6 +512,7 @@ mod tests {
             "control.wallet.coins",
             "control.wallet.coinById",
             "control.wallet.peak",
+            "control.wallet.syncStatus",
             "control.wallet.broadcast",
             "control.peerStatus",
             "control.peers.connect",

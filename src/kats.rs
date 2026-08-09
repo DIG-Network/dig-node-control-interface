@@ -153,6 +153,10 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.peak","params":{}}),
     );
     assert_request(
+        &WalletSyncStatusParams {},
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.syncStatus","params":{}}),
+    );
+    assert_request(
         &WalletBroadcastParams {
             signed_bundle_hex: "deadbeef".into(),
         },
@@ -256,6 +260,24 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::WalletPeakResult>(json!({
         "peak_height": null, "synced": false
     }));
+    // `control.wallet.syncStatus`, all three phases. `not_started` carries a null height rather
+    // than 0 -- a wallet that has never synced and a wallet synced to the genesis block must not
+    // wear the same shape -- and `chia_peer_count` is present in every one of them, because the
+    // count is what turns "syncing" into either "syncing" or "syncing, connected to nothing".
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "not_started", "peak_height": null, "chia_peer_count": 0u32
+    }));
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "syncing", "peak_height": 4_000_000u32, "chia_peer_count": 3u32
+    }));
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32
+    }));
+    // A node that cannot observe the peer count at all: `null`, which is NOT `0`. `0` is a measured
+    // zero and licenses "syncing -- no peers"; `null` licenses no claim about connectivity.
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "syncing", "peak_height": null, "chia_peer_count": null
+    }));
     assert_result_round_trips::<results::WalletBroadcastResult>(json!({
         "accepted": true, "transaction_id": "dd".repeat(32), "rejection": null
     }));
@@ -306,6 +328,60 @@ fn the_tier_tokens_are_the_lowercase_wire_spellings() {
             src
         );
     }
+}
+
+/// The three wallet-sync phases spell themselves on the wire as these exact snake_case tokens,
+/// pinned literally so renaming a Rust variant cannot silently change what a consumer must match on.
+///
+/// The set is asserted to be exactly three as well: a fourth phase would be a wire change every
+/// consumer's match must be told about, not something that may arrive unannounced.
+#[test]
+fn the_wallet_sync_phase_tokens_are_the_snake_case_wire_spellings() {
+    let pinned = [
+        (results::WalletSyncPhase::NotStarted, "not_started"),
+        (results::WalletSyncPhase::Syncing, "syncing"),
+        (results::WalletSyncPhase::Synced, "synced"),
+    ];
+    for (phase, wire) in pinned {
+        assert_eq!(serde_json::to_value(phase).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<results::WalletSyncPhase>(json!(wire)).unwrap(),
+            phase
+        );
+    }
+    assert_eq!(
+        results::WalletSyncPhase::ALL.len(),
+        pinned.len(),
+        "the phase set is exactly the three pinned above"
+    );
+}
+
+/// **`not_started` and a synced-at-genesis wallet are different values.** The fixture varies ONLY the
+/// phase while holding the height at the one value a bool-plus-height shape would collapse, so an
+/// implementation that reported progress as `synced: false` + `peak_height: 0` -- the nearest wrong
+/// shape, and the one `WalletPeakResult` already has -- cannot pass.
+#[test]
+fn never_started_is_distinguishable_from_synced_at_height_zero() {
+    let never_started = serde_json::to_value(results::WalletSyncStatusResult {
+        phase: results::WalletSyncPhase::NotStarted,
+        peak_height: None,
+        chia_peer_count: Some(0),
+    })
+    .unwrap();
+    let synced_at_genesis = serde_json::to_value(results::WalletSyncStatusResult {
+        phase: results::WalletSyncPhase::Synced,
+        peak_height: Some(0),
+        chia_peer_count: Some(1),
+    })
+    .unwrap();
+
+    assert_ne!(never_started, synced_at_genesis);
+    assert_eq!(never_started["peak_height"], json!(null));
+    assert_eq!(
+        synced_at_genesis["peak_height"],
+        json!(0),
+        "height 0 is a real height and must survive the round trip as one"
+    );
 }
 
 /// The "no dig-app code change" guarantee, pinned: the node's richer `WalletBalanceResult` is a
@@ -645,6 +721,16 @@ impl ControlHandler for MockNode {
             synced: true,
         })
     }
+    /// Reports a phase and a height NEITHER neighbouring wallet read can produce — `syncing` beside
+    /// a height the peak handler never returns — so a dispatch arm wired to `control.wallet.peak`
+    /// (whose payload is otherwise a plausible sync status) fails the routing test below.
+    async fn wallet_sync_status(&self) -> Result<results::WalletSyncStatusResult, ControlError> {
+        Ok(results::WalletSyncStatusResult {
+            phase: results::WalletSyncPhase::Syncing,
+            peak_height: Some(4_999_000),
+            chia_peer_count: Some(3),
+        })
+    }
     /// Accepts anything except [`REJECTED_BUNDLE`], which it refuses the way a mempool does — as a
     /// successful call reporting a refusal, never as an error.
     async fn wallet_broadcast(
@@ -957,6 +1043,13 @@ fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
             .peak_height,
         Some(5_000_000)
     );
+
+    // Keyed to what only the sync-status handler produces: `control.wallet.peak` answers with a
+    // DIFFERENT height and carries no phase at all, so an arm wired to it cannot land here.
+    let sync = round_trip(&WalletSyncStatusParams {}).expect("syncStatus must route");
+    assert_eq!(sync.phase, results::WalletSyncPhase::Syncing);
+    assert_eq!(sync.peak_height, Some(4_999_000));
+    assert_eq!(sync.chia_peer_count, Some(3));
 
     let pushed = round_trip(&WalletBroadcastParams {
         signed_bundle_hex: "deadbeef".into(),

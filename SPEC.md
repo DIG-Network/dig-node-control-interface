@@ -99,11 +99,12 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
+| `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The four wallet CHAIN READS are served WITHOUT a control token, because each needs only public chain
+The five wallet CHAIN READS are served WITHOUT a control token, because each needs only public chain
 data — an address or a coin id, never a seed, a key, or a signature. `control.wallet.broadcast` is token-gated: it puts
 bytes on the network. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
@@ -185,6 +186,42 @@ opposite remedies — see §4.2.
   of any address. `peak_height:null` means the node tracks NO height — it MUST NOT be read as height
   zero, which every block is trivially above. A caller bounding a claimed confirmation MUST treat
   `null` as unknown and fail closed.
+
+  `synced` here reports ONLY that the replica's initial catch-up completed; it MUST NOT be read as
+  "the wallet is being kept current", which is `WalletSyncStatusResult.phase == "synced"` and is
+  strictly stronger.
+- **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced", peak_height:u32|null,
+  chia_peer_count:u32|null}`. Whether the node's WALLET CHAIN replica is being kept current, how far
+  it has got, and how many CHIA full-node peers its sync is using. This is NOT `control.sync.status`,
+  which reports §21 DIG store sync and is unrelated.
+
+  `phase` MUST be one of the three tokens above, spelled exactly. `"synced"` MUST require BOTH that
+  the initial catch-up completed AND that at least one Chia peer connection is live at the time of
+  the read; a wallet that caught up earlier and has since lost every peer MUST report `"syncing"`.
+  `"synced"` is therefore STRICTLY STRONGER than `WalletPeakResult.synced`, which reflects only the
+  completed-catch-up flag: `"synced"` implies that flag, the flag does not imply `"synced"`. A
+  boolean MUST NOT be substituted for the three phases — "never started" and "synced at height 0"
+  are different facts and MUST NOT render the same.
+
+  `peak_height` MUST be the node's OWN replica's height, or `null` when it has none. It MUST NOT
+  fall back to the coinset oracle, which `control.wallet.peak` deliberately does: that method answers
+  what height the chain is at, this field answers how far this replica has got, and an oracle's
+  number here would report a caller's own progress using a height the replica never reached.
+  `null` MUST NOT be read as height zero.
+
+  `chia_peer_count` counts CHIA FULL-NODE peers the wallet's chain sync is connected to. `0` is an
+  OBSERVED zero and is not a fourth phase: a running sync connected to nothing reports `"syncing"`
+  with `0`, which a consumer SHOULD render as "syncing — no peers". `null` means the node cannot
+  observe the count and licenses no claim about connectivity. This count is NOT the DIG
+  gossip/content peer count from `control.peerStatus` (`connected_peers` / `relay_peer_count`); the
+  two are unrelated numbers, and a surface labelling either one bare "peers" beside a wallet sync
+  status asserts something false.
+
+  The height reported is the height of the LAST EXISTING block the peer view reported
+  (`NewPeakWallet.height` / `RespondPuzzleState.height` from a real full node). This surface performs
+  no confirmation-depth arithmetic; a consumer computing depth MUST floor its own input rather than
+  assume a convention, because `peak_height` means the NEXT height on a simulator and the last
+  existing block on a full node.
 - **`WalletBroadcastResult`**: `{accepted:bool, transaction_id:string|null, rejection:string|null}`.
   The node pushes an ALREADY-SIGNED bundle; it MUST NOT sign, and MUST NOT accept any parameter it
   could sign with (§4.3).

@@ -671,12 +671,117 @@ pub struct WalletCoinByIdResult {
 /// `peak_height: null` is an honest "this node tracks no height yet", not a zero. A caller bounding
 /// a claimed confirmation MUST treat it as unknown rather than as height 0, which every block is
 /// trivially above.
+///
+/// # This `synced` is the WEAKER of the contract's two same-named notions
+///
+/// [`synced`](Self::synced) here reports only that the replica's initial catch-up COMPLETED. It says
+/// nothing about whether the wallet is still connected to a Chia peer, so a node that caught up
+/// yesterday and has been offline since still reports `synced: true` beside a height that stopped
+/// moving. [`WalletSyncStatusResult::phase`] answers the stronger question — *is this being kept
+/// current?* — and `WalletSyncPhase::Synced` therefore IMPLIES this flag while this flag does not
+/// imply that phase. The two are stated in terms of each other on purpose: they carry the same word
+/// and would otherwise drift apart silently.
+///
+/// # The height is the last EXISTING block
+///
+/// It is the height of the last block the peer view reported, never a next-block height. A consumer
+/// computing confirmation depth must floor its own arithmetic rather than assume a convention — see
+/// [`WalletSyncStatusResult`], which records why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletPeakResult {
     /// The peak block height the node's chain view has reached, or `null` when it has none.
     pub peak_height: Option<u32>,
-    /// Whether the node's own chain replica is caught up to that peak.
+    /// Whether the node's own chain replica COMPLETED its catch-up. Weaker than
+    /// [`WalletSyncPhase::Synced`] — see the type docs.
     pub synced: bool,
+}
+
+/// How far the node's wallet chain replica has got — the three states a background sync can be in.
+///
+/// Three named states rather than a boolean, because "has never started" and "is caught up" are
+/// different facts and a `bool` can only carry one of them. Paired with a `peak_height` a boolean
+/// forces a never-started wallet to report some height, and 0 is the only one available — which
+/// reads as *synced to the genesis block*, a claim about the chain that is simply false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletSyncPhase {
+    /// No sync has begun: the wallet holds no replica of the chain and is not building one.
+    NotStarted,
+    /// A sync is running — either the initial catch-up, or the ongoing task that keeps the replica
+    /// current. A wallet whose catch-up finished but whose peer connections have all dropped is
+    /// `Syncing`, not [`Synced`](Self::Synced): it is trying to be current and is not.
+    Syncing,
+    /// The initial catch-up completed AND at least one Chia peer connection is currently live, so
+    /// the replica is being KEPT current rather than merely having once been.
+    Synced,
+}
+
+impl WalletSyncPhase {
+    /// Every phase, in progress order — the enumeration a machine reads, and the anchor the
+    /// conformance KATs pin the wire tokens against.
+    pub const ALL: &'static [WalletSyncPhase] = &[
+        WalletSyncPhase::NotStarted,
+        WalletSyncPhase::Syncing,
+        WalletSyncPhase::Synced,
+    ];
+}
+
+/// `control.wallet.syncStatus` — is the wallet's chain replica being kept current, how far has it
+/// got, and how many Chia peers is it using?
+///
+/// # `Synced` means BEING KEPT CURRENT, not ONCE CAUGHT UP
+///
+/// [`phase`](Self::phase) is [`WalletSyncPhase::Synced`] only when the initial catch-up completed
+/// AND at least one Chia peer connection is live right now. A wallet that caught up yesterday and
+/// has been offline since MUST report [`Syncing`](WalletSyncPhase::Syncing). This makes `phase ==
+/// Synced` STRICTLY STRONGER than [`WalletPeakResult::synced`], which reflects only the
+/// completed-catch-up flag: `Synced` implies that flag, the flag does not imply `Synced`. Both types
+/// say so, because the two notions share a word and nothing but the docs would keep them aligned.
+///
+/// This is the whole reason the method exists. A surface asking *does my wallet stay synced?* cannot
+/// be answered by a flag that a disconnected wallet still sets.
+///
+/// # The height NEVER comes from a third-party oracle
+///
+/// [`peak_height`](Self::peak_height) is the node's OWN replica's height or `null`. It MUST NOT fall
+/// back to the coinset oracle. `control.wallet.peak` deliberately does fall back, because it answers
+/// a different question — *what height is the chain at?* — whereas this field answers *how far has
+/// this replica got?* An oracle's height here would report a caller's own sync progress using a
+/// number the replica never reached, which is precisely the reading a progress display makes.
+///
+/// # `chia_peer_count: 0` is the disambiguator, not a fourth phase
+///
+/// A sync that is running while connected to nothing reports `Syncing` with a count of `0`, and a
+/// consumer SHOULD render the count alongside the phase for exactly that reason: "syncing — no
+/// peers" is honest where a bare "syncing" implies progress that is not happening. `null` means the
+/// node cannot observe the count at all and licenses no claim about connectivity either way.
+///
+/// # These are CHIA peers, not DIG peers
+///
+/// [`chia_peer_count`](Self::chia_peer_count) counts CHIA FULL-NODE peers the wallet's chain sync is
+/// connected to. It is NOT the DIG gossip/content peer count from `control.peerStatus`
+/// (`connected_peers` / `relay_peer_count`); the two are unrelated numbers that move independently.
+/// A surface that placed one of them beside a wallet sync status under a bare label of "peers" would
+/// assert something false — a node with many DIG peers and no Chia peer is a wallet that is not
+/// syncing at all.
+///
+/// # No confirmation-depth arithmetic happens here
+///
+/// The height recorded is the height of the LAST EXISTING block the peer view reported
+/// (`NewPeakWallet.height` / `RespondPuzzleState.height` from a real full node). This surface
+/// performs no depth arithmetic. dig_ecosystem#2483 records that `peak_height`'s meaning differs
+/// between a simulator (the NEXT height) and a full node (the last existing one), so a consumer
+/// computing depth must floor its own input rather than assume a convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSyncStatusResult {
+    /// Which of the three states the wallet's chain sync is in. See [`WalletSyncPhase`].
+    pub phase: WalletSyncPhase,
+    /// The replica's own peak height, or `null` when it has none — never height 0 as a stand-in for
+    /// unknown, and never an oracle's height. See the type docs.
+    pub peak_height: Option<u32>,
+    /// How many CHIA full-node peers the sync is connected to. `0` is an observed zero; `null` means
+    /// the node cannot observe the count. Not the DIG peer count — see the type docs.
+    pub chia_peer_count: Option<u32>,
 }
 
 /// `control.wallet.broadcast` — the outcome of pushing an already-signed bundle.
