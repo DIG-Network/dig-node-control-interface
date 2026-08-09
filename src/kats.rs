@@ -408,6 +408,32 @@ fn never_started_is_distinguishable_from_synced_at_height_zero() {
     );
 }
 
+/// **The prose documents name every catalogued method.**
+///
+/// Prose has no compiler, so a method added to the catalog can leave `SPEC.md` and `README.md`
+/// describing an older, smaller surface — and both documents CLAIM to be exhaustive, which is what
+/// makes the drift harmful rather than merely untidy. `README.md` is read as the agent-facing
+/// interface reference and `SPEC.md` §2.1/§4 as the normative token-gating rule, so a missing method
+/// there is a reimplementer gating the wrong set.
+///
+/// This is deliberately a MEMBERSHIP check, not a count: a hardcoded number in prose drifts
+/// silently, whereas an absent name fails here by construction the moment the catalog grows.
+#[test]
+fn the_spec_and_readme_name_every_catalogued_method() {
+    for (doc, text) in [
+        ("SPEC.md", include_str!("../SPEC.md")),
+        ("README.md", include_str!("../README.md")),
+    ] {
+        for &m in ControlMethod::ALL {
+            assert!(
+                text.contains(m.name()),
+                "{doc} never mentions `{}` -- the document claims to be exhaustive",
+                m.name()
+            );
+        }
+    }
+}
+
 /// **Each count names its own network, and the two are not interchangeable.**
 ///
 /// The wire keys are pinned as LITERALS rather than derived from the struct, because the whole

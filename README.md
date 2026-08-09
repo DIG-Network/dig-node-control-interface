@@ -40,10 +40,15 @@ routes a raw request to the right method and builds the response.
 
 ## Authorization
 
-Every `control.*` method is token-gated: present the node's local control token as the
-`X-Dig-Control-Token` header (preferred) or a `params._control_token` field. `pairing.request` /
-`pairing.poll` are OPEN (a token-less client uses them to obtain a scoped token after local operator
-approval). The three `control.pairing.*` admin methods require the MASTER token specifically.
+Every `control.*` method is token-gated unless the tables below mark it `—`: present the node's local
+control token as the `X-Dig-Control-Token` header (preferred) or a `params._control_token` field.
+Open today are `pairing.request` / `pairing.poll` (a token-less client uses them to obtain a scoped
+token after local operator approval), the wallet CHAIN READS (they need only public chain data — an
+address or a coin id, never a key), and `control.peerCounts` (two integers about this node's own
+connectivity). The three `control.pairing.*` admin methods require the MASTER token specifically.
+
+`UNAUTHORIZED` from an OPEN method means the node predates it — upgrade the node. From
+`control.wallet.broadcast` it means what it says — find the token. See `SPEC.md` §4.2.
 
 ## Full interface reference
 
@@ -108,9 +113,24 @@ token, **M** = requires the MASTER token, **—** = open. `Route`: how the node 
 
 | Method | Auth | Route | Params | Result |
 |---|---|---|---|---|
-| `control.peerStatus` | T | del | — | (peer-pool + relay-reservation snapshot, incl. per-peer `peers[]`) |
+| `control.peerStatus` | T | del | — | (peer-pool + relay-reservation snapshot, incl. per-peer `peers[]`); its `relay.peer_count` counts THE RELAY's peers, not this node's |
+| `control.peerCounts` | — | del | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null}` — DIG content/gossip peers and CHIA full-node peers; `0` is observed, `null` unobservable |
 | `control.peers.connect` | T | del | `{peer:string}` (address or peer_id) | `{connected:true, peer_id}` |
 | `control.peers.disconnect` | T | del | `{peer:string}` (peer_id) | `{disconnected:true, peer_id}` |
+
+### Wallet chain transport (delegated to the engine)
+
+The five reads are OPEN; only the push is token-gated. The node never signs — it reads chain state
+and pushes bytes somebody else signed.
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.wallet.balance` | — | del | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
+| `control.wallet.coins` | — | del | `{address:string, asset:"xch"\|"dig"}` | `{coins:[WalletCoinRecord], source, synced, peak_height}` |
+| `control.wallet.coinById` | — | del | `{coin_id:string}` (64-hex, `0x` accepted) | `{coin:WalletCoinRecord\|null, source, synced, peak_height}`; `coin:null` = the chain holds no such coin |
+| `control.wallet.peak` | — | del | — | `{peak_height:u32\|null, synced:bool}`; `synced` = catch-up COMPLETED, weaker than `syncStatus`'s |
+| `control.wallet.syncStatus` | — | del | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}`; `synced` also requires a LIVE Chia peer |
+| `control.wallet.broadcast` | T | del | `{signed_bundle_hex:string}` | `{accepted, transaction_id, rejection}`; `accepted` = mempool admission, NOT confirmation |
 
 ### Subscriptions (delegated to the engine)
 

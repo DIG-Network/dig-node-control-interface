@@ -34,9 +34,13 @@ rides over it.
 
 ### 2.1 Authorization
 
-- Every `control.*` method is **token-gated** EXCEPT the open surface enumerated in §4 — the pairing
-  bootstrap (`pairing.request`, `pairing.poll`) and the five wallet chain reads, which need only
-  public chain data. For every other method the caller MUST present the node's local control token
+- Every `control.*` method is **token-gated** EXCEPT the open surface, which is whatever the §4
+  method table marks `no` in its Token column — that table is authoritative and this sentence must
+  never restate it as a count. Today it is the pairing bootstrap (`pairing.request`,
+  `pairing.poll`), the wallet chain reads (`control.wallet.balance` / `.coins` / `.coinById` /
+  `.peak` / `.syncStatus`), which need only public chain data, and `control.peerCounts`, which
+  discloses two integers about this node's own connectivity. For every other method the caller MUST
+  present the node's local control token
   as the `X-Dig-Control-Token` request header (preferred) or a `params._control_token` field. The
   token is a 64-hex value the node mints at first run into its machine-wide state dir with a
   restrictive ACL; possession of the on-disk token is authorization. A call without a valid token MUST
@@ -105,10 +109,12 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The five wallet CHAIN READS are served WITHOUT a control token, because each needs only public chain
-data — an address or a coin id, never a seed, a key, or a signature. `control.peerCounts` is open for
-a second reason: it discloses two integers about this node's own connectivity and no address,
-endpoint or secret. `control.wallet.broadcast` is token-gated: it puts
+The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` / `.syncStatus`)
+are served WITHOUT a control token, because each needs only public chain data — an address or a coin
+id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
+discloses two integers about this node's own connectivity and no address, endpoint or secret. The
+`Token` column above is authoritative; the open set is deliberately named here rather than counted,
+so that adding a method cannot leave a stale number behind. `control.wallet.broadcast` is token-gated: it puts
 bytes on the network. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
 
@@ -367,7 +373,8 @@ a struct over them.
 
 A client MUST branch on which method it called:
 
-- On an OPEN read (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` / `.syncStatus`), `-32030 UNAUTHORIZED` can only
+- On an OPEN read — every method the §4 table marks `no`, today `control.wallet.balance` / `.coins` /
+  `.coinById` / `.peak` / `.syncStatus` and `control.peerCounts` — `-32030 UNAUTHORIZED` can only
   come from a node build that predates the method and gates the whole `control.*` namespace. The
   truth is "this node cannot do that yet" and the remedy is an UPGRADE.
 - On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is
