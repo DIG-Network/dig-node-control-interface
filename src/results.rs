@@ -599,10 +599,11 @@ pub struct WalletCoinsResult {
 ///
 /// # The freshness fields are honest, not decorative
 ///
-/// A by-id read is served from the fallback tier, so [`synced`](Self::synced) is `false` and
-/// [`peak_height`](Self::peak_height) is `null` — the oracle's chain view produced these figures
-/// and the node's own replica neither produced them nor bounds their freshness. A caller that needs
-/// a height to bound a confirmation against asks `control.wallet.peak` for it.
+/// [`source`](Self::source) discloses which tier answered this read. If the answer is fallback-
+/// served, [`synced`](Self::synced) MUST be `false` and [`peak_height`](Self::peak_height) MUST be
+/// `null` — the oracle's chain view produced these figures and the node's own replica neither
+/// produced them nor bounds their freshness. A db-served answer MAY report a peak. A caller that
+/// needs a height to bound a confirmation against can ask `control.wallet.peak`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletCoinByIdResult {
     /// The coin, or `null` when the consulted chain holds no coin with that id (see the type docs).

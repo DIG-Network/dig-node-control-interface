@@ -139,8 +139,9 @@ opposite remedies — see §4.2.
   `asset:null` MUST mean THE READ DID NOT CLASSIFY THE COIN. It MUST NOT be read as "no asset" and
   MUST NOT be defaulted to XCH. A singleton, a CAT and a plain XCH coin are indistinguishable from a
   coin id alone — telling them apart requires inspecting the puzzle, which a coin-record read does
-  not do. `control.wallet.coins` therefore reports the concrete asset it was SCOPED to, and
-  `control.wallet.coinById` MUST report `null`.
+  not do. `control.wallet.coins` MUST report the concrete asset it was SCOPED to and MUST NOT emit
+  `asset:null`: dig-app's frozen `CoinRecord` requires a non-null asset there, so `null` is a hard
+  deserialization failure, not a degraded read. `control.wallet.coinById` MUST report `null`.
 - **`WalletCoinByIdResult`**: `{coin:WalletCoinRecord|null, source:"db"|"fallback"|null, synced:bool,
   peak_height:u32|null}`. ONE coin, named by its own id, SPENT OR UNSPENT.
 
@@ -156,8 +157,9 @@ opposite remedies — see §4.2.
   parameter: a coin id is not asset-scoped. `-32041 WALLET_NOT_SYNCED` is unreachable here — no
   address means no wallet-scoped branch.
 
-  A by-id read is fallback-served: `synced` is `false` and `peak_height` is `null`. A caller needing
-  a height to bound a confirmation against reads `control.wallet.peak`.
+  `source` names which tier answered. A fallback-served answer MUST report `synced:false` and
+  `peak_height:null`; a db-served answer MAY report a peak. A caller needing a height to bound a
+  confirmation against reads `control.wallet.peak`.
 
   This method is how a pushed spend becomes OBSERVABLE. `control.wallet.broadcast`'s `accepted:true`
   reports mempool admission only; only a buried confirmation of the created coin is evidence.

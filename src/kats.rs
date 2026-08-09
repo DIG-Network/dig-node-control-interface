@@ -369,12 +369,24 @@ impl ControlHandler for MockNode {
         })
     }
     async fn config_get(&self) -> Result<results::ConfigResult, ControlError> {
-        Err(unimpl("config_get"))
+        Ok(results::ConfigResult {
+            addr: "127.0.0.1".into(),
+            port: "9256".into(),
+            upstream: "https://rpc.dig.net".into(),
+            upstream_override: None,
+            cache_dir: "/tmp/cache".into(),
+            cache_shared: false,
+            config_path: "/tmp/config.json".into(),
+            sync_available: true,
+        })
     }
     async fn config_set_upstream(
         &self,
         params: SetUpstreamParams,
     ) -> Result<results::SetUpstreamResult, ControlError> {
+        if params.upstream == "__not_supported__" {
+            return Err(unimpl("config_set_upstream"));
+        }
         Ok(results::SetUpstreamResult {
             upstream: params.upstream,
             requires_restart: true,
@@ -389,7 +401,12 @@ impl ControlHandler for MockNode {
         })
     }
     async fn cache_get(&self) -> Result<results::CacheView, ControlError> {
-        Err(unimpl("cache_get"))
+        Ok(results::CacheView {
+            cap_bytes: 64 * 1024 * 1024,
+            used_bytes: 1024,
+            dir: "/tmp/cache".into(),
+            shared: false,
+        })
     }
     async fn cache_set_cap(
         &self,
@@ -439,7 +456,13 @@ impl ControlHandler for MockNode {
         })
     }
     async fn sync_status(&self) -> Result<results::SyncStatusResult, ControlError> {
-        Err(unimpl("sync_status"))
+        Ok(results::SyncStatusResult {
+            available: true,
+            method: "dig-sync".into(),
+            pinned_total: 0,
+            pinned_synced: 0,
+            whole_store_trigger_supported: true,
+        })
     }
     async fn sync_trigger(
         &self,
@@ -748,7 +771,12 @@ fn dispatcher_maps_malformed_params_to_invalid_params() {
 #[test]
 fn dispatcher_surfaces_a_handler_error_verbatim() {
     let node = MockNode;
-    let req = build_request(RequestId::Number(1), &ConfigGetParams {});
+    let req = build_request(
+        RequestId::Number(1),
+        &SetUpstreamParams {
+            upstream: "__not_supported__".into(),
+        },
+    );
     let resp = block_on(node.dispatch(req));
     let err = resp.into_result().unwrap_err();
     assert_eq!(err.code_enum(), Some(ControlErrorCode::NotSupported));
@@ -756,21 +784,18 @@ fn dispatcher_surfaces_a_handler_error_verbatim() {
 
 #[test]
 fn every_catalog_method_dispatches_without_panicking() {
-    // The dispatcher must have an arm for EVERY catalog method — a missing arm would not compile,
-    // but this also proves no method routes to a MethodNotFound (i.e. the name table + the match
-    // agree for all catalog methods).
+    // The dispatcher must have an arm for EVERY catalog method, and each method's minimal params
+    // fixture must be complete enough that the route succeeds rather than erroring.
     let node = MockNode;
     for &m in ControlMethod::ALL {
         let req = JsonRpcRequest::new(RequestId::Number(1), m.name(), minimal_params(m));
         let resp = block_on(node.dispatch(req));
-        if let Some(err) = &resp.error {
-            assert_ne!(
-                err.code_enum(),
-                Some(ControlErrorCode::MethodNotFound),
-                "{} routed to MethodNotFound — the dispatcher is missing an arm",
-                m.name()
-            );
-        }
+        assert!(
+            resp.error.is_none(),
+            "{} errored under minimal_params: {:?}",
+            m.name(),
+            resp.error
+        );
     }
 }
 
@@ -1034,6 +1059,16 @@ fn a_malformed_coin_id_is_invalid_params_not_an_absent_coin() {
     );
 }
 
+#[test]
+fn wallet_coin_by_id_params_refuse_malformed_ids_at_deserialization() {
+    let bad_id = "AB".repeat(32);
+    let upper = serde_json::from_value::<WalletCoinByIdParams>(json!({"coin_id": bad_id}));
+    assert!(
+        upper.is_err(),
+        "uppercase ids must fail during deserialization"
+    );
+}
+
 /// **A mempool refusal is a successful call.** The nearest wrong implementation maps a refusal onto
 /// the error channel, where it becomes indistinguishable from a network that could not be reached —
 /// and the two demand opposite remedies (retry this bundle, versus build a different one).
@@ -1118,6 +1153,44 @@ fn dig_apps_frozen_engine_shapes_deserialize_our_wallet_results() {
         serde_json::from_value(pushed).expect("dig-app must read our broadcast outcome");
     assert!(read.accepted);
     assert_eq!(read.transaction_id, Some("dd".repeat(32)));
+}
+
+#[test]
+fn dig_apps_frozen_coin_shape_rejects_null_asset_in_wallet_coins() {
+    use serde::Deserialize;
+
+    #[allow(dead_code)]
+    #[derive(Debug, Deserialize)]
+    struct AppCoinRecord {
+        coin_id: String,
+        asset: Asset,
+        amount: u64,
+    }
+    #[allow(dead_code)]
+    #[derive(Debug, Deserialize)]
+    struct AppCoinsResponse {
+        coins: Vec<AppCoinRecord>,
+    }
+
+    let coins = serde_json::to_value(results::WalletCoinsResult {
+        coins: vec![results::WalletCoinRecord {
+            coin_id: "aa".repeat(32),
+            asset: None,
+            amount: 2_000_000_000_000,
+            parent_coin_info: "bb".repeat(32),
+            puzzle_hash: "cc".repeat(32),
+            created_height: Some(5_000_000),
+            spent_height: None,
+        }],
+        source: Some(results::WalletReadSource::Db),
+        synced: true,
+        peak_height: Some(5_000_000),
+    })
+    .unwrap();
+    assert!(
+        serde_json::from_value::<AppCoinsResponse>(coins).is_err(),
+        "dig-app's frozen coin shape requires a non-null asset in control.wallet.coins"
+    );
 }
 
 /// The wallet failure codes are the ones dig-node already emits, pinned by NUMBER and SYMBOL.

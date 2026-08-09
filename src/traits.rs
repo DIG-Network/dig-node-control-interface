@@ -211,8 +211,9 @@ pub trait ControlHandler: Sync {
     /// not consult a chain MUST return the matching catalogued error instead — a caller that cannot
     /// tell those apart reports a spent mint as pending forever.
     ///
-    /// The params arrive already validated (lowercase 64-hex, `0x` stripped): a malformed id is
-    /// refused by the dispatcher as `INVALID_PARAMS` before this method is called.
+    /// The params are validated at DESERIALIZATION (lowercase 64-hex, `0x` stripped), so any path
+    /// that decodes `WalletCoinByIdParams` refuses malformed ids as `INVALID_PARAMS` before this
+    /// method is called.
     async fn wallet_coin_by_id(
         &self,
         params: params::WalletCoinByIdParams,
@@ -317,8 +318,7 @@ pub trait ControlHandler: Sync {
             ControlMethod::ListSubscriptions => encode(self.list_subscriptions().await?),
             ControlMethod::WalletBalance => encode(self.wallet_balance(decode(params)?).await?),
             ControlMethod::WalletCoins => encode(self.wallet_coins(decode(params)?).await?),
-            // Validated HERE, not in the handler: the refusal is part of the contract, so every
-            // node serving this surface refuses the same ids without re-deriving the rule.
+            // Re-validated here idempotently; deserialization already enforced the same rule.
             ControlMethod::WalletCoinById => {
                 let params: params::WalletCoinByIdParams = decode(params)?;
                 encode(self.wallet_coin_by_id(params.validated()?).await?)

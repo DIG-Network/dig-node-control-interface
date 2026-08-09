@@ -261,13 +261,42 @@ const COIN_ID_HEX_LEN: usize = 64;
 /// opposite shape: the created DID coin (which sits at nobody's wallet address) and the funding
 /// coin the mint SPENT (which is, by then, gone from every unspent list). Without a by-id read a
 /// pushed mint can never be observed — a permanent "pending" with the money already spent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WalletCoinByIdParams {
     /// The coin id: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input (block
     /// explorers print one) and normalized away by [`Self::validated`]; it is never emitted.
     pub coin_id: String,
 }
 control_call!(WalletCoinByIdParams => ControlMethod::WalletCoinById, results::WalletCoinByIdResult);
+
+const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
+
+fn normalize_coin_id(coin_id: &str) -> Option<&str> {
+    let normalized = coin_id.strip_prefix("0x").unwrap_or(coin_id);
+    let well_formed = normalized.len() == COIN_ID_HEX_LEN
+        && normalized
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    well_formed.then_some(normalized)
+}
+
+impl<'de> Deserialize<'de> for WalletCoinByIdParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawWalletCoinByIdParams {
+            coin_id: String,
+        }
+
+        let raw = RawWalletCoinByIdParams::deserialize(deserializer)?;
+        let coin_id = normalize_coin_id(&raw.coin_id)
+            .ok_or_else(|| serde::de::Error::custom(COIN_ID_ERROR))?
+            .to_owned();
+        Ok(Self { coin_id })
+    }
+}
 
 impl WalletCoinByIdParams {
     /// Normalize and check the coin id, or reject the request as `-32602 INVALID_PARAMS`.
@@ -282,17 +311,12 @@ impl WalletCoinByIdParams {
     /// `0x`. Uppercase, whitespace and every other length are refused, because the contract's hex
     /// wire form is lowercase and unprefixed everywhere else in this crate.
     pub fn validated(self) -> Result<Self, crate::error::ControlError> {
-        let normalized = self.coin_id.strip_prefix("0x").unwrap_or(&self.coin_id);
-        let well_formed = normalized.len() == COIN_ID_HEX_LEN
-            && normalized
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        if !well_formed {
-            return Err(crate::error::ControlError::of(
+        let normalized = normalize_coin_id(&self.coin_id).ok_or_else(|| {
+            crate::error::ControlError::of(
                 crate::error::ControlErrorCode::InvalidParams,
-                "coin_id must be lowercase 64-hex, optionally 0x-prefixed",
-            ));
-        }
+                COIN_ID_ERROR,
+            )
+        })?;
         Ok(WalletCoinByIdParams {
             coin_id: normalized.to_owned(),
         })
