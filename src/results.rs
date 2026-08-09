@@ -747,8 +747,12 @@ pub enum WalletSyncPhase {
     /// current. A wallet whose catch-up finished but whose peer connections have all dropped is
     /// `Syncing`, not [`Synced`](Self::Synced): it is trying to be current and is not.
     Syncing,
-    /// The initial catch-up completed AND at least one Chia peer connection is currently live, so
-    /// the replica is being KEPT current rather than merely having once been.
+    /// The initial catch-up completed AND at least one Chia peer connection is currently live: the
+    /// replica is caught up and CONNECTED, so it is in a position to be kept current.
+    ///
+    /// That is what the predicate delivers, and no more. A live connection to a stalled or lagging
+    /// peer satisfies it while the replica quietly goes stale, so this phase MUST NOT be read as
+    /// proof that the data is FRESH — only that nothing is known to be preventing freshness.
     Synced,
 }
 
@@ -765,7 +769,7 @@ impl WalletSyncPhase {
 /// `control.wallet.syncStatus` — is the wallet's chain replica being kept current, how far has it
 /// got, and how many Chia peers is it using?
 ///
-/// # `Synced` means BEING KEPT CURRENT, not ONCE CAUGHT UP
+/// # `Synced` means CAUGHT UP AND CONNECTED, not ONCE CAUGHT UP
 ///
 /// [`phase`](Self::phase) is [`WalletSyncPhase::Synced`] only when the initial catch-up completed
 /// AND at least one Chia peer connection is live right now. A wallet that caught up yesterday and
@@ -776,6 +780,13 @@ impl WalletSyncPhase {
 ///
 /// This is the whole reason the method exists. A surface asking *does my wallet stay synced?* cannot
 /// be answered by a flag that a disconnected wallet still sets.
+///
+/// **`Synced` is nevertheless not a freshness guarantee.** Being connected is not being up to date:
+/// a live connection to a stalled or lagging peer satisfies the predicate while the replica goes
+/// stale. The phase reports that catch-up finished and a peer is attached — that nothing KNOWN is
+/// preventing the replica from being kept current — and a consumer needing actual freshness must
+/// compare [`peak_height`](Self::peak_height) against something, not read this phase. Stating the
+/// limit is the point: this family exists because a surface asserted more than it knew.
 ///
 /// # The height NEVER comes from a third-party oracle
 ///
@@ -811,6 +822,22 @@ impl WalletSyncPhase {
 /// phase separated from its count reads as a contradiction. A DIG content-network count, by
 /// contrast, is not a wallet fact and does not vary with wallet state, which is why it is absent
 /// from this type rather than added for symmetry.
+///
+/// # Which field combinations are meaningful
+///
+/// `{phase: Synced, peak_height: null}` MUST NOT be emitted. A node records its peak BEFORE it marks
+/// the initial catch-up complete, so a completed catch-up always has a height behind it; a `Synced`
+/// with no height describes a state a conforming node cannot be in, and a consumer has no honest
+/// reading for it.
+///
+/// `{phase: NotStarted, peak_height: <some height>}` is the opposite case, and is EXPLICITLY
+/// LEGITIMATE — it is not a contradiction and MUST NOT be "fixed". The height is persisted in the
+/// wallet database, while the phase describes whether a sync is running IN THIS PROCESS. A node that
+/// synced yesterday and has just restarted reports exactly this, and reports it truthfully: *here is
+/// the height I reached, and no sync is running right now.* Forbidding the pair would force a
+/// conforming node to either fabricate a phase it is not in or discard a height it genuinely has —
+/// which is the dishonesty this method was created to prevent. `peak_height: null` alongside
+/// `NotStarted` is equally legitimate and means a wallet that has never synced at all.
 ///
 /// # No confirmation-depth arithmetic happens here
 ///

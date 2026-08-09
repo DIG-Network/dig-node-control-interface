@@ -233,7 +233,22 @@ impl ControlMethod {
             )
     }
 
-    /// Is this an OPEN chain read — served without a control token?
+    /// Is this an OPEN READ — served without a control token?
+    ///
+    /// Two kinds of method qualify, and they are open for different reasons:
+    ///
+    /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
+    ///   `.syncStatus`), which need only PUBLIC chain data — an address, or a coin id; never a seed,
+    ///   a key, or a signature;
+    /// - `control.peerCounts`, which is NOT a chain read: it discloses two integers about this
+    ///   node's own connectivity, and no address, endpoint, peer identity or secret. The identity
+    ///   and topology half of the same subject stays gated behind `control.peerStatus`.
+    ///
+    /// Naming both reasons matters more than it looks. The test for membership is *does this
+    /// disclose only data that is already public, or a bare count of this node's own state?* — NOT
+    /// *is it a chain read?* A future method judged against the narrower phrasing, and found to
+    /// contradict a member that was already there, invites widening the predicate by analogy rather
+    /// than against the rule.
     ///
     /// Stated on the contract rather than discovered by calling, because the two refusals a client
     /// can get here demand OPPOSITE remedies. On an open read, `UNAUTHORIZED` can only come from a

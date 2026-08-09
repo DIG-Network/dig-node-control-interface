@@ -197,8 +197,8 @@ opposite remedies — see §4.2.
   `null` as unknown and fail closed.
 
   `synced` here reports ONLY that the replica's initial catch-up completed; it MUST NOT be read as
-  "the wallet is being kept current", which is `WalletSyncStatusResult.phase == "synced"` and is
-  strictly stronger.
+  "the wallet is caught up AND connected", which is `WalletSyncStatusResult.phase == "synced"` and
+  is strictly stronger. Neither is a freshness guarantee.
 - **`PeerCountsResult`**: `{dig_peer_count:u32|null, chia_peer_count:u32|null}`. How many peers
   this node holds on EACH network. The two networks are unrelated and their counts move
   independently.
@@ -251,6 +251,22 @@ opposite remedies — see §4.2.
   `chia_peer_count:0` beside `"syncing"` is the honest "syncing — no peers" state and a phase
   separated from its count reads as a contradiction; a DIG content-network count, by contrast, is not
   a wallet fact and MUST NOT be added here for symmetry.
+
+  `"synced"` MUST NOT be read as a guarantee that the replica's data is FRESH. A live connection to
+  a stalled or lagging peer satisfies the predicate while the replica goes stale; the phase reports
+  that catch-up finished and a peer is attached, i.e. that nothing KNOWN is preventing the replica
+  from being kept current.
+
+  **Field combinations.** `{phase:"synced", peak_height:null}` MUST NOT be emitted: a node records
+  its peak before it marks the initial catch-up complete, so a completed catch-up always has a
+  height behind it, and the pair describes a state no conforming node can be in.
+
+  `{phase:"not_started", peak_height:<n>}` is NOT a contradiction and MUST be permitted. The height
+  is persisted in the wallet database while the phase describes whether a sync is running IN THIS
+  PROCESS, so a node that synced earlier and has just RESTARTED reports this pair truthfully: here
+  is the height I reached, and no sync is running right now. A node MUST NOT suppress the height or
+  fabricate a phase to avoid emitting it. `{phase:"not_started", peak_height:null}` is equally
+  legitimate and means a wallet that has never synced.
 
   The height reported is the height of the LAST EXISTING block the peer view reported
   (`NewPeakWallet.height` / `RespondPuzzleState.height` from a real full node). This surface performs

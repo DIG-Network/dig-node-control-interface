@@ -277,6 +277,13 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32
     }));
+    // THE RESTART STATE: a height with no sync running. Not a contradiction -- the height is
+    // persisted in the wallet DB while the phase describes this PROCESS -- so the contract permits
+    // it explicitly and this vector pins that it stays expressible. A shape that forbade it would
+    // force a restarted node to fabricate a phase or discard a height it genuinely has.
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "not_started", "peak_height": 4_900_000u32, "chia_peer_count": 0u32
+    }));
     // A node that cannot observe the peer count at all: `null`, which is NOT `0`. `0` is a measured
     // zero and licenses "syncing -- no peers"; `null` licenses no claim about connectivity.
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
