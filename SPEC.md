@@ -34,7 +34,9 @@ rides over it.
 
 ### 2.1 Authorization
 
-- Every `control.*` method is **token-gated**: the caller MUST present the node's local control token
+- Every `control.*` method is **token-gated** EXCEPT the open surface enumerated in §4 — the pairing
+  bootstrap (`pairing.request`, `pairing.poll`) and the four wallet chain reads, which need only
+  public chain data. For every other method the caller MUST present the node's local control token
   as the `X-Dig-Control-Token` request header (preferred) or a `params._control_token` field. The
   token is a 64-hex value the node mints at first run into its machine-wide state dir with a
   restrictive ACL; possession of the on-disk token is authorization. A call without a valid token MUST
@@ -151,15 +153,29 @@ opposite remedies — see §4.2.
   that conflates them reports a mint whose coin does not exist as pending forever, with the funds
   already spent.
 
+  The `coin` key MUST be present on every response; `null` is a verdict and MUST NOT be conveyed by
+  omitting the field.
+
   `coin_id` MUST be lowercase 64-hex; a `0x` prefix MUST be accepted on input and MUST NOT be
   emitted. Any other value MUST be refused as `-32602 INVALID_PARAMS` BEFORE any chain is consulted,
   so that an unanswerable question never wears the shape of an answer. There is no `asset`
-  parameter: a coin id is not asset-scoped. `-32041 WALLET_NOT_SYNCED` is unreachable here — no
-  address means no wallet-scoped branch.
+  parameter: a coin id is not asset-scoped.
 
-  `source` names which tier answered. A fallback-served answer MUST report `synced:false` and
-  `peak_height:null`; a db-served answer MAY report a peak. A caller needing a height to bound a
-  confirmation against reads `control.wallet.peak`.
+  `source` names which tier answered, and every freshness field describes THAT tier, exactly as for
+  `WalletBalanceResult` below: a `"fallback"` answer MUST report `synced:false` and
+  `peak_height:null`; a `"db"` answer means the node's own replica answered and MUST report
+  `synced:true` and that replica's peak. A caller needing a height to bound a confirmation against
+  reads `control.wallet.peak`.
+
+  **A node MUST NOT answer `coin:null` from a view that could not have held the coin.** A replica
+  that is not caught up, or a local index that is address-scoped rather than a full chain view, has
+  not established absence — only its own inability to see. Such a node MUST return `-32040
+  WALLET_NO_CHAIN_SOURCE` or `-32042 WALLET_READ_FAILED`. This is normative and load-bearing: the two
+  coins this method exists to observe are a created coin sitting at no wallet address and a funding
+  coin already spent, both of which an address-scoped view is GUARANTEED to miss, so a `coin:null`
+  from one would report a mint that really happened as never having happened, with the funds gone.
+  `-32041 WALLET_NOT_SYNCED` is not used here — it names a wallet-scoped branch this method does not
+  have — but a node that is not synced still MUST NOT manufacture a negative answer; it errors.
 
   This method is how a pushed spend becomes OBSERVABLE. `control.wallet.broadcast`'s `accepted:true`
   reports mempool admission only; only a buried confirmation of the created coin is evidence.

@@ -238,6 +238,18 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::WalletCoinByIdResult>(json!({
         "coin": null, "source": "fallback", "synced": false, "peak_height": null
     }));
+    // The DB tier, which every other by-id vector leaves unexercised. `source:"db"` means the node's
+    // OWN replica answered, so it carries `synced:true` and that replica's peak — the same binding
+    // the by-address reads have always had. A db answer reporting `synced:false` would be a stale
+    // view issuing a verdict; see `WalletCoinByIdResult`.
+    assert_result_round_trips::<results::WalletCoinByIdResult>(json!({
+        "coin": {
+            "coin_id": "ab".repeat(32), "asset": null, "amount": 1_000_000_000_000u64,
+            "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
+            "created_height": 5_000_000u32, "spent_height": null
+        },
+        "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
     assert_result_round_trips::<results::WalletPeakResult>(json!({
         "peak_height": 5_000_000u32, "synced": true
     }));
@@ -1064,6 +1076,34 @@ fn a_malformed_coin_id_is_invalid_params_not_an_absent_coin() {
         SPENT_COIN,
         "the prefix is normalized away and never emitted"
     );
+}
+
+/// **A verdict must be stated, never inferred from silence.** `coin:null` says the chain holds no
+/// such coin, so an ABSENT `coin` key must not decode into one. Serde's default treatment of
+/// `Option` makes the two indistinguishable, which would let almost any JSON object — including
+/// three sibling wallet results — decode into a confident "your coin does not exist".
+#[test]
+fn an_omitted_coin_field_is_a_decode_error_not_a_null_verdict() {
+    // Explicit null still decodes: the verdict is expressible, just not by omission.
+    let stated = serde_json::from_value::<results::WalletCoinByIdResult>(json!({
+        "coin": null, "source": "fallback", "synced": false, "peak_height": null
+    }))
+    .expect("an explicitly null coin is a valid verdict");
+    assert_eq!(stated.coin, None);
+
+    // Omission does not. Each of these decoded to a complete "no such coin" before the field was
+    // made required; the last three are other methods' result shapes.
+    for wire in [
+        json!({ "source": "fallback", "synced": false, "peak_height": null }),
+        json!({ "synced": false }),
+        json!({ "peak_height": 5_000_000u32, "synced": true }),
+        json!({ "coins": [], "source": "db", "synced": true, "peak_height": 5_000_000u32 }),
+    ] {
+        assert!(
+            serde_json::from_value::<results::WalletCoinByIdResult>(wire.clone()).is_err(),
+            "a payload without a `coin` key must not decode into a no-such-coin verdict: {wire}"
+        );
+    }
 }
 
 #[test]

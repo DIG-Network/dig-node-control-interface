@@ -208,8 +208,9 @@ impl ControlMethod {
     ///
     /// - the pairing bootstrap (`pairing.request` / `pairing.poll`), so a token-less client can
     ///   obtain a token at all;
-    /// - the wallet CHAIN READS ([`Category::Wallet`] minus the push), because each needs only a
-    ///   PUBLIC address — never a seed, a key, or a signature — and dig-node has served
+    /// - the wallet CHAIN READS ([`Category::Wallet`] minus the push), because each needs only
+    ///   PUBLIC chain data — an address, or a coin id on `control.wallet.coinById`; never a seed, a
+    ///   key, or a signature — and dig-node has served
     ///   `control.wallet.balance` open since #1851. A person whose node runs as a service with an
     ///   unreadable token file can still see their own money.
     ///

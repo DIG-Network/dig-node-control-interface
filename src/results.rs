@@ -513,7 +513,13 @@ pub struct WalletBalanceResult {
 pub enum WalletReadSource {
     /// The node's own local chain replica. No third party was consulted.
     Db,
-    /// A third-party coinset HTTP oracle. The queried address was disclosed off-node.
+    /// A third-party coinset HTTP oracle. The queried value — an address, or a COIN ID on
+    /// `control.wallet.coinById` — was disclosed off-node.
+    ///
+    /// The coin-id case is the more sensitive of the two, and the less obvious: an address is
+    /// disclosed on every routine balance poll, whereas querying a freshly created coin id, from the
+    /// spender's IP, at the moment of the spend, hands the oracle a `{IP, timestamp, coin id}` tuple
+    /// that ties a network identity to a specific new on-chain identity.
     Fallback,
 }
 
@@ -582,6 +588,20 @@ pub struct WalletCoinsResult {
     pub peak_height: Option<u32>,
 }
 
+/// Deserialize an `Option<T>` that is nullable but NOT omittable.
+///
+/// Serde special-cases a missing field of type `Option<T>` into `None`, so a required-but-nullable
+/// field is not expressible by the derive alone. Naming a `deserialize_with` suppresses that
+/// special case: an absent key becomes a `missing field` error, while an explicit `null` still
+/// decodes to `None`.
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// `control.wallet.coinById` — ONE coin, named by its own id, spent or unspent.
 ///
 /// # An absent coin is an ANSWER; an unreachable chain is an ERROR
@@ -604,14 +624,39 @@ pub struct WalletCoinsResult {
 ///
 /// # The freshness fields are honest, not decorative
 ///
-/// [`source`](Self::source) discloses which tier answered this read. If the answer is fallback-
-/// served, [`synced`](Self::synced) MUST be `false` and [`peak_height`](Self::peak_height) MUST be
-/// `null` — the oracle's chain view produced these figures and the node's own replica neither
-/// produced them nor bounds their freshness. A db-served answer MAY report a peak. A caller that
-/// needs a height to bound a confirmation against can ask `control.wallet.peak`.
+/// [`source`](Self::source) discloses which tier answered, and every freshness field describes THAT
+/// tier — the same rule the by-address reads carry. A `fallback` answer MUST report
+/// [`synced`](Self::synced) `false` and [`peak_height`](Self::peak_height) `null` however caught-up
+/// the node's own replica is, because the oracle produced the figures and the replica neither
+/// produced them nor bounds their freshness. A `db` answer means the node's OWN replica answered, so
+/// it MUST report `synced: true` and the replica's peak.
+///
+/// # A negative answer requires a view that could have held the coin
+///
+/// `coin: null` is a VERDICT — it says stop waiting — so it MUST NOT be served from a view that
+/// could not have seen the coin in the first place. A node whose replica is still catching up, or
+/// whose local index is address-scoped rather than a full chain view, has NOT established that the
+/// coin is absent; it has only established that IT cannot see it. Such a node MUST return
+/// [`WalletNoChainSource`](crate::error::ControlErrorCode::WalletNoChainSource) or
+/// [`WalletReadFailed`](crate::error::ControlErrorCode::WalletReadFailed) and MUST NOT answer
+/// `coin: null`.
+///
+/// This matters precisely for the two coins this method exists to observe. A created coin sits at no
+/// wallet address and a spent funding coin is gone from every unspent list, so an address-scoped
+/// replica is guaranteed to miss both — and a `coin: null` from it would report a mint that DID
+/// happen as never-having-happened, with the funds already gone. `control.wallet.peak` is no escape
+/// hatch here: it reports that same replica's height, which can bound a positive confirmation but
+/// can never license a negative one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletCoinByIdResult {
     /// The coin, or `null` when the consulted chain holds no coin with that id (see the type docs).
+    ///
+    /// The key MUST be present. `null` is a verdict here, so an ABSENT key must not decode into one:
+    /// serde's default treatment of `Option` makes a missing field indistinguishable from an
+    /// explicit `null`, which would let an unrelated or truncated payload — anything at all carrying
+    /// a `synced` field — decode into a confident "the chain holds no such coin". `deserialize_with`
+    /// suppresses that default so the field is genuinely required.
+    #[serde(deserialize_with = "required_option")]
     pub coin: Option<WalletCoinRecord>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
