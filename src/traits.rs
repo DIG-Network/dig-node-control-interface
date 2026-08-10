@@ -218,6 +218,48 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletCoinByIdParams,
     ) -> Result<results::WalletCoinByIdResult, ControlError>;
+    /// `control.wallet.coinSpend` (READ-only, OPEN)
+    ///
+    /// `Ok(spend: None)` MUST mean "a chain was consulted and holds no spend of that coin" — the
+    /// coin is unspent, or unknown. A read that could not consult a chain MUST return the matching
+    /// catalogued error instead: a caller following a singleton forward reads "no spend" as *this is
+    /// the tip* and stops walking, so a failure disguised as absence produces a spend built against
+    /// a superseded singleton.
+    ///
+    /// A returned spend's `puzzle_reveal` MUST tree-hash to the spent coin's own `puzzle_hash`, and
+    /// the implementation MUST fail closed — an error, never an unverified reveal — when it does not
+    /// or when the reveal will not parse. The reveal comes from a peer, and a peer can lie.
+    ///
+    /// The params are validated at DESERIALIZATION (lowercase 64-hex, `0x` stripped), so any path
+    /// that decodes `WalletCoinSpendParams` refuses malformed ids as `INVALID_PARAMS` before this
+    /// method is called.
+    async fn wallet_coin_spend(
+        &self,
+        params: params::WalletCoinSpendParams,
+    ) -> Result<results::WalletCoinSpendResult, ControlError>;
+    /// `control.wallet.coinsByParent` (READ-only, OPEN)
+    ///
+    /// Returns the parent's DIRECT children and nothing further. An implementation MUST NOT recurse:
+    /// a transitive walk over caller-supplied input is unbounded work the caller cannot bound, and a
+    /// partial walk returned as a complete one is a lineage with a silent hole in it.
+    ///
+    /// An empty list MUST mean "a chain was consulted and this parent created no known children".
+    /// A read that could not consult a chain MUST return the matching catalogued error instead.
+    ///
+    /// The answer is ONE PAGE. An implementation MUST return at most
+    /// `params.effective_limit()` records, in ASCENDING `coin_id` order, starting strictly after
+    /// `params.after_coin_id` when one is given; it MUST set `complete` to whether the page carries
+    /// the last child; and it MUST set `cursor` to the last record it actually returned (`None` for
+    /// an empty page). It MUST NOT report `complete: true` on a page it truncated — a caller reads
+    /// that as the end of a lineage branch. The params are validated at DESERIALIZATION, so an
+    /// out-of-range page size is refused as `INVALID_PARAMS` before this method is called.
+    ///
+    /// Every record MUST report `asset: None`: naming a coin by its parent classifies nothing, and
+    /// asserting a class this read never verified is a claim a caller would then spend against.
+    async fn wallet_coins_by_parent(
+        &self,
+        params: params::WalletCoinsByParentParams,
+    ) -> Result<results::WalletCoinsByParentResult, ControlError>;
     /// `control.wallet.arrivals` (READ-only, TOKEN-GATED)
     ///
     /// Gated although it is a read: the caller supplies only a cursor, so the answer names this
@@ -355,6 +397,15 @@ pub trait ControlHandler: Sync {
             ControlMethod::WalletCoinById => {
                 let params: params::WalletCoinByIdParams = decode(params)?;
                 encode(self.wallet_coin_by_id(params.validated()?).await?)
+            }
+            // Re-validated here idempotently; deserialization already enforced the same rule.
+            ControlMethod::WalletCoinSpend => {
+                let params: params::WalletCoinSpendParams = decode(params)?;
+                encode(self.wallet_coin_spend(params.validated()?).await?)
+            }
+            ControlMethod::WalletCoinsByParent => {
+                let params: params::WalletCoinsByParentParams = decode(params)?;
+                encode(self.wallet_coins_by_parent(params.validated()?).await?)
             }
             ControlMethod::WalletArrivals => encode(self.wallet_arrivals(decode(params)?).await?),
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),

@@ -143,6 +143,10 @@ pub enum ControlMethod {
     WalletCoins,
     /// `control.wallet.coinById` — read ONE coin record by coin id, spent or unspent.
     WalletCoinById,
+    /// `control.wallet.coinSpend` — read the SPEND that spent a coin (puzzle reveal + solution).
+    WalletCoinSpend,
+    /// `control.wallet.coinsByParent` — read the direct children a coin's spend created (one hop).
+    WalletCoinsByParent,
     /// `control.wallet.arrivals` — read confirmed INCOMING funds since a cursor position.
     WalletArrivals,
     /// `control.wallet.peak` — read the node's current chain peak height.
@@ -194,6 +198,8 @@ impl ControlMethod {
             ControlMethod::WalletBalance => "control.wallet.balance",
             ControlMethod::WalletCoins => "control.wallet.coins",
             ControlMethod::WalletCoinById => "control.wallet.coinById",
+            ControlMethod::WalletCoinSpend => "control.wallet.coinSpend",
+            ControlMethod::WalletCoinsByParent => "control.wallet.coinsByParent",
             ControlMethod::WalletArrivals => "control.wallet.arrivals",
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
@@ -220,11 +226,11 @@ impl ControlMethod {
     /// - the PEER COUNTS (`control.peerCounts`), which disclose two integers about this node's own
     ///   connectivity and no address, endpoint or secret;
     /// - the wallet CALLER-ADDRESSED CHAIN READS (`control.wallet.balance` / `.coins` /
-    ///   `.coinById`) and the node's own chain POSITION (`.peak` / `.syncStatus`), because each
-    ///   needs only PUBLIC chain data the CALLER already named — an address, or a coin id; never a
-    ///   seed, a key, or a signature — and dig-node has served
-    ///   `control.wallet.balance` open since #1851. A person whose node runs as a service with an
-    ///   unreadable token file can still see their own money.
+    ///   `.coinById` / `.coinSpend` / `.coinsByParent`) and the node's own chain POSITION
+    ///   (`.peak` / `.syncStatus`), because each needs only PUBLIC chain data the CALLER already
+    ///   named — an address, or a coin id; never a seed, a key, or a signature — and dig-node has
+    ///   served `control.wallet.balance` open since #1851. A person whose node runs as a service
+    ///   with an unreadable token file can still see their own money.
     ///
     /// Two wallet methods are deliberately NOT in that second group.
     /// `control.wallet.broadcast` puts bytes on the network, so the token is what stands between a
@@ -243,11 +249,12 @@ impl ControlMethod {
     ///
     /// Two kinds of method qualify, and they are open for different reasons:
     ///
-    /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
-    ///   `.syncStatus`), which need only PUBLIC chain data — an address, or a coin id; never a seed,
-    ///   a key, or a signature. On the first three the CALLER supplies the address or coin id, so
-    ///   the node relays a public fact and discloses no association with itself; the last two name
-    ///   the node's own chain position and no address at all;
+    /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.coinSpend` /
+    ///   `.coinsByParent` / `.peak` / `.syncStatus`), which need only PUBLIC chain data — an
+    ///   address, or a coin id; never a seed, a key, or a signature. On the first five the CALLER
+    ///   supplies the address or coin id, so the node relays a public fact and discloses no
+    ///   association with itself; the last two name the node's own chain position and no address
+    ///   at all;
     /// - `control.peerCounts`, which is NOT a chain read: it discloses two integers about this
     ///   node's own connectivity, and no address, endpoint, peer identity or secret. The identity
     ///   and topology half of the same subject stays gated behind `control.peerStatus`.
@@ -277,6 +284,8 @@ impl ControlMethod {
             ControlMethod::WalletBalance
                 | ControlMethod::WalletCoins
                 | ControlMethod::WalletCoinById
+                | ControlMethod::WalletCoinSpend
+                | ControlMethod::WalletCoinsByParent
                 | ControlMethod::WalletPeak
                 | ControlMethod::WalletSyncStatus
                 | ControlMethod::PeerCounts
@@ -310,6 +319,8 @@ impl ControlMethod {
             | ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
+            | ControlMethod::WalletCoinSpend
+            | ControlMethod::WalletCoinsByParent
             | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
@@ -353,6 +364,8 @@ impl ControlMethod {
             ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
+            | ControlMethod::WalletCoinSpend
+            | ControlMethod::WalletCoinsByParent
             | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
@@ -393,6 +406,8 @@ impl ControlMethod {
             ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
             ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
+            ControlMethod::WalletCoinSpend => "READ-only: the SPEND that spent a coin -- its puzzle reveal, its solution and the coin itself -- named by the coin's own id. `spend: null` means the consulted chain shows that coin as unspent or unknown; it NEVER means the chain could not be reached, which is an error.",
+            ControlMethod::WalletCoinsByParent => "READ-only: the DIRECT children created by spending one coin, named by that parent's coin id. ONE hop, never a recursive walk: an empty list means the parent created no known children, and a caller wanting a lineage composes hops itself.",
             ControlMethod::WalletArrivals => "READ-only: confirmed INCOMING funds recorded since a cursor position, oldest first -- the answer to `was I just paid?`, which no balance or coin list can give. Each row is a coin the node determined ARRIVED: confirmed on chain, above the wallet's arrival baseline, not previously reported, and not the wallet's own change. Resume from `cursor` (the last row you were handed), never from `latest`.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
             ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
@@ -437,6 +452,8 @@ impl ControlMethod {
         ControlMethod::WalletBalance,
         ControlMethod::WalletCoins,
         ControlMethod::WalletCoinById,
+        ControlMethod::WalletCoinSpend,
+        ControlMethod::WalletCoinsByParent,
         ControlMethod::WalletArrivals,
         ControlMethod::WalletPeak,
         ControlMethod::WalletSyncStatus,
@@ -481,6 +498,8 @@ mod tests {
             "control.wallet.balance",
             "control.wallet.coins",
             "control.wallet.coinById",
+            "control.wallet.coinSpend",
+            "control.wallet.coinsByParent",
             "control.wallet.peak",
             "control.wallet.syncStatus",
             "control.peerCounts",
@@ -489,8 +508,8 @@ mod tests {
         .collect();
         assert_eq!(
             expected_open.len(),
-            8,
-            "the open surface is eight named methods"
+            10,
+            "the open surface is ten named methods"
         );
         let actual_open: BTreeSet<&str> = ControlMethod::ALL
             .iter()
@@ -544,6 +563,68 @@ mod tests {
         );
     }
 
+    /// **The control plane names every chain primitive `ChainSource` needs.**
+    ///
+    /// The list is written out rather than derived, because the property under test is a claim about
+    /// ANOTHER crate's trait (`dig-chainsource-interface`'s `ChainSource`) that no compiler here can
+    /// check. Five of its seven methods need a control method of their own. The other two need none:
+    /// `parent_spend` is a trait DEFAULT composed from `coin_record` + `coin_spend`, and
+    /// `resolve_singleton_lineage` is composed CLIENT-side from the primitives below rather than
+    /// served as a walk the node performs.
+    ///
+    /// `block_timestamp` is deliberately ABSENT from the control plane. dig-node's light client
+    /// (`chia-peer`'s `ChiaPeerProvider`) does not index block timestamps and answers `Unsupported`,
+    /// so a control method for it could only ever be refused — a surface that looks live and does
+    /// nothing. A consumer mirrors that refusal honestly; if one ever genuinely needs the value, the
+    /// method is an additive minor at that point.
+    ///
+    /// A missing name here is not a cosmetic gap: a client that cannot answer one of these cannot
+    /// implement the trait at all, which is what made a dig-profile mint structurally impossible
+    /// through the node before these two were added (dig_ecosystem#2572).
+    #[test]
+    fn the_catalog_serves_every_chain_source_primitive() {
+        for wire in [
+            "control.wallet.coinById",      // coin_record
+            "control.wallet.coins",         // coin_records_by_puzzle_hash
+            "control.wallet.peak",          // peak_height
+            "control.wallet.coinsByParent", // coin_records_by_parent
+            "control.wallet.coinSpend",     // coin_spend
+        ] {
+            assert!(
+                ControlMethod::from_name(wire).is_some(),
+                "{wire} is required to implement ChainSource over the control plane"
+            );
+        }
+    }
+
+    /// **The two chain primitives are `coinById`'s neighbours, not `arrivals`'.**
+    ///
+    /// Each takes a caller-supplied coin id and returns a deterministic public chain fact,
+    /// so the membership rule — *who names the subject* — puts them on the open side. The gated
+    /// control in the same assertion is what makes the test load-bearing: without it, a wholesale
+    /// opening of the wallet category would pass, and that is a different (and wrong) implementation.
+    #[test]
+    fn the_chain_primitives_are_caller_named_open_reads() {
+        for method in [
+            ControlMethod::WalletCoinSpend,
+            ControlMethod::WalletCoinsByParent,
+        ] {
+            assert!(
+                method.is_open_read(),
+                "{} names its subject in the request and discloses no node-to-address \
+                 association, exactly like control.wallet.coinById",
+                method.name()
+            );
+            assert!(!method.requires_auth());
+        }
+        assert!(
+            ControlMethod::WalletArrivals.requires_auth(),
+            "the caller-supplies-nothing read stays gated -- the rule is who names the subject, \
+             not whether the bytes are on chain"
+        );
+        assert!(ControlMethod::WalletBroadcast.requires_auth());
+    }
+
     #[test]
     fn only_pairing_bootstrap_is_open_bootstrap_routed() {
         for &m in ControlMethod::ALL {
@@ -587,6 +668,8 @@ mod tests {
         let expected: BTreeSet<&str> = [
             "control.wallet.coins",
             "control.wallet.coinById",
+            "control.wallet.coinSpend",
+            "control.wallet.coinsByParent",
             "control.wallet.arrivals",
             "control.wallet.peak",
             "control.wallet.syncStatus",

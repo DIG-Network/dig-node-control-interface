@@ -35,6 +35,26 @@ const SPENT_COIN: &str = "ababababababababababababababababababababababababababab
 /// handler as "found" and the two answers can be told apart.
 const ABSENT_COIN: &str = "0101010101010101010101010101010101010101010101010101010101010101";
 
+/// The children [`SPENT_COIN`]'s spend created, ASCENDING by coin id — the order the contract fixes.
+///
+/// FOUR of them, and every id DISTINCT from the parent, so three different wrong implementations are
+/// visible: one that echoes the id it was asked about, one that ignores `after_coin_id`, and one
+/// that reports completeness from the page LENGTH. Four children paged two at a time is the fixture
+/// that kills the last of those — both pages carry exactly two rows, and only one of them is the
+/// last, so `complete` is the only thing that tells them apart.
+const CHILD_COINS: [&str; 4] = [
+    "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+    "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+    "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+];
+
+/// The two halves of a spend, given DIFFERENT values so a serialization that transposed the fields
+/// cannot pass. Short stand-ins for serialized CLVM — the contract fixes the encoding (lowercase hex)
+/// and not the programs, which belong to whatever puzzle was actually revealed.
+const REVEAL_HEX: &str = "ff01ff8080";
+const SOLUTION_HEX: &str = "ff8203e880";
+
 const STORE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ROOT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -149,6 +169,31 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinById","params":{"coin_id":"ab".repeat(32)}}),
     );
     assert_request(
+        &WalletCoinSpendParams {
+            coin_id: "ab".repeat(32),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinSpend","params":{"coin_id":"ab".repeat(32)}}),
+    );
+    // The by-parent read spells its field `parent_coin_id`, not `coin_id`: the coin named is the one
+    // being asked ABOUT, never the one coming back. Pinned literally so the two by-coin reads cannot
+    // drift into sharing a field name that reads as a request for the parent itself.
+    // A first page names neither a cursor nor a size, and MUST NOT emit either key: an omitted
+    // `limit` is the contract's default, and a `null` on the wire is a different thing to parse.
+    assert_request(
+        &WalletCoinsByParentParams::first_page("ab".repeat(32)),
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinsByParent","params":{"parent_coin_id":"ab".repeat(32)}}),
+    );
+    // A resumed, bounded page carries both, and the cursor is spelled `after_coin_id` -- the id the
+    // caller was HANDED, never a marker for where the chain got to.
+    assert_request(
+        &WalletCoinsByParentParams {
+            parent_coin_id: "ab".repeat(32),
+            after_coin_id: Some(CHILD_COINS[1].into()),
+            limit: Some(2),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinsByParent","params":{"parent_coin_id":"ab".repeat(32),"after_coin_id":CHILD_COINS[1],"limit":2}}),
+    );
+    assert_request(
         &WalletPeakParams {},
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.peak","params":{}}),
     );
@@ -257,6 +302,53 @@ fn golden_response_result_vectors_are_byte_stable() {
             "created_height": 5_000_000u32, "spent_height": null
         },
         "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // `control.wallet.coinSpend` — a spend, carrying the two programs a coin record cannot supply.
+    // The spent coin's `spent_height` is non-null, because a spend exists only where one is.
+    assert_result_round_trips::<results::WalletCoinSpendResult>(json!({
+        "spend": {
+            "coin": {
+                "coin_id": "ab".repeat(32), "asset": null, "amount": 1_000_000_000_000u64,
+                "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
+                "created_height": 5_000_000u32, "spent_height": 5_000_042u32
+            },
+            "puzzle_reveal": REVEAL_HEX, "solution": SOLUTION_HEX
+        },
+        "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // A chain that was consulted and holds no spend of that coin — unspent, or unknown. A SUCCESS,
+    // so that "could not answer" stays free to be an error.
+    assert_result_round_trips::<results::WalletCoinSpendResult>(json!({
+        "spend": null, "source": "fallback", "synced": false, "peak_height": null
+    }));
+    // `control.wallet.coinsByParent` — one hop. `asset` is null on the child, because naming a coin
+    // by its parent classifies nothing.
+    assert_result_round_trips::<results::WalletCoinsByParentResult>(json!({
+        "coins": [{
+            "coin_id": CHILD_COINS[0], "asset": null, "amount": 999_999_999_999u64,
+            "parent_coin_info": "ab".repeat(32), "puzzle_hash": "33".repeat(32),
+            "created_height": 5_000_042u32, "spent_height": null
+        }],
+        "complete": true, "cursor": CHILD_COINS[0],
+        "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // A TRUNCATED page: same shape, `complete:false`, and a cursor to resume from. Pinned beside the
+    // complete vector above so the two are visibly different payloads rather than one shape read two
+    // ways.
+    assert_result_round_trips::<results::WalletCoinsByParentResult>(json!({
+        "coins": [{
+            "coin_id": CHILD_COINS[0], "asset": null, "amount": 999_999_999_999u64,
+            "parent_coin_info": "ab".repeat(32), "puzzle_hash": "33".repeat(32),
+            "created_height": 5_000_042u32, "spent_height": null
+        }],
+        "complete": false, "cursor": CHILD_COINS[0],
+        "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // A parent that created no known children. A SUCCESS, for the same reason an empty `.coins` is.
+    // An empty page is COMPLETE and has no cursor: there was nothing to be handed.
+    assert_result_round_trips::<results::WalletCoinsByParentResult>(json!({
+        "coins": [], "complete": true, "cursor": null,
+        "source": "fallback", "synced": false, "peak_height": null
     }));
     assert_result_round_trips::<results::WalletPeakResult>(json!({
         "peak_height": 5_000_000u32, "synced": true
@@ -874,6 +966,80 @@ impl ControlHandler for MockNode {
             peak_height: None,
         })
     }
+    /// Reports a spend ONLY for [`SPENT_COIN`], and absence for every other id — so a handler that
+    /// answered `spend: null` unconditionally is distinguishable from a correct one. The reveal and
+    /// the solution differ from each other, so a serialization that transposed the two fields fails
+    /// the routing test below rather than passing on a shape they share.
+    async fn wallet_coin_spend(
+        &self,
+        params: WalletCoinSpendParams,
+    ) -> Result<results::WalletCoinSpendResult, ControlError> {
+        let spend = (params.coin_id == SPENT_COIN).then(|| results::WalletCoinSpend {
+            coin: results::WalletCoinRecord {
+                coin_id: SPENT_COIN.into(),
+                asset: None,
+                amount: 1_000_000_000_000,
+                parent_coin_info: "11".repeat(32),
+                puzzle_hash: "22".repeat(32),
+                created_height: Some(5_000_000),
+                // A spend exists only because the coin was spent, so this is never null.
+                spent_height: Some(5_000_042),
+            },
+            puzzle_reveal: REVEAL_HEX.into(),
+            solution: SOLUTION_HEX.into(),
+        });
+        Ok(results::WalletCoinSpendResult {
+            spend,
+            source: Some(results::WalletReadSource::Fallback),
+            synced: false,
+            peak_height: None,
+        })
+    }
+    /// Serves [`SPENT_COIN`]'s four children as a real PAGED read — honouring `after_coin_id` and
+    /// the effective limit — and reports every other parent as childless.
+    ///
+    /// A mock that ignored the page bound could not express a truncated answer at all, so the
+    /// truncation tests below would assert a property the fixture cannot exhibit. `complete` is
+    /// computed from what REMAINS after the page rather than from the page's own length, which is
+    /// the distinction those tests exist to pin.
+    async fn wallet_coins_by_parent(
+        &self,
+        params: WalletCoinsByParentParams,
+    ) -> Result<results::WalletCoinsByParentResult, ControlError> {
+        let known: &[&str] = if params.parent_coin_id == SPENT_COIN {
+            &CHILD_COINS
+        } else {
+            &[]
+        };
+        let remaining = known
+            .iter()
+            .skip_while(|id| params.after_coin_id.as_deref().is_some_and(|a| **id <= a));
+        let limit = params.effective_limit() as usize;
+        let page: Vec<&str> = remaining.take(limit + 1).copied().collect();
+        let complete = page.len() <= limit;
+        let coins: Vec<results::WalletCoinRecord> = page
+            .into_iter()
+            .take(limit)
+            .map(|coin_id| results::WalletCoinRecord {
+                coin_id: coin_id.into(),
+                // Naming a coin by its parent classifies nothing.
+                asset: None,
+                amount: 999_999_999_999,
+                parent_coin_info: SPENT_COIN.into(),
+                puzzle_hash: "33".repeat(32),
+                created_height: Some(5_000_042),
+                spent_height: None,
+            })
+            .collect();
+        Ok(results::WalletCoinsByParentResult {
+            cursor: coins.last().map(|c| c.coin_id.clone()),
+            coins,
+            complete,
+            source: Some(results::WalletReadSource::Fallback),
+            synced: false,
+            peak_height: None,
+        })
+    }
     /// Answers with a `seq` no neighbouring wallet handler produces, and a `latest` one ABOVE the
     /// page's own cursor — so a handler that collapsed the two, or a dispatch arm wired to another
     /// wallet read, is distinguishable from a correct one.
@@ -1198,7 +1364,10 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::WalletBalance | ControlMethod::WalletCoins => {
             json!({"address": "xch1abc", "asset": "dig"})
         }
-        ControlMethod::WalletCoinById => json!({ "coin_id": ABSENT_COIN }),
+        ControlMethod::WalletCoinById | ControlMethod::WalletCoinSpend => {
+            json!({ "coin_id": ABSENT_COIN })
+        }
+        ControlMethod::WalletCoinsByParent => json!({ "parent_coin_id": ABSENT_COIN }),
         ControlMethod::WalletBroadcast => json!({"signed_bundle_hex": "deadbeef"}),
         _ => json!({}),
     }
@@ -1397,6 +1566,357 @@ fn an_omitted_coin_field_is_a_decode_error_not_a_null_verdict() {
             "a payload without a `coin` key must not decode into a no-such-coin verdict: {wire}"
         );
     }
+}
+
+/// **The spend and the children reach their OWN handlers, over the real dispatcher.**
+///
+/// Each assertion is keyed to something only that handler could have produced. The spend carries a
+/// puzzle reveal and a solution, which no other wallet read emits at all; the children answer names
+/// [`CHILD_COIN`], an id no other handler here produces. So an arm wired to the neighbouring by-id
+/// read — the nearest wrong wiring, since all three are asked with a 64-hex coin id — fails rather
+/// than passing on a shape they share.
+#[test]
+fn the_dispatcher_routes_the_spend_and_the_children_to_their_own_handlers() {
+    let found = round_trip(&WalletCoinSpendParams {
+        coin_id: SPENT_COIN.into(),
+    })
+    .expect("coinSpend must route");
+
+    let spend = found.spend.expect("the mock knows this coin's spend");
+    assert_eq!(spend.coin.coin_id, SPENT_COIN);
+    assert_eq!(
+        spend.puzzle_reveal, REVEAL_HEX,
+        "the reveal is the half a coin record cannot supply, and is why this method exists"
+    );
+    assert_eq!(
+        spend.solution, SOLUTION_HEX,
+        "reveal and solution hold DIFFERENT values, so a transposition cannot pass here"
+    );
+    assert!(
+        spend.coin.spent_height.is_some(),
+        "a spend exists only because the coin was spent -- an unspent coin here is a contradiction"
+    );
+
+    let children = round_trip(&WalletCoinsByParentParams::first_page(SPENT_COIN))
+        .expect("coinsByParent must route");
+
+    assert_eq!(children.coins.len(), CHILD_COINS.len());
+    assert_eq!(
+        children.coins[0].coin_id, CHILD_COINS[0],
+        "the answer is the CHILD -- a handler echoing the parent it was asked about fails here"
+    );
+    assert_eq!(
+        children.coins[0].parent_coin_info, SPENT_COIN,
+        "and the child names the parent that was asked for, so the id reached the handler"
+    );
+    assert_eq!(
+        children.coins[0].asset, None,
+        "naming a coin by its parent classifies nothing; `null` says so rather than asserting"
+    );
+}
+
+/// **An unspent coin and a childless parent are ANSWERS, not errors.**
+///
+/// The nearest wrong implementation maps "nothing there" onto the error channel, where a caller
+/// cannot tell it from "the chain was unreachable" — and reads the failure as *this is the tip*.
+///
+/// The fixture varies ONE thing, the coin asked about, against a truthful control in the same test:
+/// [`SPENT_COIN`] genuinely has a spend and genuinely has a child. Without that control a handler
+/// that answered absent/empty for EVERY id would pass, which is a different implementation and one
+/// that can see nothing at all.
+#[test]
+fn an_absent_spend_and_a_childless_parent_are_answers_not_errors() {
+    let no_spend = round_trip(&WalletCoinSpendParams {
+        coin_id: ABSENT_COIN.into(),
+    })
+    .expect("an absent spend is a SUCCESS -- the error channel is reserved for could-not-answer");
+    assert_eq!(no_spend.spend, None);
+
+    let no_children = round_trip(&WalletCoinsByParentParams::first_page(ABSENT_COIN))
+        .expect("a childless parent is a SUCCESS, for the same reason an empty `.coins` is");
+    assert!(no_children.coins.is_empty());
+    assert!(
+        no_children.complete,
+        "a childless parent is COMPLETELY answered -- nothing was withheld"
+    );
+    assert_eq!(
+        no_children.cursor, None,
+        "an empty page hands back nothing, so there is nothing to resume from"
+    );
+
+    // The control: the same handlers DO answer positively for a coin they know, so neither
+    // assertion above is passing on a handler that can only ever say nothing.
+    assert!(round_trip(&WalletCoinSpendParams {
+        coin_id: SPENT_COIN.into()
+    })
+    .unwrap()
+    .spend
+    .is_some());
+    assert!(
+        !round_trip(&WalletCoinsByParentParams::first_page(SPENT_COIN))
+            .unwrap()
+            .coins
+            .is_empty()
+    );
+}
+
+/// **An omitted `spend` key is a decode error, not a no-spend verdict.**
+///
+/// The same hazard [`results::WalletCoinByIdResult`] guards, on the read where it costs the most: a
+/// caller following a singleton forward reads "no spend" as *this is the tip*. Serde's default
+/// treatment of `Option` would let any unrelated or truncated payload carrying a `synced` field
+/// decode into a confident "this coin was never spent".
+///
+/// The fixtures are the neighbouring methods' real result shapes, so the test proves the guard
+/// against payloads a client could actually receive by mis-routing — not against invented rubbish.
+#[test]
+fn an_omitted_spend_field_is_a_decode_error_not_a_no_spend_verdict() {
+    // Explicit null still decodes: the verdict is expressible, just not by omission.
+    let stated = serde_json::from_value::<results::WalletCoinSpendResult>(json!({
+        "spend": null, "source": "fallback", "synced": false, "peak_height": null
+    }))
+    .expect("an explicitly null spend is a valid verdict");
+    assert_eq!(stated.spend, None);
+
+    for wire in [
+        json!({ "source": "fallback", "synced": false, "peak_height": null }),
+        json!({ "synced": false }),
+        // `control.wallet.peak`'s shape, and `control.wallet.coinsByParent`'s: both would decode
+        // into "never spent" under serde's default.
+        json!({ "peak_height": 5_000_000u32, "synced": true }),
+        json!({ "coins": [], "source": "db", "synced": true, "peak_height": 5_000_000u32 }),
+    ] {
+        assert!(
+            serde_json::from_value::<results::WalletCoinSpendResult>(wire.clone()).is_err(),
+            "a payload without a `spend` key must not decode into a never-spent verdict: {wire}"
+        );
+    }
+}
+
+/// **The by-parent read enforces the SAME id rule as the by-id reads, under its own field name.**
+///
+/// The rule is shared by macro, and a macro applied to the wrong field name silently produces a type
+/// that validates nothing — the field would simply be absent and the decode would fail for an
+/// unrelated reason. So the test pins both directions: a malformed id is refused, and a well-formed
+/// one is accepted and normalized, under the key `parent_coin_id` specifically.
+#[test]
+fn wallet_coins_by_parent_params_enforce_the_coin_id_rule_on_their_own_field() {
+    for bad in [
+        json!({"parent_coin_id": "AB".repeat(32)}),
+        json!({"parent_coin_id": "abc"}),
+    ] {
+        assert!(
+            serde_json::from_value::<WalletCoinsByParentParams>(bad.clone()).is_err(),
+            "a malformed parent id must be refused at deserialization: {bad}"
+        );
+    }
+    // A `coin_id` key is NOT this method's field, so it must not satisfy it either.
+    assert!(
+        serde_json::from_value::<WalletCoinsByParentParams>(json!({"coin_id": "ab".repeat(32)}))
+            .is_err(),
+        "the by-parent read is asked with `parent_coin_id`; `coin_id` is a different question"
+    );
+
+    let prefixed = serde_json::from_value::<WalletCoinsByParentParams>(
+        json!({"parent_coin_id": format!("0x{}", "ab".repeat(32))}),
+    )
+    .expect("a 0x-prefixed id is tolerated on input");
+    assert_eq!(
+        prefixed.parent_coin_id,
+        "ab".repeat(32),
+        "the prefix is normalized away and never emitted"
+    );
+}
+
+/// **A truncated page and a final page can carry the SAME number of rows.**
+///
+/// The fixture is four children read two at a time, so both pages hold exactly two records and only
+/// one of them is the last. Every length-based inference of completeness — `coins.len() < limit`,
+/// `coins.is_empty()`, "a full page means more" — gives the same answer for both, so this is the
+/// fixture that makes `complete` load-bearing rather than decorative.
+///
+/// The dangerous direction is the one asserted first: reading page ONE as complete ends a lineage
+/// walk at a branch that has more children, and presents a partial lineage as a whole one.
+#[test]
+fn a_truncated_page_and_a_final_page_are_told_apart_by_complete_not_by_length() {
+    let first = round_trip(&WalletCoinsByParentParams {
+        parent_coin_id: SPENT_COIN.into(),
+        after_coin_id: None,
+        limit: Some(2),
+    })
+    .expect("a bounded first page must route");
+
+    assert_eq!(first.coins.len(), 2);
+    assert!(
+        !first.complete,
+        "two of four children were withheld -- reporting this page as complete ends the walk early"
+    );
+    assert_eq!(
+        first.cursor.as_deref(),
+        Some(CHILD_COINS[1]),
+        "the cursor is the last child actually HANDED over, never a chain-head marker"
+    );
+
+    let second = round_trip(&WalletCoinsByParentParams {
+        parent_coin_id: SPENT_COIN.into(),
+        after_coin_id: first.cursor.clone(),
+        limit: Some(2),
+    })
+    .expect("resuming from the handed-back cursor must route");
+
+    assert_eq!(
+        second.coins.len(),
+        first.coins.len(),
+        "both pages carry the same row count -- which is exactly why length cannot decide          completeness"
+    );
+    assert!(
+        second.complete,
+        "the last two children fit, so this page IS the end of the hop"
+    );
+
+    // The two pages are different children, in ascending order, with nothing repeated and nothing
+    // skipped -- so a handler ignoring `after_coin_id` (and re-serving page one) fails here.
+    let walked: Vec<&str> = first
+        .coins
+        .iter()
+        .chain(second.coins.iter())
+        .map(|c| c.coin_id.as_str())
+        .collect();
+    assert_eq!(walked, CHILD_COINS.to_vec());
+}
+
+/// **The page bound is refused above its maximum, and pinned from BOTH sides.**
+///
+/// A bound tested only from below can only confirm itself. The at-maximum case MUST be accepted and
+/// the one-over case MUST be refused, or the constant in the docs is not the constant in the code.
+///
+/// Zero is refused for a different reason than "too large": a page that can hold nothing makes no
+/// progress, so a caller looping until a short page arrives would loop forever.
+#[test]
+fn the_page_bound_is_refused_out_of_range_rather_than_clamped() {
+    let at_max = serde_json::from_value::<WalletCoinsByParentParams>(json!({
+        "parent_coin_id": "ab".repeat(32), "limit": COINS_BY_PARENT_MAX_LIMIT
+    }))
+    .expect("the documented maximum must be ACCEPTED, or the constant is not the real bound");
+    assert_eq!(at_max.limit, Some(COINS_BY_PARENT_MAX_LIMIT));
+    assert_eq!(at_max.effective_limit(), COINS_BY_PARENT_MAX_LIMIT);
+
+    for over in [COINS_BY_PARENT_MAX_LIMIT + 1, u32::MAX, 0] {
+        let wire = json!({"parent_coin_id": "ab".repeat(32), "limit": over});
+        assert!(
+            serde_json::from_value::<WalletCoinsByParentParams>(wire).is_err(),
+            "limit {over} must be REFUSED, never clamped: a silently shrunk page hands back a              cursor for a position the caller never asked about"
+        );
+        // ...and the same rule at the validation seam the dispatcher uses, not only at decode.
+        assert!(WalletCoinsByParentParams {
+            parent_coin_id: "ab".repeat(32),
+            after_coin_id: None,
+            limit: Some(over),
+        }
+        .validated()
+        .is_err());
+    }
+
+    // An omitted limit is the contract's default -- resolved in ONE place so a node and a client
+    // cannot page to two different boundaries.
+    assert_eq!(
+        WalletCoinsByParentParams::first_page("ab".repeat(32)).effective_limit(),
+        COINS_BY_PARENT_DEFAULT_LIMIT
+    );
+}
+
+/// **The maximum page still fits the transport, with room to spare.**
+///
+/// [`COINS_BY_PARENT_MAX_LIMIT`] is derived from dig-ipc-protocol's `MAX_FRAME_BYTES`, and a
+/// constant derived from another crate's constant drifts the moment somebody raises it "because it
+/// looked small". This pins the arithmetic instead of the folklore.
+///
+/// The record size is measured from a WORST-CASE record — every hash at full length, a `u64::MAX`
+/// amount, both heights present — rather than from a typical one, because a bound proved against a
+/// small fixture is not a bound.
+#[test]
+fn the_largest_legal_page_fits_inside_the_transport_frame() {
+    /// dig-ipc-protocol `MAX_FRAME_BYTES` (its SPEC.md bounds table). Replicated rather than
+    /// imported: dig-ipc-protocol sits at the SAME crate level as this one, so depending on it would
+    /// be an illegal same-level edge.
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+    let worst_case = serde_json::to_string(&results::WalletCoinRecord {
+        coin_id: "f".repeat(64),
+        asset: None,
+        amount: u64::MAX,
+        parent_coin_info: "f".repeat(64),
+        puzzle_hash: "f".repeat(64),
+        created_height: Some(u32::MAX),
+        spent_height: Some(u32::MAX),
+    })
+    .unwrap()
+    .len()
+        + 1; // the comma joining it to the next record
+
+    let largest_page = worst_case * COINS_BY_PARENT_MAX_LIMIT as usize;
+    assert!(
+        largest_page * 3 < MAX_FRAME_BYTES,
+        "the maximum page ({largest_page} B) must fit the 1 MiB frame with 3x headroom for the          envelope and any future additive field; raising the cap past that puts a conforming          node's honest answer beyond what the transport can deliver"
+    );
+}
+
+/// **An omitted `cursor` key is a decode error, not "there was nothing to resume from".**
+///
+/// The same guard `spend` and `coin` carry, on the field a paged walk resumes by. Under serde's
+/// default treatment of `Option`, any payload carrying `coins` and `complete` would decode with
+/// `cursor: None` — so a mis-routed or truncated response would tell a caller the page handed back
+/// nothing, and the walk would restart from the beginning or stop, rather than fail loudly.
+///
+/// The fixtures are the neighbouring reads' REAL result shapes, so this proves the guard against
+/// payloads a client could actually receive rather than against invented rubbish.
+#[test]
+fn an_omitted_cursor_field_is_a_decode_error_not_an_empty_page() {
+    // Explicit null still decodes: an empty page genuinely has nothing to resume from.
+    let empty = serde_json::from_value::<results::WalletCoinsByParentResult>(json!({
+        "coins": [], "complete": true, "cursor": null,
+        "source": "fallback", "synced": false, "peak_height": null
+    }))
+    .expect("an explicitly null cursor is a valid empty page");
+    assert_eq!(empty.cursor, None);
+
+    for wire in [
+        json!({ "coins": [], "complete": true, "source": "fallback", "synced": false,
+                "peak_height": null }),
+        // `control.wallet.coins`' shape: same `coins` key, no cursor, no completeness.
+        json!({ "coins": [], "source": "db", "synced": true, "peak_height": 5_000_000u32 }),
+    ] {
+        assert!(
+            serde_json::from_value::<results::WalletCoinsByParentResult>(wire.clone()).is_err(),
+            "a payload without a `cursor` key must not decode into a nothing-to-resume-from \
+             page: {wire}"
+        );
+    }
+
+    // And `complete` is required for the same reason -- it has no default, so a payload that omits
+    // it MUST NOT decode into the dangerous reading that the page was whole.
+    assert!(
+        serde_json::from_value::<results::WalletCoinsByParentResult>(json!({
+            "coins": [], "cursor": null, "source": "fallback", "synced": false,
+            "peak_height": null
+        }))
+        .is_err(),
+        "a payload without `complete` must not decode into a claim that the page is whole"
+    );
+}
+
+/// **A caller-supplied page bound reaches the node instead of being silently dropped.**
+#[test]
+fn a_by_parent_request_carries_its_page_bound() {
+    let params: WalletCoinsByParentParams =
+        serde_json::from_value(json!({"parent_coin_id": "ab".repeat(32), "limit": 5}))
+            .expect("a bounded request must decode");
+    let wire = serde_json::to_value(&params).unwrap();
+    assert_eq!(
+        wire["limit"],
+        json!(5),
+        "a page bound the caller asked for must not be discarded on the way to the node"
+    );
 }
 
 #[test]
