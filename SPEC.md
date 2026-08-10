@@ -103,21 +103,24 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
-| `control.wallet.arrivals` | no | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
+| `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.arrivals` / `.peak` /
+The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
 `.syncStatus`)
 are served WITHOUT a control token, because each needs only public chain data — an address or a coin
 id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
 discloses two integers about this node's own connectivity and no address, endpoint or secret. The
 `Token` column above is authoritative; the open set is deliberately named here rather than counted,
-so that adding a method cannot leave a stale number behind. `control.wallet.broadcast` is token-gated: it puts
-bytes on the network. That difference is normative for clients, because the two refusals demand
+so that adding a method cannot leave a stale number behind. Two wallet methods are token-gated.
+`control.wallet.broadcast` puts bytes on the network. `control.wallet.arrivals` takes only a cursor,
+so its answer names this node's OWN watched puzzle hashes and the receive history behind them: the
+chain facts are public, the association between this node and those addresses is not. Membership of
+the open set turns on WHO NAMES THE ADDRESS, not on whether the data is on chain. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
 
 ### 4.1 Result field definitions

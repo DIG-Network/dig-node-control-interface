@@ -1659,16 +1659,16 @@ fn the_arrival_page_cursor_is_the_last_row_handed_over_not_the_ledger_head() {
     assert_eq!(ahead.arrivals[0].amount, "1");
 }
 
-/// **The arrival cursor is an OPEN read and reaches its own handler over the real dispatcher.**
+/// **The arrival cursor is TOKEN-GATED and reaches its own handler over the real dispatcher.**
 ///
 /// The mock answers with a `seq` no neighbouring wallet handler produces, so an arm wired to the
 /// wrong method is distinguishable rather than passing on a shape they happen to share.
 #[test]
-fn the_arrival_cursor_is_an_open_read_that_routes_to_its_own_handler() {
+fn the_arrival_cursor_is_gated_and_routes_to_its_own_handler() {
     assert!(
-        ControlMethod::WalletArrivals.is_open_read(),
-        "the arrival cursor reads only the node's own local ledger, so it is token-less like the \
-         other wallet reads"
+        ControlMethod::WalletArrivals.requires_auth(),
+        "the arrival cursor volunteers this node's own watched puzzle hashes, so it is gated \
+         unlike the caller-addressed wallet reads"
     );
     let page = round_trip(&WalletArrivalsParams {
         after_seq: 0,

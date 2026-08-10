@@ -218,7 +218,10 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletCoinByIdParams,
     ) -> Result<results::WalletCoinByIdResult, ControlError>;
-    /// `control.wallet.arrivals` (READ-only, OPEN)
+    /// `control.wallet.arrivals` (READ-only, TOKEN-GATED)
+    ///
+    /// Gated although it is a read: the caller supplies only a cursor, so the answer names this
+    /// node's OWN watched puzzle hashes and the receive history behind them.
     ///
     /// Every returned row MUST be a CONFIRMED arrival that the node itself judged: above its arrival
     /// baseline, not previously reported, and not the wallet's own change. An implementation MUST NOT

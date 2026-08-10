@@ -120,7 +120,8 @@ token, **M** = requires the MASTER token, **—** = open. `Route`: how the node 
 
 ### Wallet chain transport (delegated to the engine)
 
-The five reads are OPEN; only the push is token-gated. The node never signs — it reads chain state
+The caller-addressed reads and the chain-position reads are OPEN; the arrival cursor and the push
+are token-gated. The node never signs — it reads chain state
 and pushes bytes somebody else signed.
 
 | Method | Auth | Route | Params | Result |
@@ -128,7 +129,7 @@ and pushes bytes somebody else signed.
 | `control.wallet.balance` | — | del | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
 | `control.wallet.coins` | — | del | `{address:string, asset:"xch"\|"dig"}` | `{coins:[WalletCoinRecord], source, synced, peak_height}` |
 | `control.wallet.coinById` | — | del | `{coin_id:string}` (64-hex, `0x` accepted) | `{coin:WalletCoinRecord\|null, source, synced, peak_height}`; `coin:null` = the chain holds no such coin |
-| `control.wallet.arrivals` | — | del | `{after_seq:u64=0, limit?:u32}` | `{arrivals:[WalletArrivalRecord], cursor, latest}`; CONFIRMED incoming funds only, never the wallet's own change. Resume from `cursor`, never `latest` |
+| `control.wallet.arrivals` | T | del | `{after_seq:u64=0, limit?:u32}` | `{arrivals:[WalletArrivalRecord], cursor, latest}`; TOKEN-GATED: the caller supplies only a cursor, so the answer names this node's own watched puzzle hashes. CONFIRMED incoming funds only, never the wallet's own change. Resume from `cursor`, never `latest` |
 | `control.wallet.peak` | — | del | — | `{peak_height:u32\|null, synced:bool}`; `synced` = catch-up COMPLETED, weaker than `syncStatus`'s |
 | `control.wallet.syncStatus` | — | del | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}`; `synced` also requires a LIVE Chia peer |
 | `control.wallet.broadcast` | T | del | `{signed_bundle_hex:string}` | `{accepted, transaction_id, rejection}`; `accepted` = mempool admission, NOT confirmation |
