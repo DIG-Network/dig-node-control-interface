@@ -356,7 +356,7 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::WalletPeakResult>(json!({
         "peak_height": null, "synced": false
     }));
-    // `control.wallet.syncStatus`, all three phases. `not_started` carries a null height rather
+    // `control.wallet.syncStatus`, every phase. `not_started` carries a null height rather
     // than 0 -- a wallet that has never synced and a wallet synced to the genesis block must not
     // wear the same shape -- and `chia_peer_count` is present in every one of them, because the
     // count is what turns "syncing" into either "syncing" or "syncing, connected to nothing".
