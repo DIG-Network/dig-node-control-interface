@@ -2199,3 +2199,44 @@ fn the_arrival_cursor_is_gated_and_routes_to_its_own_handler() {
     assert_eq!(page.cursor, 4_242);
     assert_eq!(page.latest, 4_243, "the ledger head must not be the cursor");
 }
+
+/// **An unknown phase token MUST NOT fail the parse.** This is the regression test for
+/// dig_ecosystem#2609, and it is the whole reason [`results::WalletSyncPhase`] carries an
+/// unrecognised arm.
+///
+/// The enum shipped as a closed three-variant `Deserialize`. When dig-node grew a fourth phase, the
+/// unknown token did not degrade one field — serde aborted the WHOLE
+/// [`results::WalletSyncStatusResult`], so dig-app's sync read returned `Err`, its chain-sync state
+/// collapsed to `Unknown`, and the badge rendered nothing. A contract that fails closed on an
+/// unrecognised token converts every future phase addition into a silent outage in every consumer
+/// that has not been rebuilt yet.
+#[test]
+fn an_unknown_phase_token_deserializes_instead_of_erroring() {
+    let parsed = serde_json::from_value::<results::WalletSyncPhase>(json!("a_phase_from_a_newer_node"))
+        .expect("an unrecognised phase token must parse, not abort the response");
+
+    assert_ne!(parsed, results::WalletSyncPhase::NotStarted);
+    assert_ne!(parsed, results::WalletSyncPhase::Syncing);
+    assert_ne!(
+        parsed,
+        results::WalletSyncPhase::Synced,
+        "an unknown token coerced into a KNOWN phase is worse than the parse error it replaced: it \
+         states a sync fact the node never sent"
+    );
+}
+
+/// **One unknown token must not take the rest of the payload with it.** The height and the peer
+/// count are still perfectly good observations, and a consumer that can read them renders a truthful
+/// partial view instead of nothing at all.
+#[test]
+fn an_unknown_phase_token_does_not_kill_the_surrounding_result() {
+    let parsed = serde_json::from_value::<results::WalletSyncStatusResult>(json!({
+        "phase": "a_phase_from_a_newer_node",
+        "peak_height": 5_000_000u32,
+        "chia_peer_count": 3u32
+    }))
+    .expect("the unknown token must degrade the phase alone, not the whole result");
+
+    assert_eq!(parsed.peak_height, Some(5_000_000));
+    assert_eq!(parsed.chia_peer_count, Some(3));
+}
