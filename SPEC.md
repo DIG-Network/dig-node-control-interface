@@ -40,7 +40,7 @@ rides over it.
   `pairing.poll`), the wallet chain reads (`control.wallet.balance` / `.coins` / `.coinById` / `.coinSpend` /
   `.coinsByParent` /
   `.peak` / `.syncStatus`), which need only public chain data, and `control.peerCounts`, which
-  discloses two integers about this node's own connectivity. For every other method the caller MUST
+  discloses three integers about this node's own connectivity. For every other method the caller MUST
   present the node's local control token
   as the `X-Dig-Control-Token` request header (preferred) or a `params._control_token` field. The
   token is a 64-hex value the node mints at first run into its machine-wide state dir with a
@@ -95,7 +95,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.pairing.approve` | master | owned | `{pairing_id:string}` | `{approved, client_name, token_id}` |
 | `control.pairing.revoke` | master | owned | `{token_id:string}` | `{revoked, token_id}` |
 | `control.peerStatus` | yes | delegated | — | (peer-pool snapshot; each peer entry carries `software`) |
-| `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null}` |
+| `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null, known_dig_peer_count:u32\|null}` |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
 | `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
@@ -118,7 +118,7 @@ The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.co
 `.syncStatus`)
 are served WITHOUT a control token, because each needs only public chain data — an address or a coin
 id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
-discloses two integers about this node's own connectivity and no address, endpoint or secret. The
+discloses three integers about this node's own connectivity and no address, endpoint or secret. The
 `Token` column above is authoritative; the open set is deliberately named here rather than counted,
 so that adding a method cannot leave a stale number behind. Two wallet methods are token-gated.
 `control.wallet.broadcast` puts bytes on the network. `control.wallet.arrivals` takes only a cursor,
@@ -294,9 +294,9 @@ opposite remedies — see §4.2.
   `synced` here reports ONLY that the replica's initial catch-up completed; it MUST NOT be read as
   "the wallet is caught up AND connected", which is `WalletSyncStatusResult.phase == "synced"` and
   is strictly stronger. Neither is a freshness guarantee.
-- **`PeerCountsResult`**: `{dig_peer_count:u32|null, chia_peer_count:u32|null}`. How many peers
-  this node holds on EACH network. The two networks are unrelated and their counts move
-  independently.
+- **`PeerCountsResult`**: `{dig_peer_count:u32|null, chia_peer_count:u32|null,
+  known_dig_peer_count:u32|null}`. How many peers this node holds on EACH network, and how many DIG
+  peers it knows of. The two networks are unrelated and their counts move independently.
 
   `dig_peer_count` MUST be the count of peers on the DIG content/gossip network (port 9445) — the
   node's `connected_peers`, the same figure `control.peerStatus` reports. `chia_peer_count` MUST be
@@ -315,6 +315,25 @@ opposite remedies — see §4.2.
   `control.peerStatus`'s `relay.peer_count` counts peers connected to THE RELAY, not to this node.
   It is frequently the only non-zero number on a node connected to nothing, and it is NEVER the
   answer to "how many peers does this node have" — `dig_peer_count` is.
+
+  `known_dig_peer_count` MUST be the number of DIG peers this node has LEARNED OF — the size of its
+  own discovered-peer address book — whether or not it is connected to them. It exists so that a
+  client can tell a REACHABILITY fault (`dig_peer_count: 0` beside a large known count) apart from a
+  DISCOVERY fault (`0` beside `0`); those have different remedies and, before this field, rendered
+  as the same zero. It MUST NOT be derived from `dig_peer_count`.
+
+  `known_dig_peer_count` is ONE node's local view and is therefore a LOWER BOUND. It MUST NOT be
+  presented, by the node or by any client, as the size of the DIG network or as a total peer count:
+  it omits every peer this node has not been introduced to, every peer reachable only through a
+  relay it does not use, and every address book entry evicted under the node's own bucket limits.
+  Two healthy nodes on one network will report different values and neither is wrong. A client MUST
+  label it as known/discovered peers.
+
+  `known_dig_peer_count >= dig_peer_count` normally holds, but is NOT an invariant a client may rely
+  on: the two are sampled from separate structures and may invert transiently during pool churn.
+
+  The field is OPTIONAL on the wire. A node predating it omits it, and a consumer MUST decode that
+  omission as `null` (UNKNOWN) rather than rejecting the payload or defaulting it to `0`.
 - **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced"|"no_wallet_enrolled"|
   "wallet_not_unlocked", peak_height:u32|null, chia_peer_count:u32|null, watched_addresses:u32|null}`.
   Whether the node's WALLET CHAIN replica is being kept current, how far it has got, how many CHIA

@@ -44,7 +44,7 @@ Every `control.*` method is token-gated unless the tables below mark it `—`: p
 control token as the `X-Dig-Control-Token` header (preferred) or a `params._control_token` field.
 Open today are `pairing.request` / `pairing.poll` (a token-less client uses them to obtain a scoped
 token after local operator approval), the wallet CHAIN READS (they need only public chain data — an
-address or a coin id, never a key), and `control.peerCounts` (two integers about this node's own
+address or a coin id, never a key), and `control.peerCounts` (three integers about this node's own
 connectivity). The three `control.pairing.*` admin methods require the MASTER token specifically.
 
 `UNAUTHORIZED` from an OPEN method means the node predates it — upgrade the node. From
@@ -114,7 +114,7 @@ token, **M** = requires the MASTER token, **—** = open. `Route`: how the node 
 | Method | Auth | Route | Params | Result |
 |---|---|---|---|---|
 | `control.peerStatus` | T | del | — | (peer-pool + relay-reservation snapshot, incl. per-peer `peers[]`); its `relay.peer_count` counts THE RELAY's peers, not this node's |
-| `control.peerCounts` | — | del | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null}` — DIG content/gossip peers and CHIA full-node peers; `0` is observed, `null` unobservable |
+| `control.peerCounts` | — | del | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null, known_dig_peer_count:u32\|null}` — DIG content/gossip peers CONNECTED, CHIA full-node peers, and DIG peers this node KNOWS OF (its own address book — a local lower bound, never the network size); `0` is observed, `null` unobservable |
 | `control.peers.connect` | T | del | `{peer:string}` (address or peer_id) | `{connected:true, peer_id}` |
 | `control.peers.disconnect` | T | del | `{peer:string}` (peer_id) | `{disconnected:true, peer_id}` |
 

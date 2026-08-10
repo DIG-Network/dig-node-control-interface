@@ -440,6 +440,13 @@ pub struct PairingRevokeResult {
 /// `0` means the node looked at that network and found nothing connected. `null` means it cannot
 /// observe the count at all — which is what a node whose peer network is not running reports, since
 /// a zero there would claim "nothing is connected" about a network it never asked.
+///
+/// # Connected is not the same question as known
+///
+/// [`known_dig_peer_count`](PeerCountsResult::known_dig_peer_count) answers a THIRD question —
+/// how many DIG peers this node has heard of, connected or not — so that a lonely node can say
+/// which of the two ways it is lonely. Every count here is one node's local view; none of them is
+/// the size of the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerCountsResult {
     /// Peers on the DIG content/gossip network (port 9445) — dig-node-core's `connected_peers`, the
@@ -449,6 +456,42 @@ pub struct PeerCountsResult {
     /// [`WalletSyncStatusResult::chia_peer_count`] reports — a conforming node MUST serve both from
     /// one source, and the two MUST agree within a single node's view.
     pub chia_peer_count: Option<u32>,
+    /// DIG peers this node has LEARNED OF but is not necessarily connected to — the size of its own
+    /// discovered-peer address book (dig_ecosystem#2570).
+    ///
+    /// This exists so a client can distinguish "this node is connected to nobody" from "there is
+    /// nobody to connect to", which [`dig_peer_count`](Self::dig_peer_count) alone cannot tell
+    /// apart. A node reporting `dig_peer_count: 0` alongside a known count of 40 has a reachability
+    /// problem; one reporting `0` alongside `0` has a discovery problem. Those are different faults
+    /// with different remedies, and until this field existed both rendered as the same zero.
+    ///
+    /// # What it does NOT count
+    ///
+    /// **It is not the size of the DIG network, and no field on this interface is.** It is ONE
+    /// node's local view and therefore a LOWER BOUND: it omits every peer this node has not been
+    /// introduced to, every peer behind a relay it does not use, every peer that entered the
+    /// network after this node's last discovery pass, and every entry its address book evicted
+    /// under its bucket limits. Two healthy nodes on the same network will report different numbers
+    /// and neither is wrong. A client MUST label it as discovered/known peers — rendering it as
+    /// "total peers" or "network size" asserts global knowledge that nothing here has.
+    ///
+    /// It is also NOT `control.peerStatus`'s `relay.peer_count`, which counts peers registered with
+    /// THE RELAY — a different party's view, scoped to that one relay.
+    ///
+    /// # Relationship to [`dig_peer_count`](Self::dig_peer_count)
+    ///
+    /// Normally `known_dig_peer_count >= dig_peer_count`, since a connected peer is a peer this node
+    /// knows of. A client MUST NOT rely on that ordering as an invariant: the two are sampled from
+    /// separate structures and a transient inversion during churn is not a protocol violation.
+    ///
+    /// # `Some(0)` is measured; `null` is unknown
+    ///
+    /// `0` means the node consulted its address book and found it empty. `null` means it could not
+    /// consult it at all — which is what a node whose peer network is not running reports, and what
+    /// a node too old to have this field reports by omitting it. Serde treats the missing field as
+    /// `None`, so an older node's payload decodes here as "unknown" rather than being rejected, and
+    /// an older CLIENT ignores the extra field: the addition is compatible in both directions.
+    pub known_dig_peer_count: Option<u32>,
 }
 
 /// `control.peers.connect` — the connected peer's id.
