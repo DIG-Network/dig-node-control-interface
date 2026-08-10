@@ -896,14 +896,29 @@ pub struct WalletPeakResult {
     pub synced: bool,
 }
 
-/// How far the node's wallet chain replica has got — the three states a background sync can be in.
+/// How far the node's wallet chain replica has got — the states a background sync can be in.
 ///
-/// Three named states rather than a boolean, because "has never started" and "is caught up" are
-/// different facts and a `bool` can only carry one of them. Paired with a `peak_height` a boolean
-/// forces a never-started wallet to report some height, and 0 is the only one available — which
-/// reads as *synced to the genesis block*, a claim about the chain that is simply false.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Named states rather than a boolean, because "has never started" and "is caught up" are different
+/// facts and a `bool` can only carry one of them. Paired with a `peak_height` a boolean forces a
+/// never-started wallet to report some height, and 0 is the only one available — which reads as
+/// *synced to the genesis block*, a claim about the chain that is simply false.
+///
+/// # Nothing to watch is TWO states, not one
+///
+/// A sync with no addresses to follow is idle for one of two reasons, and they are different
+/// sentences to a user with different remedies. [`NoWalletEnrolled`](Self::NoWalletEnrolled) is the
+/// honest all-clear: there is no wallet, so watching nothing is correct and complete.
+/// [`WalletNotUnlocked`](Self::WalletNotUnlocked) is the opposite — a wallet EXISTS and is not being
+/// watched — and reporting it as the all-clear tells a user with real coins that their balance is
+/// fully accounted for while the node follows none of their addresses. Merging the two would put a
+/// money-lie behind a green tick, so the contract keeps them apart.
+///
+/// # An unrecognised token is a VALUE, not a parse failure
+///
+/// [`Unrecognized`](Self::Unrecognized) exists because this enum was once closed, and a node that
+/// grew a new phase took every consumer's whole response down with it — see the variant's own docs.
+/// Consumers MUST treat an unrecognised phase as *unknown*, never as progress.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WalletSyncPhase {
     /// No sync has begun: the wallet holds no replica of the chain and is not building one.
     NotStarted,
@@ -918,16 +933,149 @@ pub enum WalletSyncPhase {
     /// peer satisfies it while the replica quietly goes stale, so this phase MUST NOT be read as
     /// proof that the data is FRESH — only that nothing is known to be preventing freshness.
     Synced,
+    /// **The honest all-clear: no wallet is enrolled on this node**, so there are no addresses to
+    /// follow and a sync would have nothing to do. Not a degraded state and not an error — a node
+    /// that has never had a wallet is working exactly as intended.
+    ///
+    /// A consumer MAY present this as settled. It is the ONLY nothing-to-watch phase for which that
+    /// is true: [`WalletNotUnlocked`](Self::WalletNotUnlocked) looks identical from inside the sync
+    /// loop and means the opposite.
+    ///
+    /// [`watched_addresses`](WalletSyncStatusResult::watched_addresses) accompanying this phase is
+    /// `Some(0)` — an observed zero, and the zero that is genuinely fine.
+    NoWalletEnrolled,
+    /// **A wallet IS enrolled, but the node holds no addresses for it, so it is watching nothing.**
+    /// The user's coins are not being followed and their balance is not being maintained.
+    ///
+    /// This is the common state after every restart, because the address set is derived from key
+    /// material the node cannot reach until the wallet is unlocked, and nothing back-fills it while
+    /// locked. It is emphatically NOT [`NoWalletEnrolled`](Self::NoWalletEnrolled): the difference
+    /// between them is the difference between *nothing to do* and *something to do that is not being
+    /// done*.
+    ///
+    /// A consumer MUST NOT render this as synced, settled, or up to date, and MUST NOT present a
+    /// balance read under it as complete. The honest rendering names the wallet and the remedy —
+    /// *"locked, so it is not being watched yet"* — because unlocking is the action that resolves
+    /// it.
+    ///
+    /// The name says NOT UNLOCKED rather than *locked* on purpose. An empty address set is what the
+    /// node can observe; a lock is only the usual cause of it, and a manifest that never carried the
+    /// keys reaches the same state without anything having been locked. The phase claims the
+    /// observation, and leaves the cause to whatever the node can actually establish.
+    WalletNotUnlocked,
+    /// **A phase token this build does not know**, carried verbatim.
+    ///
+    /// # Why this variant exists
+    ///
+    /// The enum shipped closed. dig-node then grew a phase, and because serde rejects an unknown
+    /// variant, the unknown token did not degrade one field — it aborted the entire
+    /// [`WalletSyncStatusResult`]. dig-app's sync read became `Err`, its chain-sync state collapsed
+    /// to unknown, and the surface rendered nothing at all (dig_ecosystem#2609). Every consumer
+    /// built against an older contract than the node it talks to hit it at once.
+    ///
+    /// # It is deliberately NOT silent
+    ///
+    /// The token is preserved rather than discarded so the state is *observable*: a consumer can say
+    /// which token it failed to understand, and a developer can read it out of a log instead of
+    /// reaching for a packet capture. This incident stayed invisible until somebody built a probe
+    /// against the published crate; the variant that replaces it should not need one.
+    ///
+    /// Mapping an unknown token onto [`Synced`](Self::Synced) or [`Syncing`](Self::Syncing) would be
+    /// far worse than the parse error it replaces. A parse error is loud and obviously wrong; a
+    /// coerced phase is a confident, plausible statement about the user's money that the node never
+    /// made. Consumers MUST render this as unknown and MUST NOT infer progress, completion, or a
+    /// trustworthy balance from it.
+    ///
+    /// # The payload is untrusted text
+    ///
+    /// It is whatever the node sent. A consumer that displays it MUST escape and bound it like any
+    /// other foreign string rather than splicing it into a message unchecked.
+    Unrecognized(String),
 }
 
 impl WalletSyncPhase {
-    /// Every phase, in progress order — the enumeration a machine reads, and the anchor the
-    /// conformance KATs pin the wire tokens against.
+    /// Every phase this build KNOWS, in progress order — the enumeration a machine reads, and the
+    /// anchor the conformance KATs pin the wire tokens against.
+    ///
+    /// [`Unrecognized`](Self::Unrecognized) is absent by definition: it is the absence of a known
+    /// token rather than one of them, and it has no fixed wire spelling to pin. A node MUST NOT emit
+    /// anything outside this list; a consumer that meets something outside it gets `Unrecognized`
+    /// instead of a failed response.
     pub const ALL: &'static [WalletSyncPhase] = &[
         WalletSyncPhase::NotStarted,
         WalletSyncPhase::Syncing,
         WalletSyncPhase::Synced,
+        WalletSyncPhase::NoWalletEnrolled,
+        WalletSyncPhase::WalletNotUnlocked,
     ];
+
+    /// This phase's exact wire spelling, or the verbatim token for
+    /// [`Unrecognized`](Self::Unrecognized).
+    ///
+    /// The one place a phase becomes a string, so serialization and any display path cannot drift
+    /// into two different spellings of the same state.
+    pub fn as_wire(&self) -> &str {
+        match self {
+            WalletSyncPhase::NotStarted => "not_started",
+            WalletSyncPhase::Syncing => "syncing",
+            WalletSyncPhase::Synced => "synced",
+            WalletSyncPhase::NoWalletEnrolled => "no_wallet_enrolled",
+            WalletSyncPhase::WalletNotUnlocked => "wallet_not_unlocked",
+            WalletSyncPhase::Unrecognized(token) => token,
+        }
+    }
+
+    /// The token a build does not understand, or `None` for every phase it does.
+    ///
+    /// Lets a consumer log or surface the exact unrecognised spelling without matching the variant
+    /// open-coded, which is how the two spellings drift apart.
+    pub fn unrecognized_token(&self) -> Option<&str> {
+        match self {
+            WalletSyncPhase::Unrecognized(token) => Some(token),
+            _ => None,
+        }
+    }
+
+    /// Whether this build understands the phase at all.
+    ///
+    /// The predicate a consumer branches its *"your node may be newer than this app"* path on.
+    pub fn is_recognized(&self) -> bool {
+        !matches!(self, WalletSyncPhase::Unrecognized(_))
+    }
+}
+
+impl From<&str> for WalletSyncPhase {
+    /// Every token maps to a phase — an unknown one to
+    /// [`Unrecognized`](WalletSyncPhase::Unrecognized). Total by construction, so no caller can
+    /// reintroduce the fail-closed behaviour this type exists to remove.
+    fn from(token: &str) -> Self {
+        match token {
+            "not_started" => WalletSyncPhase::NotStarted,
+            "syncing" => WalletSyncPhase::Syncing,
+            "synced" => WalletSyncPhase::Synced,
+            "no_wallet_enrolled" => WalletSyncPhase::NoWalletEnrolled,
+            "wallet_not_unlocked" => WalletSyncPhase::WalletNotUnlocked,
+            other => WalletSyncPhase::Unrecognized(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for WalletSyncPhase {
+    /// A bare JSON string, exactly as the derived `rename_all = "snake_case"` produced before this
+    /// type grew an unrecognised arm — so an [`Unrecognized`](WalletSyncPhase::Unrecognized) token
+    /// round-trips back out byte-identical rather than being rewritten or dropped by a relay.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for WalletSyncPhase {
+    /// Accepts ANY string. A non-string is still a type error — a number or an object where a phase
+    /// belongs is a malformed response, not a newer node.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let token = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        Ok(WalletSyncPhase::from(token.as_ref()))
+    }
 }
 
 /// `control.wallet.syncStatus` — is the wallet's chain replica being kept current, how far has it
@@ -960,12 +1108,42 @@ impl WalletSyncPhase {
 /// this replica got?* An oracle's height here would report a caller's own sync progress using a
 /// number the replica never reached, which is precisely the reading a progress display makes.
 ///
-/// # `chia_peer_count: 0` is the disambiguator, not a fourth phase
+/// # `chia_peer_count: 0` is a disambiguator, not a phase
 ///
 /// A sync that is running while connected to nothing reports `Syncing` with a count of `0`, and a
 /// consumer SHOULD render the count alongside the phase for exactly that reason: "syncing — no
 /// peers" is honest where a bare "syncing" implies progress that is not happening. `null` means the
 /// node cannot observe the count at all and licenses no claim about connectivity either way.
+///
+/// # `watched_addresses` is what makes an idle sync readable
+///
+/// A sync following nothing is idle, and the phase alone does not say whether that is correct. The
+/// count is the second fact that settles it: `0` beside [`WalletSyncPhase::NoWalletEnrolled`] is a
+/// complete and honest picture, while `0` beside [`WalletSyncPhase::WalletNotUnlocked`] is a wallet
+/// whose coins nobody is following. A consumer SHOULD render the two together for the same reason it
+/// renders the peer count beside `Syncing`.
+///
+/// `Some(0)` is an OBSERVED zero — the node looked and is following no addresses. `None` means the
+/// node did not report the number, which is not the same claim and MUST NOT be rendered as zero: a
+/// node that cannot say how many addresses it follows has not told you that it follows none.
+///
+/// A `Synced` phase with `watched_addresses: Some(0)` is a contradiction a conforming node MUST NOT
+/// emit — a sync following no addresses has not caught anything up. A consumer meeting it SHOULD
+/// trust the count over the phase, because the count is the narrower claim.
+///
+/// # An older node's payload still parses
+///
+/// A node that predates `watched_addresses` omits the key, and it deserializes to `None` — *the node
+/// did not report it*. That tolerance is required, not incidental: a mandatory new field would make
+/// every older node unreadable to a client that has it, which is dig_ecosystem#2609 in mirror image
+/// — the same fail-closed break with the old and new sides swapped. A contract that tolerates a
+/// token from the future must equally tolerate a payload from the past.
+///
+/// **Every `Option` field here behaves this way**, because serde decodes a missing `Option` to
+/// `None`. So `peak_height` and `chia_peer_count` are absent-tolerant too, and have been since this
+/// type shipped. Only [`phase`](Self::phase) is structurally mandatory. A conforming node MUST still
+/// emit all four keys — absence is a compatibility allowance for older builds, never a licence to
+/// omit an observation — and a consumer MUST read an absent count as unreported rather than zero.
 ///
 /// # These are CHIA peers, not DIG peers
 ///
@@ -1010,9 +1188,9 @@ impl WalletSyncPhase {
 /// performs no depth arithmetic. dig_ecosystem#2483 records that `peak_height`'s meaning differs
 /// between a simulator (the NEXT height) and a full node (the last existing one), so a consumer
 /// computing depth must floor its own input rather than assume a convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletSyncStatusResult {
-    /// Which of the three states the wallet's chain sync is in. See [`WalletSyncPhase`].
+    /// Which state the wallet's chain sync is in. See [`WalletSyncPhase`].
     pub phase: WalletSyncPhase,
     /// The replica's own peak height, or `null` when it has none — never height 0 as a stand-in for
     /// unknown, and never an oracle's height. See the type docs.
@@ -1020,6 +1198,10 @@ pub struct WalletSyncStatusResult {
     /// How many CHIA full-node peers the sync is connected to. `0` is an observed zero; `null` means
     /// the node cannot observe the count. Not the DIG peer count — see the type docs.
     pub chia_peer_count: Option<u32>,
+    /// How many addresses the wallet sync is actually following. `Some(0)` is an observed zero;
+    /// `None` means the node did not report the number at all — including because it predates the
+    /// field. See the type docs for why that distinction is load-bearing.
+    pub watched_addresses: Option<u32>,
 }
 
 /// `control.wallet.broadcast` — the outcome of pushing an already-signed bundle.

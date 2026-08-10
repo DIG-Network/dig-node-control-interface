@@ -361,25 +361,48 @@ fn golden_response_result_vectors_are_byte_stable() {
     // wear the same shape -- and `chia_peer_count` is present in every one of them, because the
     // count is what turns "syncing" into either "syncing" or "syncing, connected to nothing".
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
-        "phase": "not_started", "peak_height": null, "chia_peer_count": 0u32
+        "phase": "not_started", "peak_height": null, "chia_peer_count": 0u32,
+        "watched_addresses": 0u32
     }));
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
-        "phase": "syncing", "peak_height": 4_000_000u32, "chia_peer_count": 3u32
+        "phase": "syncing", "peak_height": 4_000_000u32, "chia_peer_count": 3u32,
+        "watched_addresses": 12u32
     }));
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
-        "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32
+        "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32,
+        "watched_addresses": 12u32
     }));
     // THE RESTART STATE: a height with no sync running. Not a contradiction -- the height is
     // persisted in the wallet DB while the phase describes this PROCESS -- so the contract permits
     // it explicitly and this vector pins that it stays expressible. A shape that forbade it would
     // force a restarted node to fabricate a phase or discard a height it genuinely has.
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
-        "phase": "not_started", "peak_height": 4_900_000u32, "chia_peer_count": 0u32
+        "phase": "not_started", "peak_height": 4_900_000u32, "chia_peer_count": 0u32,
+        "watched_addresses": 12u32
     }));
     // A node that cannot observe the peer count at all: `null`, which is NOT `0`. `0` is a measured
     // zero and licenses "syncing -- no peers"; `null` licenses no claim about connectivity.
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
-        "phase": "syncing", "peak_height": null, "chia_peer_count": null
+        "phase": "syncing", "peak_height": null, "chia_peer_count": null,
+        "watched_addresses": null
+    }));
+    // THE TWO IDLE STATES, which differ only in the phase token and mean opposite things. Pinned
+    // adjacently and with an identical `watched_addresses: 0`, because the count alone cannot tell
+    // them apart -- the token is the only thing carrying "and that is fine" versus "and it is not".
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "no_wallet_enrolled", "peak_height": null, "chia_peer_count": 0u32,
+        "watched_addresses": 0u32
+    }));
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "wallet_not_unlocked", "peak_height": 4_900_000u32, "chia_peer_count": 2u32,
+        "watched_addresses": 0u32
+    }));
+    // A TOKEN FROM A NEWER NODE, round-tripping VERBATIM. This vector is the contract's promise that
+    // an unrecognised phase survives a decode-re-encode unchanged: a consumer that relays or logs
+    // the payload hands on what the node actually said, rather than a token this build invented.
+    assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
+        "phase": "a_phase_from_a_newer_node", "peak_height": 5_000_000u32, "chia_peer_count": 3u32,
+        "watched_addresses": 12u32
     }));
     // `control.peerCounts` — the two networks, each named. A node connected to both.
     assert_result_round_trips::<results::PeerCountsResult>(json!({
@@ -453,29 +476,52 @@ fn the_tier_tokens_are_the_lowercase_wire_spellings() {
     }
 }
 
-/// The three wallet-sync phases spell themselves on the wire as these exact snake_case tokens,
-/// pinned literally so renaming a Rust variant cannot silently change what a consumer must match on.
+/// The wallet-sync phases spell themselves on the wire as these exact snake_case tokens, pinned
+/// literally so renaming a Rust variant cannot silently change what a consumer must match on.
 ///
-/// The set is asserted to be exactly three as well: a fourth phase would be a wire change every
-/// consumer's match must be told about, not something that may arrive unannounced.
+/// [`results::WalletSyncPhase::ALL`] is checked against the pinned list in BOTH directions, because
+/// it is the anchor the node side derives its own conformance assertion from: a variant missing from
+/// `ALL` would quietly shrink that safety net, and a variant in `ALL` with no pinned spelling would
+/// leave a real wire token unpinned.
 #[test]
 fn the_wallet_sync_phase_tokens_are_the_snake_case_wire_spellings() {
-    let pinned = [
+    let pinned: &[(results::WalletSyncPhase, &str)] = &[
         (results::WalletSyncPhase::NotStarted, "not_started"),
         (results::WalletSyncPhase::Syncing, "syncing"),
         (results::WalletSyncPhase::Synced, "synced"),
+        (
+            results::WalletSyncPhase::NoWalletEnrolled,
+            "no_wallet_enrolled",
+        ),
+        (
+            results::WalletSyncPhase::WalletNotUnlocked,
+            "wallet_not_unlocked",
+        ),
     ];
     for (phase, wire) in pinned {
         assert_eq!(serde_json::to_value(phase).unwrap(), json!(wire));
         assert_eq!(
-            serde_json::from_value::<results::WalletSyncPhase>(json!(wire)).unwrap(),
+            &serde_json::from_value::<results::WalletSyncPhase>(json!(wire)).unwrap(),
             phase
+        );
+        assert_eq!(phase.as_wire(), *wire, "as_wire must be the same spelling");
+    }
+
+    for phase in results::WalletSyncPhase::ALL {
+        assert!(
+            pinned.iter().any(|(pinned_phase, _)| pinned_phase == phase),
+            "{phase:?} is in ALL but has no pinned wire spelling"
+        );
+        assert!(
+            phase.is_recognized(),
+            "ALL enumerates the KNOWN phases; Unrecognized is the absence of one"
         );
     }
     assert_eq!(
         results::WalletSyncPhase::ALL.len(),
         pinned.len(),
-        "the phase set is exactly the three pinned above"
+        "every pinned phase must also appear in ALL — the node side derives its conformance \
+         assertion from ALL, so a variant missing here disables that check silently"
     );
 }
 
@@ -489,12 +535,14 @@ fn never_started_is_distinguishable_from_synced_at_height_zero() {
         phase: results::WalletSyncPhase::NotStarted,
         peak_height: None,
         chia_peer_count: Some(0),
+        watched_addresses: Some(0),
     })
     .unwrap();
     let synced_at_genesis = serde_json::to_value(results::WalletSyncStatusResult {
         phase: results::WalletSyncPhase::Synced,
         peak_height: Some(0),
         chia_peer_count: Some(1),
+        watched_addresses: Some(4),
     })
     .unwrap();
 
@@ -594,6 +642,7 @@ fn both_results_spell_the_chia_count_with_the_same_key() {
         phase: results::WalletSyncPhase::Syncing,
         peak_height: Some(4_000_000),
         chia_peer_count: Some(3),
+        watched_addresses: Some(4),
     })
     .unwrap();
 
@@ -1085,6 +1134,7 @@ impl ControlHandler for MockNode {
             phase: results::WalletSyncPhase::Syncing,
             peak_height: Some(4_999_000),
             chia_peer_count: Some(3),
+            watched_addresses: Some(4),
         })
     }
     /// Accepts anything except [`REJECTED_BUNDLE`], which it refuses the way a mempool does — as a
@@ -2212,8 +2262,9 @@ fn the_arrival_cursor_is_gated_and_routes_to_its_own_handler() {
 /// that has not been rebuilt yet.
 #[test]
 fn an_unknown_phase_token_deserializes_instead_of_erroring() {
-    let parsed = serde_json::from_value::<results::WalletSyncPhase>(json!("a_phase_from_a_newer_node"))
-        .expect("an unrecognised phase token must parse, not abort the response");
+    let parsed =
+        serde_json::from_value::<results::WalletSyncPhase>(json!("a_phase_from_a_newer_node"))
+            .expect("an unrecognised phase token must parse, not abort the response");
 
     assert_ne!(parsed, results::WalletSyncPhase::NotStarted);
     assert_ne!(parsed, results::WalletSyncPhase::Syncing);
@@ -2239,4 +2290,151 @@ fn an_unknown_phase_token_does_not_kill_the_surrounding_result() {
 
     assert_eq!(parsed.peak_height, Some(5_000_000));
     assert_eq!(parsed.chia_peer_count, Some(3));
+}
+
+/// **The unrecognised token is preserved verbatim, not normalised away.** Observability is the whole
+/// point of the variant: a consumer that can name the token it did not understand turns a silent
+/// mismatch into a one-line diagnosis, which is exactly what dig_ecosystem#2609 lacked — the break
+/// was invisible until somebody built a probe against the published crate.
+#[test]
+fn an_unrecognized_phase_carries_the_token_it_did_not_understand() {
+    let parsed =
+        serde_json::from_value::<results::WalletSyncPhase>(json!("a_phase_from_a_newer_node"))
+            .unwrap();
+
+    assert_eq!(
+        parsed.unrecognized_token(),
+        Some("a_phase_from_a_newer_node")
+    );
+    assert!(!parsed.is_recognized());
+    assert_eq!(parsed.as_wire(), "a_phase_from_a_newer_node");
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        json!("a_phase_from_a_newer_node"),
+        "re-encoding must hand back the node's own token, never a placeholder"
+    );
+
+    // Every KNOWN phase reports no unrecognised token, so a consumer branching on the accessor
+    // cannot mistake a phase it understands for one it does not.
+    for phase in results::WalletSyncPhase::ALL {
+        assert_eq!(phase.unrecognized_token(), None, "{phase:?}");
+        assert!(phase.is_recognized(), "{phase:?}");
+    }
+}
+
+/// **A phase is only ever a STRING.** Tolerating an unknown token must not slide into tolerating an
+/// unknown SHAPE: a number, an object, or a null where a phase belongs is a malformed response, and
+/// swallowing it as `Unrecognized` would let a genuinely broken payload read as a newer node.
+#[test]
+fn a_non_string_phase_is_still_a_type_error() {
+    for malformed in [
+        json!(3),
+        json!(null),
+        json!({"phase": "synced"}),
+        json!(["synced"]),
+    ] {
+        assert!(
+            serde_json::from_value::<results::WalletSyncPhase>(malformed.clone()).is_err(),
+            "{malformed} is a malformed phase, not an unrecognised one"
+        );
+    }
+}
+
+/// **A payload from a node that predates `watched_addresses` still parses.** This is
+/// dig_ecosystem#2609 in mirror image — a required new field would make every older node unreadable
+/// to a client that has it, the same fail-closed break with the two sides swapped.
+///
+/// The absent field decodes to `None`, which means *the node did not report it* and NOT `Some(0)`.
+/// Collapsing the two would have an old node silently assert that it watches no addresses, which is
+/// the affirmative all-clear this whole family exists to stop being emitted by accident.
+#[test]
+fn a_payload_without_watched_addresses_parses_as_unreported() {
+    let legacy = serde_json::from_value::<results::WalletSyncStatusResult>(json!({
+        "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32
+    }))
+    .expect("a node predating the field must stay readable");
+
+    assert_eq!(
+        legacy.watched_addresses, None,
+        "absent means unreported; Some(0) would be a measurement the node never made"
+    );
+    assert_eq!(legacy.phase, results::WalletSyncPhase::Synced);
+    assert_eq!(legacy.peak_height, Some(5_000_000));
+
+    // An explicit null says the same thing as an absent key: the node cannot report the number.
+    let explicit_null = serde_json::from_value::<results::WalletSyncStatusResult>(json!({
+        "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32,
+        "watched_addresses": null
+    }))
+    .unwrap();
+    assert_eq!(explicit_null, legacy);
+}
+
+/// **`phase` is the one structurally mandatory field; every count decodes absence as unreported.**
+///
+/// Pins the real serde behaviour rather than an assumed one. `Option` fields have ALWAYS tolerated a
+/// missing key here — `watched_addresses` needed no attribute to gain the property, and
+/// `peak_height` and `chia_peer_count` have had it since this type shipped. The test exists because
+/// the opposite was assumed while adding the new field, and a doc-comment asserting the three
+/// original fields were required would have been simply false.
+///
+/// The value of pinning it: an absent count MUST decode to `None`, never to `Some(0)`. A truncated
+/// response that read as a measured zero would be an affirmative claim the node never made.
+#[test]
+fn phase_is_required_and_absent_counts_decode_as_unreported() {
+    let mut without_phase = json!({
+        "peak_height": 5_000_000u32, "chia_peer_count": 5u32, "watched_addresses": 12u32
+    });
+    assert!(
+        serde_json::from_value::<results::WalletSyncStatusResult>(without_phase.take()).is_err(),
+        "a response with no phase is malformed — there is no honest default for it"
+    );
+
+    for missing in ["peak_height", "chia_peer_count", "watched_addresses"] {
+        let mut payload = json!({
+            "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32,
+            "watched_addresses": 12u32
+        });
+        payload.as_object_mut().unwrap().remove(missing);
+
+        let parsed = serde_json::from_value::<results::WalletSyncStatusResult>(payload)
+            .unwrap_or_else(|e| panic!("`{missing}` absent must stay readable: {e}"));
+        let decoded = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(
+            decoded[missing],
+            json!(null),
+            "`{missing}` absent must decode as unreported, never as a measured zero"
+        );
+    }
+}
+
+/// **The two idle phases are different values, and the count cannot tell them apart.** The fixture
+/// varies ONLY the phase, holding `watched_addresses` at the `0` both states share, so an
+/// implementation that folded "no wallet" and "wallet not unlocked" into one nothing-to-watch token
+/// — the exact conflation dig_ecosystem#2609's fix nearly shipped — cannot pass.
+#[test]
+fn no_wallet_enrolled_is_distinguishable_from_a_wallet_that_is_not_unlocked() {
+    let no_wallet = results::WalletSyncStatusResult {
+        phase: results::WalletSyncPhase::NoWalletEnrolled,
+        peak_height: None,
+        chia_peer_count: Some(2),
+        watched_addresses: Some(0),
+    };
+    let locked = results::WalletSyncStatusResult {
+        phase: results::WalletSyncPhase::WalletNotUnlocked,
+        watched_addresses: Some(0),
+        ..no_wallet.clone()
+    };
+
+    assert_ne!(no_wallet, locked);
+    assert_ne!(
+        serde_json::to_value(&no_wallet).unwrap(),
+        serde_json::to_value(&locked).unwrap(),
+        "an enrolled-but-unwatched wallet must not wear the all-clear's wire shape"
+    );
+    assert_eq!(
+        serde_json::to_value(&locked).unwrap()["phase"],
+        json!("wallet_not_unlocked")
+    );
 }
