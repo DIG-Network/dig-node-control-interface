@@ -143,6 +143,8 @@ pub enum ControlMethod {
     WalletCoins,
     /// `control.wallet.coinById` — read ONE coin record by coin id, spent or unspent.
     WalletCoinById,
+    /// `control.wallet.arrivals` — read confirmed INCOMING funds since a cursor position.
+    WalletArrivals,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
     /// `control.wallet.syncStatus` — read whether the wallet's chain replica is being kept current.
@@ -192,6 +194,7 @@ impl ControlMethod {
             ControlMethod::WalletBalance => "control.wallet.balance",
             ControlMethod::WalletCoins => "control.wallet.coins",
             ControlMethod::WalletCoinById => "control.wallet.coinById",
+            ControlMethod::WalletArrivals => "control.wallet.arrivals",
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
@@ -261,6 +264,7 @@ impl ControlMethod {
             ControlMethod::WalletBalance
                 | ControlMethod::WalletCoins
                 | ControlMethod::WalletCoinById
+                | ControlMethod::WalletArrivals
                 | ControlMethod::WalletPeak
                 | ControlMethod::WalletSyncStatus
                 | ControlMethod::PeerCounts
@@ -294,6 +298,7 @@ impl ControlMethod {
             | ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
+            | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Routing::Delegated,
@@ -336,6 +341,7 @@ impl ControlMethod {
             ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
+            | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Category::Wallet,
@@ -375,6 +381,7 @@ impl ControlMethod {
             ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
             ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
+            ControlMethod::WalletArrivals => "READ-only: confirmed INCOMING funds recorded since a cursor position, oldest first -- the answer to `was I just paid?`, which no balance or coin list can give. Each row is a coin the node determined ARRIVED: confirmed on chain, above the wallet's arrival baseline, not previously reported, and not the wallet's own change. Resume from `cursor` (the last row you were handed), never from `latest`.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
             ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
@@ -418,6 +425,7 @@ impl ControlMethod {
         ControlMethod::WalletBalance,
         ControlMethod::WalletCoins,
         ControlMethod::WalletCoinById,
+        ControlMethod::WalletArrivals,
         ControlMethod::WalletPeak,
         ControlMethod::WalletSyncStatus,
         ControlMethod::WalletBroadcast,
@@ -461,6 +469,7 @@ mod tests {
             "control.wallet.balance",
             "control.wallet.coins",
             "control.wallet.coinById",
+            "control.wallet.arrivals",
             "control.wallet.peak",
             "control.wallet.syncStatus",
             "control.peerCounts",
@@ -469,8 +478,8 @@ mod tests {
         .collect();
         assert_eq!(
             expected_open.len(),
-            8,
-            "the open surface is eight named methods"
+            9,
+            "the open surface is nine named methods"
         );
         let actual_open: BTreeSet<&str> = ControlMethod::ALL
             .iter()
@@ -537,6 +546,7 @@ mod tests {
         let expected: BTreeSet<&str> = [
             "control.wallet.coins",
             "control.wallet.coinById",
+            "control.wallet.arrivals",
             "control.wallet.peak",
             "control.wallet.syncStatus",
             "control.wallet.broadcast",

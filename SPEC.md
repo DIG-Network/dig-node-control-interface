@@ -103,13 +103,15 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
+| `control.wallet.arrivals` | no | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` / `.syncStatus`)
+The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.arrivals` / `.peak` /
+`.syncStatus`)
 are served WITHOUT a control token, because each needs only public chain data — an address or a coin
 id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
 discloses two integers about this node's own connectivity and no address, endpoint or secret. The

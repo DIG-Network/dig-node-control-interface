@@ -218,6 +218,21 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletCoinByIdParams,
     ) -> Result<results::WalletCoinByIdResult, ControlError>;
+    /// `control.wallet.arrivals` (READ-only, OPEN)
+    ///
+    /// Every returned row MUST be a CONFIRMED arrival that the node itself judged: above its arrival
+    /// baseline, not previously reported, and not the wallet's own change. An implementation MUST NOT
+    /// emit a mempool sighting here, and MUST answer an empty page rather than an error when it has
+    /// no baseline — "nothing arrived" is the honest answer from a wallet that cannot yet tell
+    /// history from news.
+    ///
+    /// `cursor` MUST be the position of the last row actually returned (or the caller's `after_seq`
+    /// for an empty page) and MUST NOT be `latest`; see
+    /// [`WalletArrivalsResult::latest`](results::WalletArrivalsResult::latest).
+    async fn wallet_arrivals(
+        &self,
+        params: params::WalletArrivalsParams,
+    ) -> Result<results::WalletArrivalsResult, ControlError>;
     /// `control.wallet.peak` (READ-only, OPEN)
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
     /// `control.peerCounts` (READ-only, OPEN)
@@ -338,6 +353,7 @@ pub trait ControlHandler: Sync {
                 let params: params::WalletCoinByIdParams = decode(params)?;
                 encode(self.wallet_coin_by_id(params.validated()?).await?)
             }
+            ControlMethod::WalletArrivals => encode(self.wallet_arrivals(decode(params)?).await?),
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
             ControlMethod::WalletSyncStatus => encode(self.wallet_sync_status().await?),
             ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),

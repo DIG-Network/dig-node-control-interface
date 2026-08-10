@@ -874,6 +874,28 @@ impl ControlHandler for MockNode {
             peak_height: None,
         })
     }
+    /// Answers with a `seq` no neighbouring wallet handler produces, and a `latest` one ABOVE the
+    /// page's own cursor — so a handler that collapsed the two, or a dispatch arm wired to another
+    /// wallet read, is distinguishable from a correct one.
+    async fn wallet_arrivals(
+        &self,
+        params: WalletArrivalsParams,
+    ) -> Result<results::WalletArrivalsResult, ControlError> {
+        let arrivals = vec![results::WalletArrivalRecord {
+            seq: 4_242,
+            coin_id: SPENT_COIN.into(),
+            puzzle_hash: "22".repeat(32),
+            amount: "1000000000000".into(),
+            asset_id: None,
+            confirmed_height: 5_000_000,
+        }];
+        let cursor = arrivals.last().map_or(params.after_seq, |a| a.seq);
+        Ok(results::WalletArrivalsResult {
+            arrivals,
+            cursor,
+            latest: 4_243,
+        })
+    }
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError> {
         Ok(results::WalletPeakResult {
             peak_height: Some(5_000_000),
@@ -1549,4 +1571,111 @@ fn the_wallet_failure_codes_match_the_nodes_catalogue() {
             "a wallet read is served by the node's backend, not the shell"
         );
     }
+}
+
+// ---- control.wallet.arrivals (dig_ecosystem#2548) ------------------------------------------
+
+/// **The arrival cursor's request and response shapes are pinned, in both node dialects.**
+///
+/// The node this contract describes already SERVES `control.wallet.arrivals`, so these vectors are
+/// written against what it emits rather than against what would be tidy: `amount` is a decimal
+/// STRING (the ledger stores the full `u64` range, which a JSON number cannot carry losslessly) and
+/// `asset_id` is `null` for native XCH or the CAT's hex TAIL — never a ticker.
+///
+/// The empty page is a separate vector because it is the ordinary answer, not an edge case: it means
+/// "the node consulted its own ledger and nothing has arrived since your cursor", and a client that
+/// could not decode it would be blind exactly when nothing is wrong.
+#[test]
+fn the_arrival_cursor_wire_shapes_are_byte_stable() {
+    assert_request(
+        &WalletArrivalsParams {
+            after_seq: 41,
+            limit: Some(10),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.arrivals","params":{"after_seq":41,"limit":10}}),
+    );
+    // An omitted `limit` is the node's default page size, so it is absent from the wire rather than
+    // sent as a number this client invented.
+    assert_request(
+        &WalletArrivalsParams {
+            after_seq: 0,
+            limit: None,
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.arrivals","params":{"after_seq":0}}),
+    );
+    assert_result_round_trips::<results::WalletArrivalsResult>(json!({
+        "arrivals": [{
+            "seq": 7u64,
+            "coin_id": "ab".repeat(32),
+            "puzzle_hash": "cc".repeat(32),
+            "amount": "18446744073709551615",
+            "asset_id": null,
+            "confirmed_height": 5_000_000u32
+        }],
+        "cursor": 7u64,
+        "latest": 9u64
+    }));
+    assert_result_round_trips::<results::WalletArrivalsResult>(json!({
+        "arrivals": [{
+            "seq": 8u64,
+            "coin_id": "ab".repeat(32),
+            "puzzle_hash": "cc".repeat(32),
+            "amount": "2500",
+            "asset_id": "a406d3".to_string(),
+            "confirmed_height": 5_000_001u32
+        }],
+        "cursor": 8u64,
+        "latest": 8u64
+    }));
+    // The ordinary answer: nothing new. `cursor` echoes what the caller asked from, so a client
+    // that stores it does not rewind.
+    assert_result_round_trips::<results::WalletArrivalsResult>(json!({
+        "arrivals": [], "cursor": 41u64, "latest": 41u64
+    }));
+}
+
+/// **`latest` may run AHEAD of `cursor`, and the contract keeps that expressible.**
+///
+/// The node reads `latest` after materializing the page, so an arrival recorded in between sits
+/// above the page and below `latest`. A client that resumed from `latest` would step over it. This
+/// pins that the two are separate fields carrying separate facts — a shape that collapsed them, or
+/// a result type that derived one from the other, fails here.
+#[test]
+fn the_arrival_page_cursor_is_the_last_row_handed_over_not_the_ledger_head() {
+    let ahead: results::WalletArrivalsResult = serde_json::from_value(json!({
+        "arrivals": [{
+            "seq": 5u64, "coin_id": "ab".repeat(32), "puzzle_hash": "cc".repeat(32),
+            "amount": "1", "asset_id": null, "confirmed_height": 100u32
+        }],
+        "cursor": 5u64,
+        "latest": 12u64
+    }))
+    .expect("a page whose ledger has moved on is a valid answer");
+    assert_eq!(
+        ahead.cursor, 5,
+        "the cursor must be the last row handed over"
+    );
+    assert_eq!(ahead.latest, 12, "the ledger head must survive the decode");
+    assert_eq!(ahead.arrivals[0].amount, "1");
+}
+
+/// **The arrival cursor is an OPEN read and reaches its own handler over the real dispatcher.**
+///
+/// The mock answers with a `seq` no neighbouring wallet handler produces, so an arm wired to the
+/// wrong method is distinguishable rather than passing on a shape they happen to share.
+#[test]
+fn the_arrival_cursor_is_an_open_read_that_routes_to_its_own_handler() {
+    assert!(
+        ControlMethod::WalletArrivals.is_open_read(),
+        "the arrival cursor reads only the node's own local ledger, so it is token-less like the \
+         other wallet reads"
+    );
+    let page = round_trip(&WalletArrivalsParams {
+        after_seq: 0,
+        limit: None,
+    })
+    .expect("arrivals must route");
+    assert_eq!(page.arrivals[0].seq, 4_242);
+    assert_eq!(page.cursor, 4_242);
+    assert_eq!(page.latest, 4_243, "the ledger head must not be the cursor");
 }

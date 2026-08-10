@@ -269,6 +269,39 @@ pub struct WalletCoinByIdParams {
 }
 control_call!(WalletCoinByIdParams => ControlMethod::WalletCoinById, results::WalletCoinByIdResult);
 
+/// `control.wallet.arrivals` — confirmed INCOMING funds recorded since a cursor position.
+///
+/// The answer to "was I just paid?", which neither a balance nor a coin list can give: a balance
+/// moves for the user's OWN change too, and an unspent-coin list cannot say which of its coins are
+/// new. Each row the node returns is a coin it determined ARRIVED — confirmed on chain, above the
+/// wallet's arrival baseline, not previously reported, and not created by spending one of the
+/// wallet's own coins. The determination is the NODE's; a client MUST NOT re-derive it, because the
+/// signals it takes (spent parents, the catch-up baseline) live only in the node's replica.
+///
+/// # A cursor, not a stream
+///
+/// The control envelope is strictly request→response, so this is polled. A client resumes from
+/// [`WalletArrivalsResult::cursor`](results::WalletArrivalsResult::cursor) — the last position it
+/// was actually handed — and NEVER from `latest`; see that field for why the distinction loses a
+/// notification when it is collapsed.
+///
+/// # `after_seq` is unsigned so a rewind is unexpressible
+///
+/// Positions are monotonic and start at 1, so there is no meaning for a negative one. `0` is the
+/// beginning of the ledger and is what a client sends when it deliberately wants everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WalletArrivalsParams {
+    /// Return arrivals STRICTLY after this position. `0` starts at the beginning of the ledger,
+    /// and is also what an omitted field means — the same default the node applies.
+    #[serde(default)]
+    pub after_seq: u64,
+    /// The page size. `None` asks for the node's default rather than a number this client invented;
+    /// a node clamps whatever it is given to its own maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+control_call!(WalletArrivalsParams => ControlMethod::WalletArrivals, results::WalletArrivalsResult);
+
 const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
 
 fn normalize_coin_id(coin_id: &str) -> Option<&str> {
