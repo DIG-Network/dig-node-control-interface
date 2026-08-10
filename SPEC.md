@@ -37,7 +37,8 @@ rides over it.
 - Every `control.*` method is **token-gated** EXCEPT the open surface, which is whatever the §4
   method table marks `no` in its Token column — that table is authoritative and this sentence must
   never restate it as a count. Today it is the pairing bootstrap (`pairing.request`,
-  `pairing.poll`), the wallet chain reads (`control.wallet.balance` / `.coins` / `.coinById` /
+  `pairing.poll`), the wallet chain reads (`control.wallet.balance` / `.coins` / `.coinById` / `.coinSpend` /
+  `.coinsByParent` /
   `.peak` / `.syncStatus`), which need only public chain data, and `control.peerCounts`, which
   discloses two integers about this node's own connectivity. For every other method the caller MUST
   present the node's local control token
@@ -103,6 +104,8 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
+| `control.wallet.coinSpend` | no | delegated | `{coin_id:string}` | `WalletCoinSpendResult` |
+| `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string}` | `WalletCoinsByParentResult` |
 | `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
@@ -110,7 +113,8 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
-The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
+The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.coinSpend` /
+`.coinsByParent` / `.peak` /
 `.syncStatus`)
 are served WITHOUT a control token, because each needs only public chain data — an address or a coin
 id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
@@ -158,7 +162,8 @@ opposite remedies — see §4.2.
   coin id alone — telling them apart requires inspecting the puzzle, which a coin-record read does
   not do. `control.wallet.coins` MUST report the concrete asset it was SCOPED to and MUST NOT emit
   `asset:null`: dig-app's frozen `CoinRecord` requires a non-null asset there, so `null` is a hard
-  deserialization failure, not a degraded read. `control.wallet.coinById` MUST report `null`.
+  deserialization failure, not a degraded read. `control.wallet.coinById` and `control.wallet.coinsByParent` MUST report `null`: neither a coin id
+  nor a parent id scopes a read to an asset.
 - **`WalletCoinByIdResult`**: `{coin:WalletCoinRecord|null, source:"db"|"fallback"|null, synced:bool,
   peak_height:u32|null}`. ONE coin, named by its own id, SPENT OR UNSPENT.
 
@@ -196,6 +201,58 @@ opposite remedies — see §4.2.
   reports mempool admission only; only a buried confirmation of the created coin is evidence.
   `control.wallet.coins` cannot supply it — it answers by ADDRESS and lists UNSPENT coins only, so it
   sees neither a created coin sitting at no wallet address nor a funding coin the spend consumed.
+- **`WalletCoinSpend`**: `{coin:WalletCoinRecord, puzzle_reveal:string, solution:string}`. The chia
+  `CoinSpend` in this contract's wire form: the coin that was consumed plus the two programs that
+  consumed it, each lowercase hex of its serialized CLVM.
+
+  `puzzle_reveal` MUST tree-hash to `coin.puzzle_hash`. A reveal is supplied by a PEER and a peer can
+  lie, so the claim is deliberately self-checking: a node MUST verify it and MUST fail closed with a
+  §5 wallet error — never return a spend carrying an unverified reveal — when the hashes disagree or
+  the reveal does not parse. A caller MAY re-derive the same check from the two fields it is handed.
+
+  `coin.spent_height` MUST be non-null. A spend exists only because the coin was spent, so a spend
+  reporting an unspent coin is a contradiction.
+- **`WalletCoinSpendResult`**: `{spend:WalletCoinSpend|null, source:"db"|"fallback"|null,
+  synced:bool, peak_height:u32|null}`. THE SPEND that spent one coin, named by that coin's own id.
+  A spend has no id of its own on chain, so `coin_id` names the SPENT COIN and takes the identical
+  form and validation `control.wallet.coinById` takes.
+
+  `spend:null` MUST mean the node consulted a chain and it holds no spend of that coin. Absence has
+  TWO legitimate causes — the coin is UNSPENT, or the chain holds no such coin — and this method
+  deliberately does not distinguish them; a caller needing to MUST ask `control.wallet.coinById`,
+  whose `coin:null` separates them.
+
+  A node that could NOT consult a chain MUST return the matching §5 wallet error instead — never
+  `spend:null`. This is the money-critical distinction in the whole family: a caller following a
+  singleton forward reads "no spend" as *this is the current tip* and stops walking, so a failure
+  disguised as absence makes a superseded coin look like the tip and the spend built against it is
+  invalid. The rule barring a negative answer from a view that could not have held the subject
+  (stated for `WalletCoinByIdResult` above) applies here unchanged.
+
+  The `spend` key MUST be present on every response; `null` is a verdict and MUST NOT be conveyed by
+  omitting the field.
+
+  `source` and the freshness fields follow the same tier rule as every other wallet read.
+- **`WalletCoinsByParentResult`**: `{coins:[WalletCoinRecord], source:"db"|"fallback"|null,
+  synced:bool, peak_height:u32|null}`. The DIRECT children created by spending one coin, named by
+  that parent's coin id.
+
+  Exactly ONE HOP. The list is what the named parent's spend created and nothing further: not a
+  lineage, not a subtree, not transitive. A node MUST NOT recurse — an unbounded server-side walk
+  over caller-supplied input is work the caller cannot bound, and a partial walk returned as a
+  complete one is a lineage with a silent hole in it. A caller composes a lineage from repeated
+  single hops.
+
+  `coins:[]` MUST mean the node consulted a chain and that parent created no children it knows of,
+  typically because the parent is unspent. A node that could NOT consult a chain MUST return the
+  matching §5 wallet error instead — never an empty list. A caller walking a singleton forward reads
+  an empty list as *this is the tip*.
+
+  Every record MUST report `asset:null`: naming a coin by its parent classifies nothing.
+
+  The parameter is spelled `parent_coin_id`, NOT `coin_id`. The coin named is the one being asked
+  ABOUT and is never the coin returned; a shared field name would make a recursive reading of the
+  method plausible from the request alone.
 - **`WalletPeakResult`**: `{peak_height:u32|null, synced:bool}`. The node's chain peak, independent
   of any address. `peak_height:null` means the node tracks NO height — it MUST NOT be read as height
   zero, which every block is trivially above. A caller bounding a claimed confirmation MUST treat
@@ -395,7 +452,7 @@ a struct over them.
 A client MUST branch on which method it called:
 
 - On an OPEN read — every method the §4 table marks `no`, today `control.wallet.balance` / `.coins` /
-  `.coinById` / `.peak` / `.syncStatus` and `control.peerCounts` — `-32030 UNAUTHORIZED` can only
+  `.coinById` / `.coinSpend` / `.coinsByParent` / `.peak` / `.syncStatus` and `control.peerCounts` — `-32030 UNAUTHORIZED` can only
   come from a node build that predates the method and gates the whole `control.*` namespace. The
   truth is "this node cannot do that yet" and the remedy is an UPGRADE.
 - On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is
