@@ -143,6 +143,8 @@ pub enum ControlMethod {
     WalletCoins,
     /// `control.wallet.coinById` — read ONE coin record by coin id, spent or unspent.
     WalletCoinById,
+    /// `control.wallet.arrivals` — read confirmed INCOMING funds since a cursor position.
+    WalletArrivals,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
     /// `control.wallet.syncStatus` — read whether the wallet's chain replica is being kept current.
@@ -192,6 +194,7 @@ impl ControlMethod {
             ControlMethod::WalletBalance => "control.wallet.balance",
             ControlMethod::WalletCoins => "control.wallet.coins",
             ControlMethod::WalletCoinById => "control.wallet.coinById",
+            ControlMethod::WalletArrivals => "control.wallet.arrivals",
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
@@ -216,15 +219,18 @@ impl ControlMethod {
     ///   obtain a token at all;
     /// - the PEER COUNTS (`control.peerCounts`), which disclose two integers about this node's own
     ///   connectivity and no address, endpoint or secret;
-    /// - the wallet CHAIN READS ([`Category::Wallet`] minus the push), because each needs only
-    ///   PUBLIC chain data — an address, or a coin id on `control.wallet.coinById`; never a seed, a
-    ///   key, or a signature — and dig-node has served
+    /// - the wallet CALLER-ADDRESSED CHAIN READS (`control.wallet.balance` / `.coins` /
+    ///   `.coinById`) and the node's own chain POSITION (`.peak` / `.syncStatus`), because each
+    ///   needs only PUBLIC chain data the CALLER already named — an address, or a coin id; never a
+    ///   seed, a key, or a signature — and dig-node has served
     ///   `control.wallet.balance` open since #1851. A person whose node runs as a service with an
     ///   unreadable token file can still see their own money.
     ///
-    /// `control.wallet.broadcast` is deliberately NOT in that second group. It puts bytes on the
-    /// network, so the token is what stands between a local process and a broadcast, and its
-    /// refusal genuinely means *unauthorized* — see [`ControlMethod::is_open_read`].
+    /// Two wallet methods are deliberately NOT in that second group.
+    /// `control.wallet.broadcast` puts bytes on the network, so the token is what stands between a
+    /// local process and a broadcast. `control.wallet.arrivals` names the wallet's OWN watched
+    /// puzzle hashes back to a caller that supplied nothing — see
+    /// [`ControlMethod::is_open_read`]. On both, `UNAUTHORIZED` genuinely means *unauthorized*.
     pub const fn requires_auth(self) -> bool {
         !self.is_open_read()
             && !matches!(
@@ -239,7 +245,9 @@ impl ControlMethod {
     ///
     /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
     ///   `.syncStatus`), which need only PUBLIC chain data — an address, or a coin id; never a seed,
-    ///   a key, or a signature;
+    ///   a key, or a signature. On the first three the CALLER supplies the address or coin id, so
+    ///   the node relays a public fact and discloses no association with itself; the last two name
+    ///   the node's own chain position and no address at all;
     /// - `control.peerCounts`, which is NOT a chain read: it discloses two integers about this
     ///   node's own connectivity, and no address, endpoint, peer identity or secret. The identity
     ///   and topology half of the same subject stays gated behind `control.peerStatus`.
@@ -249,6 +257,14 @@ impl ControlMethod {
     /// *is it a chain read?* A future method judged against the narrower phrasing, and found to
     /// contradict a member that was already there, invites widening the predicate by analogy rather
     /// than against the rule.
+    ///
+    /// `control.wallet.arrivals` is the worked example, and it was briefly a member. It passes the
+    /// narrower phrasing — every field it returns is a public chain fact — and fails the rule: the
+    /// caller supplies NOTHING, so the node volunteers its OWN watched puzzle hashes together with
+    /// the full receive history behind them. The individual facts are public; the ASSOCIATION
+    /// between this node and those addresses is not, and that association is the whole answer. A
+    /// token-less caller could then feed those addresses back into the caller-addressed reads.
+    /// Membership turns on *who names the address*, never on whether the bytes are on chain.
     ///
     /// Stated on the contract rather than discovered by calling, because the two refusals a client
     /// can get here demand OPPOSITE remedies. On an open read, `UNAUTHORIZED` can only come from a
@@ -294,6 +310,7 @@ impl ControlMethod {
             | ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
+            | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Routing::Delegated,
@@ -336,6 +353,7 @@ impl ControlMethod {
             ControlMethod::WalletBalance
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
+            | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Category::Wallet,
@@ -375,6 +393,7 @@ impl ControlMethod {
             ControlMethod::ListSubscriptions => "The node's persisted subscription set + count.",
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
             ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
+            ControlMethod::WalletArrivals => "READ-only: confirmed INCOMING funds recorded since a cursor position, oldest first -- the answer to `was I just paid?`, which no balance or coin list can give. Each row is a coin the node determined ARRIVED: confirmed on chain, above the wallet's arrival baseline, not previously reported, and not the wallet's own change. Resume from `cursor` (the last row you were handed), never from `latest`.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
             ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
@@ -418,6 +437,7 @@ impl ControlMethod {
         ControlMethod::WalletBalance,
         ControlMethod::WalletCoins,
         ControlMethod::WalletCoinById,
+        ControlMethod::WalletArrivals,
         ControlMethod::WalletPeak,
         ControlMethod::WalletSyncStatus,
         ControlMethod::WalletBroadcast,
@@ -480,18 +500,48 @@ mod tests {
         assert_eq!(actual_open, expected_open);
     }
 
-    /// **The push is token-gated, and no other wallet method is.** The fixture varies one thing --
-    /// which wallet method is asked -- against a category whose other three members ARE open, so an
-    /// implementation that opened the whole category (the nearest wrong one) fails here.
+    /// **The push and the arrival cursor are the two token-gated wallet methods.** The fixture
+    /// varies one thing -- which wallet method is asked -- against a category whose other members
+    /// ARE open, so both nearest wrong implementations fail here: one that opens the whole category
+    /// (the state this crate shipped in at `1190a18`) and one that gates it wholesale.
     #[test]
-    fn the_push_is_the_one_wallet_method_behind_the_token() {
+    fn the_push_and_the_arrival_cursor_are_the_wallet_methods_behind_the_token() {
         let gated: Vec<&str> = ControlMethod::ALL
             .iter()
             .filter(|m| m.category() == Category::Wallet && m.requires_auth())
             .map(|m| m.name())
             .collect();
-        assert_eq!(gated, vec!["control.wallet.broadcast"]);
+        assert_eq!(
+            gated,
+            vec!["control.wallet.arrivals", "control.wallet.broadcast"]
+        );
         assert!(!ControlMethod::WalletBroadcast.is_open_read());
+    }
+
+    /// **The arrival cursor is NOT an open read, and the reason is not "is it a chain read?".**
+    ///
+    /// The rule is *who names the address*. `control.wallet.arrivals` takes only a cursor, so the
+    /// node volunteers its OWN watched puzzle hashes and the receive history behind them -- the
+    /// node-to-address association, which is not public, and which a token-less caller could then
+    /// replay into the caller-addressed reads.
+    ///
+    /// The control keeps `control.wallet.coinById` in the same assertion: it is the neighbour the
+    /// analogy was drawn from, it is still open, and it stays open because its CALLER supplies the
+    /// coin id. Without that control this test would also pass on a wholesale gating of the wallet
+    /// category, which is a different (and wrong) implementation.
+    #[test]
+    fn the_arrival_cursor_is_not_an_open_read() {
+        assert!(
+            !ControlMethod::WalletArrivals.is_open_read(),
+            "control.wallet.arrivals discloses this node's OWN watched puzzle hashes to a caller \
+             that supplied nothing, so it MUST NOT be served token-less"
+        );
+        assert!(ControlMethod::WalletArrivals.requires_auth());
+        assert!(
+            ControlMethod::WalletCoinById.is_open_read(),
+            "the caller-addressed reads stay open -- the fix is the membership rule, not gating \
+             the wallet category"
+        );
     }
 
     #[test]
@@ -537,6 +587,7 @@ mod tests {
         let expected: BTreeSet<&str> = [
             "control.wallet.coins",
             "control.wallet.coinById",
+            "control.wallet.arrivals",
             "control.wallet.peak",
             "control.wallet.syncStatus",
             "control.wallet.broadcast",

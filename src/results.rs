@@ -903,6 +903,58 @@ pub struct PairingPollResult {
     pub token: Option<String>,
 }
 
+/// One confirmed incoming payment, as the node's arrival ledger recorded it.
+///
+/// Every field is a public chain fact about an address this node already watches. There is
+/// deliberately no ticker and no formatted amount: naming an asset the node did not attribute, or
+/// choosing a divisor for it, would be a claim about WHICH money arrived that the node cannot
+/// support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletArrivalRecord {
+    /// This arrival's monotonic ledger position. Strictly increasing and never reused, so a stored
+    /// position cannot come to mean a different arrival after a reorg.
+    pub seq: u64,
+    /// The coin that arrived (lowercase hex).
+    pub coin_id: String,
+    /// The watched puzzle hash it arrived at (lowercase hex).
+    pub puzzle_hash: String,
+    /// The amount in the asset's own base unit, as a DECIMAL STRING.
+    ///
+    /// A string because the ledger stores the full `u64` range and a JSON number does not carry it
+    /// losslessly — a large mojo amount silently rounds through an f64 parser, which is a wrong
+    /// figure about somebody's money.
+    pub amount: String,
+    /// The CAT asset id (hex TAIL), or `None` for native XCH.
+    pub asset_id: Option<String>,
+    /// The height the coin was CONFIRMED at. Never optional: an arrival with no confirmed height is
+    /// not an arrival, and a node MUST NOT emit a mempool sighting here.
+    pub confirmed_height: u32,
+}
+
+/// One page of the arrival ledger (`control.wallet.arrivals`).
+///
+/// An empty [`arrivals`](Self::arrivals) list is an ANSWER — the node consulted its own replica and
+/// nothing has arrived since the cursor. It is NOT a claim that the replica is current: a node that
+/// has never completed a catch-up has no arrival baseline and reports an empty page forever, which
+/// is the honest answer to "what arrived?" from a wallet that cannot tell history from news. A
+/// caller that needs to know whether the replica is current asks `control.wallet.syncStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletArrivalsResult {
+    /// The page, oldest first.
+    pub arrivals: Vec<WalletArrivalRecord>,
+    /// Where the CLIENT got to: the position of the last row in this page, or the caller's own
+    /// `after_seq` when the page is empty. **This is the value to resume from.**
+    pub cursor: u64,
+    /// Where the LEDGER got to when this answer was assembled.
+    ///
+    /// Read AFTER the page, so an arrival recorded in between sits above the page and below this
+    /// value — which is exactly why resuming from it would step straight over that arrival and lose
+    /// a notification silently. It exists for ONE question [`cursor`](Self::cursor) cannot answer: a
+    /// first-run client passes it back as `after_seq` to start from NOW instead of replaying the
+    /// whole ledger as a burst of toasts.
+    pub latest: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
