@@ -955,6 +955,61 @@ pub struct WalletArrivalsResult {
     pub latest: u64,
 }
 
+/// One confirmed OUTGOING transaction, as the node's send ledger recorded it (dig_ecosystem#2565).
+///
+/// # The figure is what LEFT, and it is not a coin amount
+///
+/// A send is not the mirror of a receive. Spending a 9 XCH coin to send 1 XCH creates ~8 XCH of
+/// change back to the same wallet, so the SPENT COIN's amount is not the send — reporting it would
+/// overstate the payment ninefold. [`net_outflow`](Self::net_outflow) is therefore the wallet's own
+/// inputs MINUS its own outputs at that height: exactly the drop in the balance this node reports.
+///
+/// # The fee is inside the figure and cannot be taken out
+///
+/// A node observing chain sees only coins at addresses it watches, so a send's output to the
+/// RECIPIENT is structurally absent from its replica. What it can compute exactly is the total that
+/// left — payment plus any network fee — and there is no observation that splits them. The field is
+/// named for that total rather than for a payment, and a node MUST NOT report a fee it inferred.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSendRecord {
+    /// This send's monotonic ledger position. Strictly increasing and never reused, so a stored
+    /// position cannot come to mean a different send after a reorg.
+    pub seq: u64,
+    /// The value that LEFT the wallet, in the asset's own base unit, as a DECIMAL STRING.
+    ///
+    /// Owned inputs minus owned outputs, INCLUSIVE of any network fee. A string for the same
+    /// reason [`WalletArrivalRecord::amount`] is one: a JSON number does not carry the full `u64`
+    /// range losslessly, and a silently rounded figure is a wrong claim about somebody's money.
+    pub net_outflow: String,
+    /// The CAT asset id (hex TAIL), or `None` for native XCH.
+    pub asset_id: Option<String>,
+    /// The height the spend was CONFIRMED at. Never optional: a send with no confirmed height is
+    /// not a send, and a node MUST NOT emit a mempool sighting here.
+    pub confirmed_height: u32,
+}
+
+/// One page of the send ledger (`control.wallet.sends`).
+///
+/// An empty [`sends`](Self::sends) list is an ANSWER — the node consulted its own replica and
+/// nothing has left since the cursor. It is NOT a claim that the replica is current; a node with no
+/// send baseline reports an empty page forever, which is the honest answer from a wallet that
+/// cannot tell history from news. Ask `control.wallet.syncStatus` for freshness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSendsResult {
+    /// The page, oldest first.
+    pub sends: Vec<WalletSendRecord>,
+    /// Where the CLIENT got to: the position of the last row in this page, or the caller's own
+    /// `after_seq` when the page is empty. **This is the value to resume from.**
+    pub cursor: u64,
+    /// Where the LEDGER got to when this answer was assembled.
+    ///
+    /// Read AFTER the page, so a send recorded in between sits above the page and below this value
+    /// — which is why resuming from it would step straight over that send and lose a notification
+    /// silently. It exists for the one question [`cursor`](Self::cursor) cannot answer: a first-run
+    /// client passes it back as `after_seq` to start from NOW instead of replaying the ledger.
+    pub latest: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

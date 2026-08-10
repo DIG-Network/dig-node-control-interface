@@ -145,6 +145,8 @@ pub enum ControlMethod {
     WalletCoinById,
     /// `control.wallet.arrivals` — read confirmed INCOMING funds since a cursor position.
     WalletArrivals,
+    /// `control.wallet.sends` — read confirmed OUTGOING funds since a cursor position.
+    WalletSends,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
     /// `control.wallet.syncStatus` — read whether the wallet's chain replica is being kept current.
@@ -195,6 +197,7 @@ impl ControlMethod {
             ControlMethod::WalletCoins => "control.wallet.coins",
             ControlMethod::WalletCoinById => "control.wallet.coinById",
             ControlMethod::WalletArrivals => "control.wallet.arrivals",
+            ControlMethod::WalletSends => "control.wallet.sends",
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
@@ -311,6 +314,7 @@ impl ControlMethod {
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
             | ControlMethod::WalletArrivals
+            | ControlMethod::WalletSends
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Routing::Delegated,
@@ -354,6 +358,7 @@ impl ControlMethod {
             | ControlMethod::WalletCoins
             | ControlMethod::WalletCoinById
             | ControlMethod::WalletArrivals
+            | ControlMethod::WalletSends
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
             | ControlMethod::WalletBroadcast => Category::Wallet,
@@ -394,6 +399,7 @@ impl ControlMethod {
             ControlMethod::WalletCoins => "READ-only: the spendable coin records for an address + asset, with the tier that answered and the height they reflect.",
             ControlMethod::WalletCoinById => "READ-only: ONE coin record by coin id, spent or unspent, with no address and no asset scope; `coin: null` means the chain holds no such coin.",
             ControlMethod::WalletArrivals => "READ-only: confirmed INCOMING funds recorded since a cursor position, oldest first -- the answer to `was I just paid?`, which no balance or coin list can give. Each row is a coin the node determined ARRIVED: confirmed on chain, above the wallet's arrival baseline, not previously reported, and not the wallet's own change. Resume from `cursor` (the last row you were handed), never from `latest`.",
+            ControlMethod::WalletSends => "READ-only: confirmed OUTGOING funds recorded since a cursor position, oldest first -- the answer to `did money just leave?`. Each row's `net_outflow` is what LEFT the wallet (owned inputs MINUS owned outputs), never the spent coin's amount: spending a 9 XCH coin to send 1 XCH reports 1, not 9. The figure INCLUDES any network fee, which chain observation cannot separate from the payment. Resume from `cursor` (the last row you were handed), never from `latest`.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
             ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
@@ -438,6 +444,7 @@ impl ControlMethod {
         ControlMethod::WalletCoins,
         ControlMethod::WalletCoinById,
         ControlMethod::WalletArrivals,
+        ControlMethod::WalletSends,
         ControlMethod::WalletPeak,
         ControlMethod::WalletSyncStatus,
         ControlMethod::WalletBroadcast,
@@ -500,12 +507,15 @@ mod tests {
         assert_eq!(actual_open, expected_open);
     }
 
-    /// **The push and the arrival cursor are the two token-gated wallet methods.** The fixture
+    /// **The push and the two activity cursors are the token-gated wallet methods.** The fixture
     /// varies one thing -- which wallet method is asked -- against a category whose other members
     /// ARE open, so both nearest wrong implementations fail here: one that opens the whole category
     /// (the state this crate shipped in at `1190a18`) and one that gates it wholesale.
+    ///
+    /// `control.wallet.sends` joins the gated set for the same reason its incoming twin is there,
+    /// and one more: a send history says when this wallet is SPENDING.
     #[test]
-    fn the_push_and_the_arrival_cursor_are_the_wallet_methods_behind_the_token() {
+    fn the_push_and_the_activity_cursors_are_the_wallet_methods_behind_the_token() {
         let gated: Vec<&str> = ControlMethod::ALL
             .iter()
             .filter(|m| m.category() == Category::Wallet && m.requires_auth())
@@ -513,7 +523,11 @@ mod tests {
             .collect();
         assert_eq!(
             gated,
-            vec!["control.wallet.arrivals", "control.wallet.broadcast"]
+            vec![
+                "control.wallet.arrivals",
+                "control.wallet.sends",
+                "control.wallet.broadcast"
+            ]
         );
         assert!(!ControlMethod::WalletBroadcast.is_open_read());
     }
@@ -588,6 +602,7 @@ mod tests {
             "control.wallet.coins",
             "control.wallet.coinById",
             "control.wallet.arrivals",
+            "control.wallet.sends",
             "control.wallet.peak",
             "control.wallet.syncStatus",
             "control.wallet.broadcast",

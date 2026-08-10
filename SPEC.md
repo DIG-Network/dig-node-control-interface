@@ -104,6 +104,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
+| `control.wallet.sends` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletSendsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
@@ -116,12 +117,30 @@ are served WITHOUT a control token, because each needs only public chain data �
 id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
 discloses two integers about this node's own connectivity and no address, endpoint or secret. The
 `Token` column above is authoritative; the open set is deliberately named here rather than counted,
-so that adding a method cannot leave a stale number behind. Two wallet methods are token-gated.
+so that adding a method cannot leave a stale number behind. Three wallet methods are token-gated.
 `control.wallet.broadcast` puts bytes on the network. `control.wallet.arrivals` takes only a cursor,
 so its answer names this node's OWN watched puzzle hashes and the receive history behind them: the
-chain facts are public, the association between this node and those addresses is not. Membership of
+chain facts are public, the association between this node and those addresses is not.
+`control.wallet.sends` is gated for that reason and one more — its answer says when this wallet is
+SPENDING. Membership of
 the open set turns on WHO NAMES THE ADDRESS, not on whether the data is on chain. That difference is normative for clients, because the two refusals demand
 opposite remedies — see §4.2.
+
+### `control.wallet.sends` — what the figure means
+
+`net_outflow` is the value that LEFT the wallet: the wallet's own inputs at a confirmed height MINUS
+its own outputs at that height. It is NOT a spent coin's amount. Spending a 9 XCH coin to send 1 XCH
+returns ~8 XCH of change to the same wallet, so the coin's amount overstates the payment ninefold.
+
+The figure INCLUDES any network fee, and a node MUST NOT report the two separately. A node observes
+only coins at addresses it watches, so a send's output to the RECIPIENT is structurally absent from
+its replica; the total that left is exactly computable, the payment/fee split is not observable at
+all. `net_outflow` therefore equals the drop in the balance the same node reports, which is the one
+figure a client can state without inferring anything.
+
+A node MUST NOT emit a row for an unconfirmed spend, MUST NOT emit rows for activity at or below its
+send baseline (so a first catch-up replays no history), and MUST report at most one row per
+confirmed height per asset (a spend and its change are one transaction and one row).
 
 ### 4.1 Result field definitions
 

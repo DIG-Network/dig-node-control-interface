@@ -896,6 +896,26 @@ impl ControlHandler for MockNode {
             latest: 4_243,
         })
     }
+    /// Answers the 9-XCH-coin-sends-1-XCH transaction, so a handler that reported the SPENT COIN's
+    /// amount is distinguishable here rather than agreeing on a shape. The `seq` is one no
+    /// neighbouring wallet handler produces, so an arm wired to another method fails too.
+    async fn wallet_sends(
+        &self,
+        params: WalletSendsParams,
+    ) -> Result<results::WalletSendsResult, ControlError> {
+        let sends = vec![results::WalletSendRecord {
+            seq: 5_252,
+            net_outflow: "1000000000000".into(),
+            asset_id: None,
+            confirmed_height: 5_000_000,
+        }];
+        let cursor = sends.last().map_or(params.after_seq, |s| s.seq);
+        Ok(results::WalletSendsResult {
+            sends,
+            cursor,
+            latest: 5_253,
+        })
+    }
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError> {
         Ok(results::WalletPeakResult {
             peak_height: Some(5_000_000),
@@ -1678,4 +1698,146 @@ fn the_arrival_cursor_is_gated_and_routes_to_its_own_handler() {
     assert_eq!(page.arrivals[0].seq, 4_242);
     assert_eq!(page.cursor, 4_242);
     assert_eq!(page.latest, 4_243, "the ledger head must not be the cursor");
+}
+
+// ---------------------------------------------------------------------------
+// The SEND ledger (`control.wallet.sends`, dig_ecosystem#2565)
+// ---------------------------------------------------------------------------
+
+/// **A send is served by its OWN method, so an old client cannot be handed one.**
+///
+/// This is the whole reason the shape is a second method rather than a `direction` field on
+/// [`results::WalletArrivalRecord`]. That record carries no `deny_unknown_fields`, so a
+/// discriminator added to it is SILENTLY DROPPED by an already-shipped client; and the client that
+/// drops it renders every row it is handed as money RECEIVED. Widening the arrivals array would
+/// therefore make a correct node tell a correct old client that an outgoing payment was income —
+/// the money-lie class the arrival ledger was built to prevent, running backwards.
+///
+/// Two things are pinned. The method NAME is distinct, so a client that has never heard of sends
+/// cannot call it. And the arrival record's key set is EXACTLY its six historical keys, so a later
+/// author cannot reintroduce the hazard by adding a discriminator to the shape old clients read.
+#[test]
+fn a_send_is_never_expressible_on_the_arrival_wire() {
+    assert_eq!(
+        ControlMethod::WalletSends.name(),
+        "control.wallet.sends",
+        "sends need a method an old client has never heard of"
+    );
+    assert_ne!(
+        ControlMethod::WalletSends.name(),
+        ControlMethod::WalletArrivals.name()
+    );
+
+    let arrival = serde_json::to_value(results::WalletArrivalRecord {
+        seq: 1,
+        coin_id: "ab".repeat(32),
+        puzzle_hash: "cc".repeat(32),
+        amount: "1".into(),
+        asset_id: None,
+        confirmed_height: 1,
+    })
+    .expect("an arrival record serializes");
+    let mut keys: Vec<&str> = arrival
+        .as_object()
+        .expect("an arrival record is a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "amount",
+            "asset_id",
+            "coin_id",
+            "confirmed_height",
+            "puzzle_hash",
+            "seq"
+        ],
+        "the arrivals record MUST stay exactly its six historical keys: a client shipped before \
+         this change drops any added key and renders the row as RECEIVED, so a discriminator here \
+         announces an outgoing payment as income"
+    );
+}
+
+/// **The send ledger's figure is NET OUTFLOW, and the vector is the trap itself.**
+///
+/// Spending a 9 XCH coin to send 1 XCH creates ~8 XCH of change back to the wallet. The wire
+/// vector below is that transaction: the ledger's figure is the 1 XCH that LEFT, never the 9 the
+/// spent coin held. A contract that named the field `amount` would invite the wrong one, which is
+/// why it is [`results::WalletSendRecord::net_outflow`].
+#[test]
+fn the_send_ledger_wire_shapes_are_byte_stable() {
+    assert_request(
+        &WalletSendsParams {
+            after_seq: 41,
+            limit: Some(10),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.sends","params":{"after_seq":41,"limit":10}}),
+    );
+    assert_request(
+        &WalletSendsParams {
+            after_seq: 0,
+            limit: None,
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.sends","params":{"after_seq":0}}),
+    );
+    // A 9 XCH coin spent to send 1 XCH, ~8 XCH returning as change. The figure is what LEFT.
+    assert_result_round_trips::<results::WalletSendsResult>(json!({
+        "sends": [{
+            "seq": 7u64,
+            "net_outflow": "1000000000000",
+            "asset_id": null,
+            "confirmed_height": 5_000_000u32
+        }],
+        "cursor": 7u64,
+        "latest": 9u64
+    }));
+    let page: results::WalletSendsResult = serde_json::from_value(json!({
+        "sends": [{
+            "seq": 7u64, "net_outflow": "1000000000000",
+            "asset_id": null, "confirmed_height": 5_000_000u32
+        }],
+        "cursor": 7u64, "latest": 9u64
+    }))
+    .expect("a send page decodes");
+    assert_ne!(
+        page.sends[0].net_outflow, "9000000000000",
+        "the spent coin's amount is not the send: announcing it is the money lie this ledger \
+         exists to prevent"
+    );
+    assert_eq!(page.sends[0].net_outflow, "1000000000000");
+    // Nothing sent since the cursor is the ordinary answer, not an edge case.
+    assert_result_round_trips::<results::WalletSendsResult>(json!({
+        "sends": [], "cursor": 41u64, "latest": 41u64
+    }));
+}
+
+/// **The send ledger is TOKEN-GATED and reaches its own handler over the real dispatcher.**
+///
+/// A send history is at least as sensitive as an arrival history: it volunteers this node's own
+/// activity to a caller that supplied nothing, and it additionally reveals when the wallet is
+/// SPENDING. The neighbouring caller-addressed read is asserted open in the same test so this
+/// cannot be satisfied by gating the whole wallet category.
+#[test]
+fn the_send_ledger_is_gated_and_routes_to_its_own_handler() {
+    assert!(
+        !ControlMethod::WalletSends.is_open_read(),
+        "control.wallet.sends volunteers this node's own outgoing activity to a caller that \
+         supplied nothing, so it MUST NOT be served token-less"
+    );
+    assert!(ControlMethod::WalletSends.requires_auth());
+    assert!(
+        ControlMethod::WalletCoinById.is_open_read(),
+        "the caller-addressed reads stay open -- the fix is the membership rule, not gating the \
+         wallet category"
+    );
+    let page = round_trip(&WalletSendsParams {
+        after_seq: 0,
+        limit: None,
+    })
+    .expect("sends must route");
+    assert_eq!(page.sends[0].seq, 5_252);
+    assert_eq!(page.cursor, 5_252);
+    assert_eq!(page.latest, 5_253, "the ledger head must not be the cursor");
 }

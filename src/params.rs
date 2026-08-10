@@ -302,6 +302,35 @@ pub struct WalletArrivalsParams {
 }
 control_call!(WalletArrivalsParams => ControlMethod::WalletArrivals, results::WalletArrivalsResult);
 
+/// `control.wallet.sends` — the OUTGOING twin of [`WalletArrivalsParams`] (dig_ecosystem#2565).
+///
+/// # Why sends are a separate method rather than a field on the arrivals page
+///
+/// [`results::WalletArrivalRecord`] does not deny unknown fields, so a `direction` discriminator
+/// added to it is silently dropped by every already-shipped client — and those clients render
+/// every row they are handed as money RECEIVED. Serving a send on the arrivals wire would
+/// therefore make a correct node tell a correct old client that an outgoing payment was income.
+/// A separate method makes that answer unexpressible: a client that has never heard of this
+/// method cannot call it.
+///
+/// # A cursor, not a stream
+///
+/// Polled, monotonic and persisted, exactly like the arrival cursor: a client resumes from
+/// [`WalletSendsResult::cursor`](results::WalletSendsResult::cursor) — the last position it was
+/// actually handed — and NEVER from `latest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WalletSendsParams {
+    /// Return sends STRICTLY after this position. `0` starts at the beginning of the ledger, and
+    /// is also what an omitted field means — the same default the node applies.
+    #[serde(default)]
+    pub after_seq: u64,
+    /// The page size. `None` asks for the node's default rather than a number this client
+    /// invented; a node clamps whatever it is given to its own maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+control_call!(WalletSendsParams => ControlMethod::WalletSends, results::WalletSendsResult);
+
 const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
 
 fn normalize_coin_id(coin_id: &str) -> Option<&str> {

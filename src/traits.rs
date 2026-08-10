@@ -236,6 +236,27 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletArrivalsParams,
     ) -> Result<results::WalletArrivalsResult, ControlError>;
+    /// `control.wallet.sends` (READ-only, TOKEN-GATED — dig_ecosystem#2565)
+    ///
+    /// The outgoing twin of [`Self::wallet_arrivals`], and gated for the same reason: it
+    /// volunteers this node's own activity to a caller that supplied nothing.
+    ///
+    /// Every returned row MUST be a CONFIRMED outflow the node itself judged from chain
+    /// observation — above its send baseline, not previously reported. An implementation MUST NOT
+    /// emit a mempool sighting, and MUST answer an empty page rather than an error when it has no
+    /// baseline.
+    ///
+    /// [`net_outflow`](results::WalletSendRecord::net_outflow) MUST be the value that LEFT the
+    /// wallet — owned inputs MINUS owned outputs — and MUST NOT be a spent coin's amount. It
+    /// INCLUDES any network fee, because chain observation of a wallet's own coins cannot separate
+    /// the two; an implementation MUST NOT report a fee it did not observe.
+    ///
+    /// `cursor` MUST be the position of the last row actually returned (or the caller's
+    /// `after_seq` for an empty page) and MUST NOT be `latest`.
+    async fn wallet_sends(
+        &self,
+        params: params::WalletSendsParams,
+    ) -> Result<results::WalletSendsResult, ControlError>;
     /// `control.wallet.peak` (READ-only, OPEN)
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
     /// `control.peerCounts` (READ-only, OPEN)
@@ -357,6 +378,7 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_coin_by_id(params.validated()?).await?)
             }
             ControlMethod::WalletArrivals => encode(self.wallet_arrivals(decode(params)?).await?),
+            ControlMethod::WalletSends => encode(self.wallet_sends(decode(params)?).await?),
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
             ControlMethod::WalletSyncStatus => encode(self.wallet_sync_status().await?),
             ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),
