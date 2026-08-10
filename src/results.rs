@@ -702,6 +702,116 @@ pub struct WalletCoinByIdResult {
     pub peak_height: Option<u32>,
 }
 
+/// One coin's SPEND: the coin that was consumed, plus the two programs that consumed it.
+///
+/// This is the chia `CoinSpend` in the contract's own wire form — the puzzle reveal and the solution
+/// as lowercase hex of their serialized CLVM, beside the [`WalletCoinRecord`] for the spent coin.
+/// The coin is carried as the SAME record type the other reads use rather than a trimmed
+/// parent/puzzle-hash/amount triple, because a second coin shape is a second thing to keep in step
+/// with dig-app's frozen `CoinRecord` (see [`WalletCoinRecord`]).
+///
+/// # The reveal is checkable, and a conforming node MUST have checked it
+///
+/// A puzzle reveal is supplied by a peer, and a lying peer can supply a different program. The
+/// reveal's tree hash MUST equal the spent coin's own
+/// [`puzzle_hash`](WalletCoinRecord::puzzle_hash), which makes the claim self-checking, and a node
+/// MUST fail closed — a catalogued error, never a spend carrying an unverified reveal — when the
+/// hashes disagree or the reveal does not parse. A caller MAY re-derive the same check from the two
+/// fields it is handed; it never has to trust the node to have done it.
+///
+/// # `spent_height` is present on the coin, always
+///
+/// A spend exists only because the coin was spent, so
+/// [`spent_height`](WalletCoinRecord::spent_height) MUST be non-null here. A spend reporting an
+/// unspent coin is a contradiction the shape cannot forbid, so the contract forbids it instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinSpend {
+    /// The coin this spend consumed. Its `spent_height` MUST be non-null (see the type docs).
+    pub coin: WalletCoinRecord,
+    /// The puzzle reveal: lowercase hex of the serialized CLVM program. MUST tree-hash to
+    /// [`coin.puzzle_hash`](WalletCoinRecord::puzzle_hash).
+    pub puzzle_reveal: String,
+    /// The solution the puzzle was run with: lowercase hex of the serialized CLVM.
+    pub solution: String,
+}
+
+/// `control.wallet.coinSpend` — the spend that spent one coin, named by that coin's id.
+///
+/// # `spend: null` is an ANSWER with TWO honest causes; an unreachable chain is an ERROR
+///
+/// `null` means a chain WAS consulted and no spend of that coin exists there — either because the
+/// coin is UNSPENT, or because the chain holds no such coin at all. Both are legitimately "there is
+/// no spend", and the contract deliberately does not distinguish them here: a caller that needs to
+/// tell them apart asks [`WalletCoinByIdResult`], whose `coin: null` separates the two.
+///
+/// What `null` NEVER means is that the node could not answer. That is a catalogued error
+/// ([`WalletNoChainSource`](crate::error::ControlErrorCode::WalletNoChainSource) /
+/// [`WalletReadFailed`](crate::error::ControlErrorCode::WalletReadFailed) /
+/// [`WalletRateLimited`](crate::error::ControlErrorCode::WalletRateLimited)). The three-valued
+/// distinction is money-critical: a caller following a singleton forward reads "no spend" as *this
+/// is the current tip* and stops walking. Collapsing "could not answer" into it makes a stale coin
+/// look like the tip, and a spend built against a superseded singleton is invalid.
+///
+/// # A negative answer requires a view that could have held the spend
+///
+/// `spend: null` is a VERDICT, and the same rule [`WalletCoinByIdResult`] states applies unchanged: a
+/// node whose replica is still catching up, or whose index is address-scoped rather than a full
+/// chain view, has established only that IT cannot see the spend. Such a node MUST return
+/// `WalletNoChainSource` / `WalletReadFailed` and MUST NOT answer `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinSpendResult {
+    /// The spend, or `null` when the consulted chain holds no spend of that coin (see the type docs).
+    ///
+    /// The key MUST be present. `null` is a verdict here, so an ABSENT key must not decode into one —
+    /// the same reason [`WalletCoinByIdResult::coin`] is required.
+    #[serde(deserialize_with = "required_option")]
+    pub spend: Option<WalletCoinSpend>,
+    /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
+    pub source: Option<WalletReadSource>,
+    /// Whether this answer reflects a caught-up local view; `false` for every fallback answer.
+    pub synced: bool,
+    /// The peak height this answer reflects, or `null` when none applies (every fallback answer).
+    pub peak_height: Option<u32>,
+}
+
+/// `control.wallet.coinsByParent` — the DIRECT children created by spending one coin.
+///
+/// # ONE hop, never a walk
+///
+/// The list is the coins the named parent's spend created, and nothing further. It is not a lineage,
+/// not a subtree, and not transitive: a grandchild appears only when the caller asks again with the
+/// child's id. A node MUST NOT recurse — an unbounded server-side walk over caller-supplied input is
+/// work the caller cannot bound, and a partial walk returned as if complete would be a lineage with
+/// a silent hole in it.
+///
+/// # An empty list is an ANSWER, never a fallback
+///
+/// `coins: []` means the node consulted a chain and that parent created no children it knows of —
+/// typically because the parent is unspent. It is NEVER what a caller gets when the chain could not
+/// be reached: those are the catalogued errors
+/// ([`WalletNoChainSource`](crate::error::ControlErrorCode::WalletNoChainSource) /
+/// [`WalletReadFailed`](crate::error::ControlErrorCode::WalletReadFailed) /
+/// [`WalletRateLimited`](crate::error::ControlErrorCode::WalletRateLimited)). The distinction is the
+/// same one every read in this family carries, and it matters most here: a caller walking a
+/// singleton forward reads an empty list as *this is the tip*.
+///
+/// # `asset` is `null` on every record
+///
+/// A child is named by its parent, not by an address and not by an asset, so this read classifies
+/// nothing — exactly like [`WalletCoinByIdResult`]. Every record MUST report
+/// [`asset`](WalletCoinRecord::asset) as `null` rather than assert a class the read never verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCoinsByParentResult {
+    /// The parent's direct children, possibly empty (see the type docs). One hop only.
+    pub coins: Vec<WalletCoinRecord>,
+    /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
+    pub source: Option<WalletReadSource>,
+    /// Whether these children reflect a caught-up local view; `false` for every fallback answer.
+    pub synced: bool,
+    /// The peak height these children reflect, or `null` when none applies (every fallback answer).
+    pub peak_height: Option<u32>,
+}
+
 /// `control.wallet.peak` — the node's current chain peak height.
 ///
 /// `peak_height: null` is an honest "this node tracks no height yet", not a zero. A caller bounding

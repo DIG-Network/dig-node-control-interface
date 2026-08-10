@@ -269,6 +269,46 @@ pub struct WalletCoinByIdParams {
 }
 control_call!(WalletCoinByIdParams => ControlMethod::WalletCoinById, results::WalletCoinByIdResult);
 
+/// `control.wallet.coinSpend` params: WHICH coin's spend to read, named by that coin's own id.
+///
+/// # Why the spend and the coin record are separate methods
+///
+/// [`WalletCoinByIdParams`] answers *what is this coin, and was it spent?* — an id, an amount, a
+/// puzzle HASH and two heights. None of that reveals what the spend DID. Reconstructing a lineage
+/// (which is how a dig-profile's DID singleton is followed forward) needs the puzzle REVEAL and the
+/// solution, and those exist only in the spend. A caller holding a coin record alone can see that a
+/// coin is gone and cannot see what it became.
+///
+/// # The id names the SPENT coin, not the spend
+///
+/// A spend has no id of its own on chain; it is identified by the coin it consumed. So the parameter
+/// is the same 64-hex coin id [`WalletCoinByIdParams`] takes, validated by the same rule, and the
+/// two methods are asked with the identical value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalletCoinSpendParams {
+    /// The SPENT coin's id: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input and
+    /// normalized away by [`Self::validated`]; it is never emitted.
+    pub coin_id: String,
+}
+control_call!(WalletCoinSpendParams => ControlMethod::WalletCoinSpend, results::WalletCoinSpendResult);
+
+/// `control.wallet.coinsByParent` params: WHICH coin's direct children to read.
+///
+/// # One hop, and the field name says so
+///
+/// The field is `parent_coin_id` rather than `coin_id` because the coin named here is the one being
+/// asked ABOUT as a parent — it is never the coin the caller wants back. A walk up or down a lineage
+/// is the CALLER's composition of repeated single hops; the node performs exactly one. Naming it
+/// `coin_id` would make a recursive reading of the method plausible from the request alone, and a
+/// caller expecting a whole lineage from one call would read a one-hop answer as a truncated chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalletCoinsByParentParams {
+    /// The PARENT coin's id: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input and
+    /// normalized away by [`Self::validated`]; it is never emitted.
+    pub parent_coin_id: String,
+}
+control_call!(WalletCoinsByParentParams => ControlMethod::WalletCoinsByParent, results::WalletCoinsByParentResult);
+
 /// `control.wallet.arrivals` — confirmed INCOMING funds recorded since a cursor position.
 ///
 /// The answer to "was I just paid?", which neither a balance nor a coin list can give: a balance
@@ -302,8 +342,6 @@ pub struct WalletArrivalsParams {
 }
 control_call!(WalletArrivalsParams => ControlMethod::WalletArrivals, results::WalletArrivalsResult);
 
-const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
-
 fn normalize_coin_id(coin_id: &str) -> Option<&str> {
     let normalized = coin_id.strip_prefix("0x").unwrap_or(coin_id);
     let well_formed = normalized.len() == COIN_ID_HEX_LEN
@@ -313,48 +351,83 @@ fn normalize_coin_id(coin_id: &str) -> Option<&str> {
     well_formed.then_some(normalized)
 }
 
-impl<'de> Deserialize<'de> for WalletCoinByIdParams {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawWalletCoinByIdParams {
-            coin_id: String,
+/// Give a single-coin-id params type its validating `Deserialize` and its `validated` constructor.
+///
+/// The three by-coin reads (`coinById`, `coinSpend`, `coinsByParent`) enforce the IDENTICAL id rule
+/// under three different field names, and the rule is normative rather than incidental — see
+/// [`WalletCoinByIdParams::validated`] for why a malformed id must be refused BEFORE a chain is
+/// consulted. Written once here so a fourth by-coin read cannot arrive with a subtly looser copy of
+/// it, and so a change to the rule cannot land on two of three types.
+macro_rules! coin_id_params {
+    ($ty:ident, $field:ident, $raw:ident, $error:expr) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                struct $raw {
+                    $field: String,
+                }
+
+                let raw = $raw::deserialize(deserializer)?;
+                let $field = normalize_coin_id(&raw.$field)
+                    .ok_or_else(|| serde::de::Error::custom($error))?
+                    .to_owned();
+                Ok(Self { $field })
+            }
         }
 
-        let raw = RawWalletCoinByIdParams::deserialize(deserializer)?;
-        let coin_id = normalize_coin_id(&raw.coin_id)
-            .ok_or_else(|| serde::de::Error::custom(COIN_ID_ERROR))?
-            .to_owned();
-        Ok(Self { coin_id })
-    }
+        impl $ty {
+            /// Normalize and check the coin id, or reject the request as `-32602 INVALID_PARAMS`.
+            ///
+            /// A malformed id is a malformed REQUEST, and the node refuses it here — before
+            /// consulting any chain. That ordering is normative rather than an optimisation: were a
+            /// bad id allowed through, the read would come back empty, and the caller would be told
+            /// the honest-looking answer *the chain holds nothing* about a coin it never actually
+            /// asked after. An unanswerable question and a chain that answered "no" must never wear
+            /// the same shape.
+            ///
+            /// Accepts exactly two spellings — 64 lowercase hex characters, or the same 64 preceded
+            /// by `0x`. Uppercase, whitespace and every other length are refused, because the
+            /// contract's hex wire form is lowercase and unprefixed everywhere else in this crate.
+            pub fn validated(self) -> Result<Self, crate::error::ControlError> {
+                let normalized = normalize_coin_id(&self.$field).ok_or_else(|| {
+                    crate::error::ControlError::of(
+                        crate::error::ControlErrorCode::InvalidParams,
+                        $error,
+                    )
+                })?;
+                Ok($ty {
+                    $field: normalized.to_owned(),
+                })
+            }
+        }
+    };
 }
 
-impl WalletCoinByIdParams {
-    /// Normalize and check the coin id, or reject the request as `-32602 INVALID_PARAMS`.
-    ///
-    /// A malformed id is a malformed REQUEST, and the node refuses it here — before consulting any
-    /// chain. That ordering is normative rather than an optimisation: were a bad id allowed through,
-    /// the read would come back with no such coin, and the caller would be told the honest-looking
-    /// answer `coin: null` about a coin it never actually asked after. An unanswerable question and
-    /// a chain that answered "no" must never wear the same shape.
-    ///
-    /// Accepts exactly two spellings — 64 lowercase hex characters, or the same 64 preceded by
-    /// `0x`. Uppercase, whitespace and every other length are refused, because the contract's hex
-    /// wire form is lowercase and unprefixed everywhere else in this crate.
-    pub fn validated(self) -> Result<Self, crate::error::ControlError> {
-        let normalized = normalize_coin_id(&self.coin_id).ok_or_else(|| {
-            crate::error::ControlError::of(
-                crate::error::ControlErrorCode::InvalidParams,
-                COIN_ID_ERROR,
-            )
-        })?;
-        Ok(WalletCoinByIdParams {
-            coin_id: normalized.to_owned(),
-        })
-    }
-}
+const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
+const PARENT_COIN_ID_ERROR: &str =
+    "parent_coin_id must be lowercase 64-hex, optionally 0x-prefixed";
+
+coin_id_params!(
+    WalletCoinByIdParams,
+    coin_id,
+    RawWalletCoinByIdParams,
+    COIN_ID_ERROR
+);
+coin_id_params!(
+    WalletCoinSpendParams,
+    coin_id,
+    RawWalletCoinSpendParams,
+    COIN_ID_ERROR
+);
+coin_id_params!(
+    WalletCoinsByParentParams,
+    parent_coin_id,
+    RawWalletCoinsByParentParams,
+    PARENT_COIN_ID_ERROR
+);
 
 /// `control.wallet.peak` params — none.
 ///

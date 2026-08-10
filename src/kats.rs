@@ -35,6 +35,16 @@ const SPENT_COIN: &str = "ababababababababababababababababababababababababababab
 /// handler as "found" and the two answers can be told apart.
 const ABSENT_COIN: &str = "0101010101010101010101010101010101010101010101010101010101010101";
 
+/// The one child [`SPENT_COIN`]'s spend created. A DISTINCT id from its parent, so a by-parent read
+/// that echoed the id it was asked for is distinguishable from one that answered with a child.
+const CHILD_COIN: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+/// The two halves of a spend, given DIFFERENT values so a serialization that transposed the fields
+/// cannot pass. Short stand-ins for serialized CLVM — the contract fixes the encoding (lowercase hex)
+/// and not the programs, which belong to whatever puzzle was actually revealed.
+const REVEAL_HEX: &str = "ff01ff8080";
+const SOLUTION_HEX: &str = "ff8203e880";
+
 const STORE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ROOT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -149,6 +159,21 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinById","params":{"coin_id":"ab".repeat(32)}}),
     );
     assert_request(
+        &WalletCoinSpendParams {
+            coin_id: "ab".repeat(32),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinSpend","params":{"coin_id":"ab".repeat(32)}}),
+    );
+    // The by-parent read spells its field `parent_coin_id`, not `coin_id`: the coin named is the one
+    // being asked ABOUT, never the one coming back. Pinned literally so the two by-coin reads cannot
+    // drift into sharing a field name that reads as a request for the parent itself.
+    assert_request(
+        &WalletCoinsByParentParams {
+            parent_coin_id: "ab".repeat(32),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coinsByParent","params":{"parent_coin_id":"ab".repeat(32)}}),
+    );
+    assert_request(
         &WalletPeakParams {},
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.peak","params":{}}),
     );
@@ -257,6 +282,38 @@ fn golden_response_result_vectors_are_byte_stable() {
             "created_height": 5_000_000u32, "spent_height": null
         },
         "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // `control.wallet.coinSpend` — a spend, carrying the two programs a coin record cannot supply.
+    // The spent coin's `spent_height` is non-null, because a spend exists only where one is.
+    assert_result_round_trips::<results::WalletCoinSpendResult>(json!({
+        "spend": {
+            "coin": {
+                "coin_id": "ab".repeat(32), "asset": null, "amount": 1_000_000_000_000u64,
+                "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
+                "created_height": 5_000_000u32, "spent_height": 5_000_042u32
+            },
+            "puzzle_reveal": REVEAL_HEX, "solution": SOLUTION_HEX
+        },
+        "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // A chain that was consulted and holds no spend of that coin — unspent, or unknown. A SUCCESS,
+    // so that "could not answer" stays free to be an error.
+    assert_result_round_trips::<results::WalletCoinSpendResult>(json!({
+        "spend": null, "source": "fallback", "synced": false, "peak_height": null
+    }));
+    // `control.wallet.coinsByParent` — one hop. `asset` is null on the child, because naming a coin
+    // by its parent classifies nothing.
+    assert_result_round_trips::<results::WalletCoinsByParentResult>(json!({
+        "coins": [{
+            "coin_id": CHILD_COIN, "asset": null, "amount": 999_999_999_999u64,
+            "parent_coin_info": "ab".repeat(32), "puzzle_hash": "33".repeat(32),
+            "created_height": 5_000_042u32, "spent_height": null
+        }],
+        "source": "db", "synced": true, "peak_height": 5_000_100u32
+    }));
+    // A parent that created no known children. A SUCCESS, for the same reason an empty `.coins` is.
+    assert_result_round_trips::<results::WalletCoinsByParentResult>(json!({
+        "coins": [], "source": "fallback", "synced": false, "peak_height": null
     }));
     assert_result_round_trips::<results::WalletPeakResult>(json!({
         "peak_height": 5_000_000u32, "synced": true
@@ -874,6 +931,67 @@ impl ControlHandler for MockNode {
             peak_height: None,
         })
     }
+    /// Reports a spend ONLY for [`SPENT_COIN`], and absence for every other id — so a handler that
+    /// answered `spend: null` unconditionally is distinguishable from a correct one. The reveal and
+    /// the solution differ from each other, so a serialization that transposed the two fields fails
+    /// the routing test below rather than passing on a shape they share.
+    async fn wallet_coin_spend(
+        &self,
+        params: WalletCoinSpendParams,
+    ) -> Result<results::WalletCoinSpendResult, ControlError> {
+        let spend = (params.coin_id == SPENT_COIN).then(|| results::WalletCoinSpend {
+            coin: results::WalletCoinRecord {
+                coin_id: SPENT_COIN.into(),
+                asset: None,
+                amount: 1_000_000_000_000,
+                parent_coin_info: "11".repeat(32),
+                puzzle_hash: "22".repeat(32),
+                created_height: Some(5_000_000),
+                // A spend exists only because the coin was spent, so this is never null.
+                spent_height: Some(5_000_042),
+            },
+            puzzle_reveal: REVEAL_HEX.into(),
+            solution: SOLUTION_HEX.into(),
+        });
+        Ok(results::WalletCoinSpendResult {
+            spend,
+            source: Some(results::WalletReadSource::Fallback),
+            synced: false,
+            peak_height: None,
+        })
+    }
+    /// Knows one parent with exactly one child, and reports every other parent as childless — so
+    /// "some children" and "no children" are both reachable from the SAME handler, and a handler
+    /// that returned an empty list unconditionally could not pass the routing test below.
+    ///
+    /// The child's id is [`CHILD_COIN`], a value no other handler here produces, and its
+    /// `parent_coin_info` is the parent that was asked for: a handler echoing the request back as
+    /// the ANSWER — the nearest wrong implementation for a by-parent read — is caught by the first.
+    async fn wallet_coins_by_parent(
+        &self,
+        params: WalletCoinsByParentParams,
+    ) -> Result<results::WalletCoinsByParentResult, ControlError> {
+        let coins = if params.parent_coin_id == SPENT_COIN {
+            vec![results::WalletCoinRecord {
+                coin_id: CHILD_COIN.into(),
+                // Naming a coin by its parent classifies nothing.
+                asset: None,
+                amount: 999_999_999_999,
+                parent_coin_info: SPENT_COIN.into(),
+                puzzle_hash: "33".repeat(32),
+                created_height: Some(5_000_042),
+                spent_height: None,
+            }]
+        } else {
+            vec![]
+        };
+        Ok(results::WalletCoinsByParentResult {
+            coins,
+            source: Some(results::WalletReadSource::Fallback),
+            synced: false,
+            peak_height: None,
+        })
+    }
     /// Answers with a `seq` no neighbouring wallet handler produces, and a `latest` one ABOVE the
     /// page's own cursor — so a handler that collapsed the two, or a dispatch arm wired to another
     /// wallet read, is distinguishable from a correct one.
@@ -1198,7 +1316,10 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::WalletBalance | ControlMethod::WalletCoins => {
             json!({"address": "xch1abc", "asset": "dig"})
         }
-        ControlMethod::WalletCoinById => json!({ "coin_id": ABSENT_COIN }),
+        ControlMethod::WalletCoinById | ControlMethod::WalletCoinSpend => {
+            json!({ "coin_id": ABSENT_COIN })
+        }
+        ControlMethod::WalletCoinsByParent => json!({ "parent_coin_id": ABSENT_COIN }),
         ControlMethod::WalletBroadcast => json!({"signed_bundle_hex": "deadbeef"}),
         _ => json!({}),
     }
@@ -1397,6 +1518,162 @@ fn an_omitted_coin_field_is_a_decode_error_not_a_null_verdict() {
             "a payload without a `coin` key must not decode into a no-such-coin verdict: {wire}"
         );
     }
+}
+
+/// **The spend and the children reach their OWN handlers, over the real dispatcher.**
+///
+/// Each assertion is keyed to something only that handler could have produced. The spend carries a
+/// puzzle reveal and a solution, which no other wallet read emits at all; the children answer names
+/// [`CHILD_COIN`], an id no other handler here produces. So an arm wired to the neighbouring by-id
+/// read — the nearest wrong wiring, since all three are asked with a 64-hex coin id — fails rather
+/// than passing on a shape they share.
+#[test]
+fn the_dispatcher_routes_the_spend_and_the_children_to_their_own_handlers() {
+    let found = round_trip(&WalletCoinSpendParams {
+        coin_id: SPENT_COIN.into(),
+    })
+    .expect("coinSpend must route");
+
+    let spend = found.spend.expect("the mock knows this coin's spend");
+    assert_eq!(spend.coin.coin_id, SPENT_COIN);
+    assert_eq!(
+        spend.puzzle_reveal, REVEAL_HEX,
+        "the reveal is the half a coin record cannot supply, and is why this method exists"
+    );
+    assert_eq!(
+        spend.solution, SOLUTION_HEX,
+        "reveal and solution hold DIFFERENT values, so a transposition cannot pass here"
+    );
+    assert!(
+        spend.coin.spent_height.is_some(),
+        "a spend exists only because the coin was spent -- an unspent coin here is a contradiction"
+    );
+
+    let children = round_trip(&WalletCoinsByParentParams {
+        parent_coin_id: SPENT_COIN.into(),
+    })
+    .expect("coinsByParent must route");
+
+    assert_eq!(children.coins.len(), 1);
+    assert_eq!(
+        children.coins[0].coin_id, CHILD_COIN,
+        "the answer is the CHILD -- a handler echoing the parent it was asked about fails here"
+    );
+    assert_eq!(
+        children.coins[0].parent_coin_info, SPENT_COIN,
+        "and the child names the parent that was asked for, so the id reached the handler"
+    );
+    assert_eq!(
+        children.coins[0].asset, None,
+        "naming a coin by its parent classifies nothing; `null` says so rather than asserting"
+    );
+}
+
+/// **An unspent coin and a childless parent are ANSWERS, not errors.**
+///
+/// The nearest wrong implementation maps "nothing there" onto the error channel, where a caller
+/// cannot tell it from "the chain was unreachable" — and reads the failure as *this is the tip*.
+///
+/// The fixture varies ONE thing, the coin asked about, against a truthful control in the same test:
+/// [`SPENT_COIN`] genuinely has a spend and genuinely has a child. Without that control a handler
+/// that answered absent/empty for EVERY id would pass, which is a different implementation and one
+/// that can see nothing at all.
+#[test]
+fn an_absent_spend_and_a_childless_parent_are_answers_not_errors() {
+    let no_spend = round_trip(&WalletCoinSpendParams {
+        coin_id: ABSENT_COIN.into(),
+    })
+    .expect("an absent spend is a SUCCESS -- the error channel is reserved for could-not-answer");
+    assert_eq!(no_spend.spend, None);
+
+    let no_children = round_trip(&WalletCoinsByParentParams {
+        parent_coin_id: ABSENT_COIN.into(),
+    })
+    .expect("a childless parent is a SUCCESS, for the same reason an empty `.coins` is");
+    assert!(no_children.coins.is_empty());
+
+    // The control: the same handlers DO answer positively for a coin they know, so neither
+    // assertion above is passing on a handler that can only ever say nothing.
+    assert!(round_trip(&WalletCoinSpendParams {
+        coin_id: SPENT_COIN.into()
+    })
+    .unwrap()
+    .spend
+    .is_some());
+    assert!(!round_trip(&WalletCoinsByParentParams {
+        parent_coin_id: SPENT_COIN.into()
+    })
+    .unwrap()
+    .coins
+    .is_empty());
+}
+
+/// **An omitted `spend` key is a decode error, not a no-spend verdict.**
+///
+/// The same hazard [`results::WalletCoinByIdResult`] guards, on the read where it costs the most: a
+/// caller following a singleton forward reads "no spend" as *this is the tip*. Serde's default
+/// treatment of `Option` would let any unrelated or truncated payload carrying a `synced` field
+/// decode into a confident "this coin was never spent".
+///
+/// The fixtures are the neighbouring methods' real result shapes, so the test proves the guard
+/// against payloads a client could actually receive by mis-routing — not against invented rubbish.
+#[test]
+fn an_omitted_spend_field_is_a_decode_error_not_a_no_spend_verdict() {
+    // Explicit null still decodes: the verdict is expressible, just not by omission.
+    let stated = serde_json::from_value::<results::WalletCoinSpendResult>(json!({
+        "spend": null, "source": "fallback", "synced": false, "peak_height": null
+    }))
+    .expect("an explicitly null spend is a valid verdict");
+    assert_eq!(stated.spend, None);
+
+    for wire in [
+        json!({ "source": "fallback", "synced": false, "peak_height": null }),
+        json!({ "synced": false }),
+        // `control.wallet.peak`'s shape, and `control.wallet.coinsByParent`'s: both would decode
+        // into "never spent" under serde's default.
+        json!({ "peak_height": 5_000_000u32, "synced": true }),
+        json!({ "coins": [], "source": "db", "synced": true, "peak_height": 5_000_000u32 }),
+    ] {
+        assert!(
+            serde_json::from_value::<results::WalletCoinSpendResult>(wire.clone()).is_err(),
+            "a payload without a `spend` key must not decode into a never-spent verdict: {wire}"
+        );
+    }
+}
+
+/// **The by-parent read enforces the SAME id rule as the by-id reads, under its own field name.**
+///
+/// The rule is shared by macro, and a macro applied to the wrong field name silently produces a type
+/// that validates nothing — the field would simply be absent and the decode would fail for an
+/// unrelated reason. So the test pins both directions: a malformed id is refused, and a well-formed
+/// one is accepted and normalized, under the key `parent_coin_id` specifically.
+#[test]
+fn wallet_coins_by_parent_params_enforce_the_coin_id_rule_on_their_own_field() {
+    for bad in [
+        json!({"parent_coin_id": "AB".repeat(32)}),
+        json!({"parent_coin_id": "abc"}),
+    ] {
+        assert!(
+            serde_json::from_value::<WalletCoinsByParentParams>(bad.clone()).is_err(),
+            "a malformed parent id must be refused at deserialization: {bad}"
+        );
+    }
+    // A `coin_id` key is NOT this method's field, so it must not satisfy it either.
+    assert!(
+        serde_json::from_value::<WalletCoinsByParentParams>(json!({"coin_id": "ab".repeat(32)}))
+            .is_err(),
+        "the by-parent read is asked with `parent_coin_id`; `coin_id` is a different question"
+    );
+
+    let prefixed = serde_json::from_value::<WalletCoinsByParentParams>(
+        json!({"parent_coin_id": format!("0x{}", "ab".repeat(32))}),
+    )
+    .expect("a 0x-prefixed id is tolerated on input");
+    assert_eq!(
+        prefixed.parent_coin_id,
+        "ab".repeat(32),
+        "the prefix is normalized away and never emitted"
+    );
 }
 
 #[test]
