@@ -226,11 +226,11 @@ impl ControlMethod {
     /// - the PEER COUNTS (`control.peerCounts`), which disclose two integers about this node's own
     ///   connectivity and no address, endpoint or secret;
     /// - the wallet CALLER-ADDRESSED CHAIN READS (`control.wallet.balance` / `.coins` /
-    ///   `.coinById`) and the node's own chain POSITION (`.peak` / `.syncStatus`), because each
-    ///   needs only PUBLIC chain data the CALLER already named — an address, or a coin id; never a
-    ///   seed, a key, or a signature — and dig-node has served
-    ///   `control.wallet.balance` open since #1851. A person whose node runs as a service with an
-    ///   unreadable token file can still see their own money.
+    ///   `.coinById` / `.coinSpend` / `.coinsByParent`) and the node's own chain POSITION
+    ///   (`.peak` / `.syncStatus`), because each needs only PUBLIC chain data the CALLER already
+    ///   named — an address, or a coin id; never a seed, a key, or a signature — and dig-node has
+    ///   served `control.wallet.balance` open since #1851. A person whose node runs as a service
+    ///   with an unreadable token file can still see their own money.
     ///
     /// Two wallet methods are deliberately NOT in that second group.
     /// `control.wallet.broadcast` puts bytes on the network, so the token is what stands between a
@@ -249,11 +249,12 @@ impl ControlMethod {
     ///
     /// Two kinds of method qualify, and they are open for different reasons:
     ///
-    /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.peak` /
-    ///   `.syncStatus`), which need only PUBLIC chain data — an address, or a coin id; never a seed,
-    ///   a key, or a signature. On the first three the CALLER supplies the address or coin id, so
-    ///   the node relays a public fact and discloses no association with itself; the last two name
-    ///   the node's own chain position and no address at all;
+    /// - the wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.coinSpend` /
+    ///   `.coinsByParent` / `.peak` / `.syncStatus`), which need only PUBLIC chain data — an
+    ///   address, or a coin id; never a seed, a key, or a signature. On the first five the CALLER
+    ///   supplies the address or coin id, so the node relays a public fact and discloses no
+    ///   association with itself; the last two name the node's own chain position and no address
+    ///   at all;
     /// - `control.peerCounts`, which is NOT a chain read: it discloses two integers about this
     ///   node's own connectivity, and no address, endpoint, peer identity or secret. The identity
     ///   and topology half of the same subject stays gated behind `control.peerStatus`.
