@@ -1015,6 +1015,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// **A send record carries exactly what left, and NOTHING that invites a second figure.**
+    ///
+    /// Two absences are contract rather than omission. `amount` would be read as the spent coin's
+    /// value — the money lie this ledger exists to prevent, since a 9 XCH coin spent to pay 1 XCH
+    /// is a send of 1. `fee` cannot be measured at all: a node observing only chain never sees the
+    /// recipient's output, so any value it put there, including `0`, would be invented. Pinning the
+    /// key set is what stops either being added later "for completeness".
+    #[test]
+    fn a_send_record_carries_only_what_left_the_wallet() {
+        let record = WalletSendRecord {
+            seq: 3,
+            net_outflow: "1000000000001".into(),
+            asset_id: None,
+            confirmed_height: 5_000_123,
+        };
+        let wire = serde_json::to_value(&record).expect("a send record serializes");
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("a send record is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["asset_id", "confirmed_height", "net_outflow", "seq"],
+            "`amount` would be read as the spent coin's value and `fee` would have to be \
+             fabricated; neither belongs on a row about somebody's money"
+        );
+    }
+
     #[test]
     fn status_result_round_trips_the_node_shape() {
         let v = json!({
