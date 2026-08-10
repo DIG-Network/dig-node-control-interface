@@ -1861,6 +1861,50 @@ fn the_largest_legal_page_fits_inside_the_transport_frame() {
     );
 }
 
+/// **An omitted `cursor` key is a decode error, not "there was nothing to resume from".**
+///
+/// The same guard `spend` and `coin` carry, on the field a paged walk resumes by. Under serde's
+/// default treatment of `Option`, any payload carrying `coins` and `complete` would decode with
+/// `cursor: None` — so a mis-routed or truncated response would tell a caller the page handed back
+/// nothing, and the walk would restart from the beginning or stop, rather than fail loudly.
+///
+/// The fixtures are the neighbouring reads' REAL result shapes, so this proves the guard against
+/// payloads a client could actually receive rather than against invented rubbish.
+#[test]
+fn an_omitted_cursor_field_is_a_decode_error_not_an_empty_page() {
+    // Explicit null still decodes: an empty page genuinely has nothing to resume from.
+    let empty = serde_json::from_value::<results::WalletCoinsByParentResult>(json!({
+        "coins": [], "complete": true, "cursor": null,
+        "source": "fallback", "synced": false, "peak_height": null
+    }))
+    .expect("an explicitly null cursor is a valid empty page");
+    assert_eq!(empty.cursor, None);
+
+    for wire in [
+        json!({ "coins": [], "complete": true, "source": "fallback", "synced": false,
+                "peak_height": null }),
+        // `control.wallet.coins`' shape: same `coins` key, no cursor, no completeness.
+        json!({ "coins": [], "source": "db", "synced": true, "peak_height": 5_000_000u32 }),
+    ] {
+        assert!(
+            serde_json::from_value::<results::WalletCoinsByParentResult>(wire.clone()).is_err(),
+            "a payload without a `cursor` key must not decode into a nothing-to-resume-from \
+             page: {wire}"
+        );
+    }
+
+    // And `complete` is required for the same reason -- it has no default, so a payload that omits
+    // it MUST NOT decode into the dangerous reading that the page was whole.
+    assert!(
+        serde_json::from_value::<results::WalletCoinsByParentResult>(json!({
+            "coins": [], "cursor": null, "source": "fallback", "synced": false,
+            "peak_height": null
+        }))
+        .is_err(),
+        "a payload without `complete` must not decode into a claim that the page is whole"
+    );
+}
+
 /// **A caller-supplied page bound reaches the node instead of being silently dropped.**
 #[test]
 fn a_by_parent_request_carries_its_page_bound() {
