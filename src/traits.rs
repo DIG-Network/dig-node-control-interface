@@ -246,6 +246,14 @@ pub trait ControlHandler: Sync {
     /// An empty list MUST mean "a chain was consulted and this parent created no known children".
     /// A read that could not consult a chain MUST return the matching catalogued error instead.
     ///
+    /// The answer is ONE PAGE. An implementation MUST return at most
+    /// `params.effective_limit()` records, in ASCENDING `coin_id` order, starting strictly after
+    /// `params.after_coin_id` when one is given; it MUST set `complete` to whether the page carries
+    /// the last child; and it MUST set `cursor` to the last record it actually returned (`None` for
+    /// an empty page). It MUST NOT report `complete: true` on a page it truncated — a caller reads
+    /// that as the end of a lineage branch. The params are validated at DESERIALIZATION, so an
+    /// out-of-range page size is refused as `INVALID_PARAMS` before this method is called.
+    ///
     /// Every record MUST report `asset: None`: naming a coin by its parent classifies nothing, and
     /// asserting a class this read never verified is a claim a caller would then spend against.
     async fn wallet_coins_by_parent(

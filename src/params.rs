@@ -301,11 +301,46 @@ control_call!(WalletCoinSpendParams => ControlMethod::WalletCoinSpend, results::
 /// is the CALLER's composition of repeated single hops; the node performs exactly one. Naming it
 /// `coin_id` would make a recursive reading of the method plausible from the request alone, and a
 /// caller expecting a whole lineage from one call would read a one-hop answer as a truncated chain.
+///
+/// # Bounded, because a parent's child count is not
+///
+/// This is the only OPEN wallet read whose answer has unbounded cardinality — every other one
+/// returns a single record (`coinById`, `peak`, `syncStatus`) or is already paged (`arrivals`). So
+/// the read is PAGED, and the page is bounded by [`COINS_BY_PARENT_MAX_LIMIT`].
+///
+/// **The bound is the ONLY thing bounding this call — there is no rate limiter anywhere behind it.**
+/// dig-node's control plane has no request rate limiting of any kind (dig_ecosystem#2577); the
+/// bandwidth limiter it does have governs content serving and is not on this path. A future reader
+/// weighing whether to relax this cap should assume no limiter exists, because none does.
+///
+/// That matters more than a local resource bound would, because the node does not necessarily answer
+/// from its own replica: on the fallback tier it forwards a caller-supplied identifier to a
+/// THIRD-PARTY coinset HTTPS oracle. An unbounded page is therefore unbounded work against somebody
+/// else's service, requested by a token-less caller on a loopback endpoint.
+///
+/// Paging rather than a bare cap, because a bare cap is a dead end: a parent with more children than
+/// the cap could never be fully enumerated, and this method exists to WALK a lineage. A walk that
+/// cannot see past the cap is a walk that silently stops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WalletCoinsByParentParams {
     /// The PARENT coin's id: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input and
     /// normalized away by [`Self::validated`]; it is never emitted.
     pub parent_coin_id: String,
+    /// Resume STRICTLY AFTER this child, in the read's
+    /// [documented order](results::WalletCoinsByParentResult). `None` starts at the first child.
+    ///
+    /// This is the value the previous page handed back as
+    /// [`cursor`](results::WalletCoinsByParentResult::cursor) — never a value the caller invented,
+    /// and never a marker for where the chain "got to". `control.wallet.arrivals` records why that
+    /// distinction loses rows; this read avoids the trap by having no such marker to reach for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_coin_id: Option<String>,
+    /// The page size. `None` asks for [`COINS_BY_PARENT_DEFAULT_LIMIT`].
+    ///
+    /// A value above [`COINS_BY_PARENT_MAX_LIMIT`], or a zero, is REFUSED as `INVALID_PARAMS` rather
+    /// than clamped — see [`Self::validated`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 control_call!(WalletCoinsByParentParams => ControlMethod::WalletCoinsByParent, results::WalletCoinsByParentResult);
 
@@ -409,6 +444,7 @@ macro_rules! coin_id_params {
 const COIN_ID_ERROR: &str = "coin_id must be lowercase 64-hex, optionally 0x-prefixed";
 const PARENT_COIN_ID_ERROR: &str =
     "parent_coin_id must be lowercase 64-hex, optionally 0x-prefixed";
+const AFTER_COIN_ID_ERROR: &str = "after_coin_id must be lowercase 64-hex, optionally 0x-prefixed";
 
 coin_id_params!(
     WalletCoinByIdParams,
@@ -422,12 +458,140 @@ coin_id_params!(
     RawWalletCoinSpendParams,
     COIN_ID_ERROR
 );
-coin_id_params!(
-    WalletCoinsByParentParams,
-    parent_coin_id,
-    RawWalletCoinsByParentParams,
-    PARENT_COIN_ID_ERROR
-);
+/// The page size `control.wallet.coinsByParent` uses when the caller names none.
+///
+/// A spend in the lineages this read exists to follow — a singleton, a DID, an ordinary transfer —
+/// creates a small handful of children, so one default page covers a realistic hop in a single round
+/// trip and a caller never pages at all.
+pub const COINS_BY_PARENT_DEFAULT_LIMIT: u32 = 100;
+
+/// The largest page `control.wallet.coinsByParent` will accept, derived from the transport's own
+/// frame limit rather than chosen for feel.
+///
+/// dig-ipc-protocol caps a control frame at `MAX_FRAME_BYTES` = 1 MiB (its `SPEC.md` §
+/// bounds), and that is the hard ceiling every answer on this plane has to fit inside. A
+/// [`WalletCoinRecord`](results::WalletCoinRecord) is at most ~350 bytes of JSON — three 64-hex
+/// hashes at 66 bytes quoted, a 20-digit `u64`, two 10-digit heights, and their keys — so the
+/// arithmetic that fixes this number is:
+///
+/// ```text
+/// 1 MiB / 350 B  ~=  2,996 records is where a page STOPS FITTING
+/// 1,000 records  ~=  350 KB, roughly a third of the frame
+/// ```
+///
+/// The cap is set at a third of what fits, not at what fits, so the envelope, the freshness fields
+/// and any future additive member cannot push a legal page over the transport's limit. A larger
+/// value would put the contract's own maximum inside the region where a conforming node's honest
+/// answer is undeliverable — the failure would surface as a truncated frame, not as a refusal.
+pub const COINS_BY_PARENT_MAX_LIMIT: u32 = 1_000;
+
+const COINS_BY_PARENT_LIMIT_ERROR: &str = "limit must be between 1 and 1000";
+
+impl<'de> Deserialize<'de> for WalletCoinsByParentParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawWalletCoinsByParentParams {
+            parent_coin_id: String,
+            #[serde(default)]
+            after_coin_id: Option<String>,
+            #[serde(default)]
+            limit: Option<u32>,
+        }
+
+        let raw = RawWalletCoinsByParentParams::deserialize(deserializer)?;
+        let parent_coin_id = normalize_coin_id(&raw.parent_coin_id)
+            .ok_or_else(|| serde::de::Error::custom(PARENT_COIN_ID_ERROR))?
+            .to_owned();
+        let after_coin_id = raw
+            .after_coin_id
+            .map(|id| {
+                normalize_coin_id(&id)
+                    .map(str::to_owned)
+                    .ok_or_else(|| serde::de::Error::custom(AFTER_COIN_ID_ERROR))
+            })
+            .transpose()?;
+        if !raw.limit.map_or(true, is_legal_page) {
+            return Err(serde::de::Error::custom(COINS_BY_PARENT_LIMIT_ERROR));
+        }
+        Ok(Self {
+            parent_coin_id,
+            after_coin_id,
+            limit: raw.limit,
+        })
+    }
+}
+
+/// Is this a page size the contract accepts — at least one row, at most the frame-derived maximum?
+fn is_legal_page(limit: u32) -> bool {
+    (1..=COINS_BY_PARENT_MAX_LIMIT).contains(&limit)
+}
+
+impl WalletCoinsByParentParams {
+    /// A first page of children for one parent: the node's default size, starting at the beginning.
+    ///
+    /// The common case, and the one a caller should not have to spell out — naming a page size means
+    /// asserting a number this caller invented over the one the contract chose.
+    pub fn first_page(parent_coin_id: impl Into<String>) -> Self {
+        Self {
+            parent_coin_id: parent_coin_id.into(),
+            after_coin_id: None,
+            limit: None,
+        }
+    }
+
+    /// The page size this request asks for, resolving `None` to [`COINS_BY_PARENT_DEFAULT_LIMIT`].
+    ///
+    /// Stated once here so a node and a client cannot resolve the same omitted field to two
+    /// different numbers — a disagreement that would show up as a page boundary in the wrong place,
+    /// which is exactly where a paged walk loses rows.
+    pub fn effective_limit(&self) -> u32 {
+        self.limit.unwrap_or(COINS_BY_PARENT_DEFAULT_LIMIT)
+    }
+
+    /// Normalize and check both ids and the page bound, or reject as `-32602 INVALID_PARAMS`.
+    ///
+    /// The ids follow the rule every by-coin read in this crate follows (lowercase 64-hex, `0x`
+    /// tolerated on input and never emitted).
+    ///
+    /// An out-of-range `limit` is REFUSED, never clamped. That is a deliberate departure from
+    /// `control.wallet.arrivals`, which lets a node clamp: this read's page boundary is what a
+    /// caller RESUMES from, so a silently shrunk page hands back a cursor for a position the caller
+    /// did not ask about, and a caller that believed its own number would mis-size every subsequent
+    /// request. Refusing keeps the caller's model of the page and the node's identical, which is the
+    /// same reason a 65-hex coin id is refused rather than truncated.
+    ///
+    /// `limit: 0` is refused for a separate reason: a page that can hold nothing makes no progress,
+    /// so a caller looping until a page comes back short would loop forever.
+    pub fn validated(self) -> Result<Self, crate::error::ControlError> {
+        fn invalid(message: &'static str) -> crate::error::ControlError {
+            crate::error::ControlError::of(crate::error::ControlErrorCode::InvalidParams, message)
+        }
+
+        let parent_coin_id = normalize_coin_id(&self.parent_coin_id)
+            .ok_or_else(|| invalid(PARENT_COIN_ID_ERROR))?
+            .to_owned();
+        let after_coin_id = self
+            .after_coin_id
+            .as_deref()
+            .map(|id| {
+                normalize_coin_id(id)
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid(AFTER_COIN_ID_ERROR))
+            })
+            .transpose()?;
+        if !self.limit.map_or(true, is_legal_page) {
+            return Err(invalid(COINS_BY_PARENT_LIMIT_ERROR));
+        }
+        Ok(WalletCoinsByParentParams {
+            parent_coin_id,
+            after_coin_id,
+            limit: self.limit,
+        })
+    }
+}
 
 /// `control.wallet.peak` params — none.
 ///

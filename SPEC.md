@@ -105,7 +105,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.coinSpend` | no | delegated | `{coin_id:string}` | `WalletCoinSpendResult` |
-| `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string}` | `WalletCoinsByParentResult` |
+| `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string, after_coin_id?:string, limit?:u32}` | `WalletCoinsByParentResult` |
 | `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
@@ -233,9 +233,9 @@ opposite remedies — see §4.2.
   omitting the field.
 
   `source` and the freshness fields follow the same tier rule as every other wallet read.
-- **`WalletCoinsByParentResult`**: `{coins:[WalletCoinRecord], source:"db"|"fallback"|null,
-  synced:bool, peak_height:u32|null}`. The DIRECT children created by spending one coin, named by
-  that parent's coin id.
+- **`WalletCoinsByParentResult`**: `{coins:[WalletCoinRecord], complete:bool, cursor:string|null,
+  source:"db"|"fallback"|null, synced:bool, peak_height:u32|null}`. One PAGE of the DIRECT children
+  created by spending one coin, named by that parent's coin id.
 
   Exactly ONE HOP. The list is what the named parent's spend created and nothing further: not a
   lineage, not a subtree, not transitive. A node MUST NOT recurse — an unbounded server-side walk
@@ -249,6 +249,39 @@ opposite remedies — see §4.2.
   an empty list as *this is the tip*.
 
   Every record MUST report `asset:null`: naming a coin by its parent classifies nothing.
+
+  **The answer is BOUNDED and PAGED.** This is the only open wallet read whose cardinality is
+  unbounded — every other returns a single record or is already paged — and there is NO request rate
+  limiting on the control plane, so this bound is the only limit on the work a token-less caller can
+  ask for. On the fallback tier the node forwards the caller's identifier to a third-party coinset
+  oracle, so an unbounded page is unbounded work against another party's service.
+
+  `limit` MUST be between 1 and `COINS_BY_PARENT_MAX_LIMIT` (1000); an omitted `limit` means
+  `COINS_BY_PARENT_DEFAULT_LIMIT` (100). An out-of-range or zero `limit` MUST be REFUSED as `-32602
+  INVALID_PARAMS` and MUST NOT be clamped — a caller resumes from a page boundary, so a silently
+  shrunk page returns a cursor for a position the caller never asked about. (This deliberately
+  differs from `control.wallet.arrivals`, where a node MAY clamp: that read's cursor is a ledger
+  position the node owns, whereas this one's is a row the caller was handed.) `0` is refused
+  separately: a page that holds nothing never makes progress. The maximum is derived from
+  dig-ipc-protocol's `MAX_FRAME_BYTES` (1 MiB) — a worst-case `WalletCoinRecord` is ~350 bytes, so
+  1000 records is ~350 KB, about a third of the frame, leaving headroom for the envelope.
+
+  `complete` MUST state whether the page carries the LAST child. A node MUST NOT report
+  `complete:true` on a page it truncated. A caller MUST NOT infer completeness from the page length:
+  a node may return a short page for its own reasons, and a child set that is an exact multiple of
+  the page size makes the final full page indistinguishable from a truncated one. This is normative
+  and load-bearing — a caller walking a lineage reads "no more children" as the end of a branch, so a
+  truncated page that looks whole presents a partial lineage as a complete one.
+
+  `cursor` MUST be the `coin_id` of the LAST record actually returned, or `null` for an empty page,
+  and the key MUST always be present. A caller resumes by passing it as `after_coin_id`. There is
+  deliberately no chain-head marker on this type to resume from by mistake.
+
+  A node MUST return children in ASCENDING `coin_id` order and MUST keep that order stable across the
+  pages of one walk; `after_coin_id` means strictly after that id in that order. Without a fixed
+  order a cursor names no position and a walk silently repeats and skips children. Coin ids are
+  fixed-length lowercase hex, so ascending lexicographic and ascending 32-byte numeric order are the
+  same order.
 
   The parameter is spelled `parent_coin_id`, NOT `coin_id`. The coin named is the one being asked
   ABOUT and is never the coin returned; a shared field name would make a recursive reading of the

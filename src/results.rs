@@ -784,6 +784,37 @@ pub struct WalletCoinSpendResult {
 /// work the caller cannot bound, and a partial walk returned as if complete would be a lineage with
 /// a silent hole in it.
 ///
+/// # A page, and it says so — the truncation rule
+///
+/// [`coins`](Self::coins) is ONE PAGE of the parent's children, bounded by
+/// [`COINS_BY_PARENT_MAX_LIMIT`](crate::params::COINS_BY_PARENT_MAX_LIMIT). Whether it is the WHOLE
+/// child set is stated by [`complete`](Self::complete) and never left to be inferred from the page's
+/// length.
+///
+/// This is the money-critical shape in this type. A caller walking a lineage reads "no more
+/// children" as *this branch ends here*, so a page that was truncated but looks whole terminates the
+/// walk early and presents a partial lineage as a complete one. Inferring completeness from
+/// `coins.len() < limit` is NOT equivalent and MUST NOT be done: a node is free to return a short
+/// page for its own reasons, and a child set that is an exact multiple of the page size makes the
+/// last full page indistinguishable from a truncated one.
+///
+/// # Resuming: the same lesson `control.wallet.arrivals` records
+///
+/// Resume from [`cursor`](Self::cursor) — the last child you were actually HANDED — by passing it
+/// as [`after_coin_id`](crate::params::WalletCoinsByParentParams::after_coin_id). There is
+/// deliberately no "where the chain got to" marker on this type to reach for instead; that is the
+/// distinction `WalletArrivalsResult::latest` exists to warn about, and the cheapest way not to lose
+/// a row to it is to give a caller nothing else to resume from.
+///
+/// # The order is part of the contract, because paging is meaningless without one
+///
+/// A node MUST return children in ASCENDING `coin_id` order, and MUST keep that order stable across
+/// the pages of one walk. `after_coin_id` means *strictly after this id in that order*. Without a
+/// fixed order a cursor names no position, and a walk would silently repeat some children and skip
+/// others. Coin ids are fixed-length lowercase hex, so ascending lexicographic order and ascending
+/// 32-byte numeric order are the SAME order — an implementation may use whichever it has, and the
+/// two can never disagree.
+///
 /// # An empty list is an ANSWER, never a fallback
 ///
 /// `coins: []` means the node consulted a chain and that parent created no children it knows of —
@@ -802,8 +833,31 @@ pub struct WalletCoinSpendResult {
 /// [`asset`](WalletCoinRecord::asset) as `null` rather than assert a class the read never verified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletCoinsByParentResult {
-    /// The parent's direct children, possibly empty (see the type docs). One hop only.
+    /// One page of the parent's direct children, ascending by `coin_id`, possibly empty. One hop
+    /// only, and NOT necessarily the whole child set — see [`complete`](Self::complete).
     pub coins: Vec<WalletCoinRecord>,
+    /// Is this page the WHOLE child set?
+    ///
+    /// `true` means every child the node knows of is in [`coins`](Self::coins) and the walk of this
+    /// hop is finished. `false` means the answer was TRUNCATED and more children exist — resume from
+    /// [`cursor`](Self::cursor).
+    ///
+    /// Required on the wire, and stated positively so that the reading a caller falls into when the
+    /// field is absent or defaulted is the SAFE one. A boolean spelled `truncated` would default to
+    /// `false`, i.e. to "this is everything", which is the claim that ends a lineage walk early;
+    /// `complete` defaults to "there may be more", which costs at worst one redundant request.
+    pub complete: bool,
+    /// The last child in this page — **the value to resume from** — or `null` for an empty page.
+    ///
+    /// It is the id the caller was HANDED, never a marker for where the chain got to. Pass it as
+    /// [`after_coin_id`](crate::params::WalletCoinsByParentParams::after_coin_id) to fetch the next
+    /// page.
+    ///
+    /// The key MUST be present. `null` is meaningful here — it says this page carried nothing — so
+    /// an ABSENT key must not decode into it: serde's default treatment of `Option` would let a
+    /// truncated or mis-routed payload decode into a confident "there was nothing to resume from".
+    #[serde(deserialize_with = "required_option")]
+    pub cursor: Option<String>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
     /// Whether these children reflect a caught-up local view; `false` for every fallback answer.
