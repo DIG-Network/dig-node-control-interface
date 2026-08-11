@@ -2661,4 +2661,36 @@ fn a_bounded_rendering_is_bounded_and_marked() {
     let short_token = short.unrecognized_token_value().unwrap();
     assert_eq!(short_token.display_bounded(64), "a_newer_token");
     assert!(!short_token.display_bounded(64).ends_with('…'));
+
+    // The pathological inputs, PINNED rather than proven once by hand. The bound is computed on the
+    // ESCAPED bytes, and a control character expands about sixfold, so expansion is the case a naive
+    // implementation overshoots on -- while slicing the raw string instead would panic on a char
+    // boundary in the multi-byte rows below.
+    for (raw, max) in [
+        ("", 0usize),
+        ("\u{1b}\u{1b}\u{1b}", 0),
+        ("\u{1b}\u{1b}\u{1b}", 5),
+        ("\u{1b}\u{1b}\u{1b}", 6),
+        ("\u{1f600}\u{1f600}", 1),
+        ("\u{1f600}\u{1f600}", 4),
+        ("\u{202e}abc", 3),
+        ("\u{7f}\u{9b}", 32),
+    ] {
+        let phase = results::WalletSyncPhase::from(raw);
+        let Some(token) = phase.unrecognized_token_value() else {
+            continue;
+        };
+        let rendered = token.display_bounded(max);
+
+        assert!(
+            rendered.trim_end_matches('…').len() <= max,
+            "{raw:?} at max={max} rendered {rendered:?}, over the bound"
+        );
+        for forbidden in ['\u{1b}', '\r', '\u{202e}', '\u{7f}', '\u{9b}'] {
+            assert!(
+                !rendered.contains(forbidden) && !token.to_string().contains(forbidden),
+                "{forbidden:?} survived rendering of {raw:?}"
+            );
+        }
+    }
 }
