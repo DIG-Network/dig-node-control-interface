@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.12.0] - 2026-08-11
+
+### Features
+- **wallet:** Seal-regression doctest, bounded token rendering, and a compiler-checked settled rule (#13)
+
 ## [0.11.0] - 2026-08-11
 
 ### Features
