@@ -1022,25 +1022,116 @@ pub enum WalletSyncPhase {
 /// This is deliberately a type-level guard rather than a documented rule. The whole family exists
 /// because a wire-level mismatch went unnoticed until someone built a probe, and a rule that only a
 /// doc comment enforces is the same shape of mistake one layer up.
+///
+/// # The seal is guarded by a test that can actually see it removed
+///
+/// The ordinary unit tests cannot. They reach `Unrecognized` only through
+/// [`WalletSyncPhase::from`], and the seal is precisely what determines which values that route can
+/// produce — so making this field `pub` again leaves every one of them green while the forged
+/// value becomes constructible. Measured: the whole suite passed with the field public.
+///
+/// A doctest is the instrument that works, because doctests compile as a SEPARATE CRATE and
+/// therefore see this type exactly as a consumer does. The one below must FAIL to compile; if the
+/// field is ever made public it starts compiling, and `cargo test` reports the doctest as failed.
+///
+/// ```compile_fail
+/// use dig_node_control_interface::results::{UnknownPhaseToken, WalletSyncPhase};
+/// // A value that calls itself unrecognised while spelling itself `synced` on the wire.
+/// let forged = WalletSyncPhase::Unrecognized(UnknownPhaseToken("synced".to_owned()));
+/// ```
+///
+/// The honest route returns the KNOWN variant instead, which is the whole point:
+///
+/// ```
+/// use dig_node_control_interface::results::WalletSyncPhase;
+/// assert_eq!(WalletSyncPhase::from("synced"), WalletSyncPhase::Synced);
+/// assert!(WalletSyncPhase::from("synced").is_recognized());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnknownPhaseToken(String);
 
 impl UnknownPhaseToken {
-    /// The token exactly as the node sent it.
+    /// The token's RAW bytes, exactly as the node sent them — the relay path.
     ///
-    /// Untrusted, node-supplied text: escape and bound it before rendering. `Debug` escapes it, as
-    /// `String`'s always has; this accessor deliberately does not, because a relay has to be able to
-    /// hand on the exact bytes.
+    /// This is the escape hatch, not the default. It exists so a proxy can hand the token on
+    /// byte-identically, and it is the ONE accessor that returns unescaped node-supplied text. Do
+    /// not route it to a terminal, a log line, or a UI: use [`Display`](Self#impl-Display) or
+    /// [`display_bounded`](Self::display_bounded), which escape.
+    ///
+    /// ```
+    /// use dig_node_control_interface::results::WalletSyncPhase;
+    /// let phase = WalletSyncPhase::from("a_newer_token");
+    /// assert_eq!(phase.unrecognized_token(), Some("a_newer_token"));
+    /// ```
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The token escaped for display and truncated to `max_len` bytes of escaped output.
+    ///
+    /// What [`Display`](Self#impl-Display) does, plus a length bound — for a log line or a UI label
+    /// that must not be handed an unbounded string. Nothing bounds a token's length on the wire (the
+    /// contract is transport-agnostic, and rejecting an over-long token would reintroduce the
+    /// fail-closed parse this type exists to remove), so the bound belongs at the point of display.
+    ///
+    /// The escaped content is at most `max_len` bytes. A single `…` is appended when anything was
+    /// dropped, so a truncated rendering is never mistaken for the whole token.
+    ///
+    /// ```
+    /// use dig_node_control_interface::results::WalletSyncPhase;
+    /// let phase = WalletSyncPhase::from("a_very_long_token_from_a_newer_node");
+    /// let token = phase.unrecognized_token_value().unwrap();
+    /// assert_eq!(token.display_bounded(10), "a_very_lon…");
+    /// ```
+    pub fn display_bounded(&self, max_len: usize) -> String {
+        let mut rendered = String::new();
+        let mut dropped = false;
+
+        for character in self.0.chars() {
+            let escaped: String = character.escape_debug().collect();
+            if rendered.len() + escaped.len() > max_len {
+                dropped = true;
+                break;
+            }
+            rendered.push_str(&escaped);
+        }
+        if dropped {
+            rendered.push('…');
+        }
+        rendered
     }
 }
 
 impl std::fmt::Display for UnknownPhaseToken {
-    /// The raw token, so it composes in a log line. Same untrusted text as
-    /// [`as_str`](Self::as_str) — bound and escape it at the point of display.
+    /// The token ESCAPED — the safe default, because this is the accessor a log line reaches for.
+    ///
+    /// # Why the default escapes rather than the opposite
+    ///
+    /// The raw token is attacker-influenced text that is designed to be logged, and a node emitting
+    /// `"\u{1b}[2K\rsynced"` turns `format!("unknown phase: {token}")` into a terminal line reading
+    /// `synced` — the erase-line and carriage-return wipe the prefix that said it was unknown. A
+    /// right-to-left override does the same to a UI label. Making the ergonomic path raw and the
+    /// safe path opt-in gets that backwards: every consumer would have to remember, and one
+    /// forgetting reproduces the exact false-reassurance this family exists to prevent.
+    ///
+    /// `char::escape_debug` is the escaper because it is the standard library's own, covering C0/C1
+    /// controls, `DEL`, and the format characters that carry bidi overrides. A hand-rolled table
+    /// here would be a second implementation of a security-relevant rule, and would drift.
+    ///
+    /// [`as_str`](Self::as_str) remains raw for relaying; [`display_bounded`](Self::display_bounded)
+    /// adds a length bound.
+    ///
+    /// ```
+    /// use dig_node_control_interface::results::WalletSyncPhase;
+    /// let phase = WalletSyncPhase::from("\u{1b}[2K\rsynced");
+    /// let token = phase.unrecognized_token_value().unwrap();
+    /// assert_eq!(token.to_string(), "\\u{1b}[2K\\rsynced");
+    /// ```
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        for character in self.0.chars() {
+            write!(f, "{}", character.escape_debug())?;
+        }
+        Ok(())
     }
 }
 
@@ -1092,6 +1183,52 @@ impl WalletSyncPhase {
     /// The predicate a consumer branches its *"your node may be newer than this app"* path on.
     pub fn is_recognized(&self) -> bool {
         !matches!(self, WalletSyncPhase::Unrecognized(_))
+    }
+
+    /// The unrecognised token as its own type, giving access to the escaped renderings.
+    ///
+    /// [`unrecognized_token`](Self::unrecognized_token) hands back a raw `&str`; this hands back the
+    /// [`UnknownPhaseToken`], whose `Display` escapes and whose
+    /// [`display_bounded`](UnknownPhaseToken::display_bounded) also truncates.
+    pub fn unrecognized_token_value(&self) -> Option<&UnknownPhaseToken> {
+        match self {
+            WalletSyncPhase::Unrecognized(token) => Some(token),
+            _ => None,
+        }
+    }
+
+    /// Whether a consumer may present this phase as SETTLED — nothing outstanding, nothing to do.
+    ///
+    /// # Why this is a method and not a rule in the docs
+    ///
+    /// Two phases mean "the sync is idle" and only one of them is good news.
+    /// [`NoWalletEnrolled`](Self::NoWalletEnrolled) is complete and correct;
+    /// [`WalletNotUnlocked`](Self::WalletNotUnlocked) is a wallet whose coins nobody is following.
+    /// Rendering the second as settled is the money-lie this family exists to prevent, and it is one
+    /// mistaken `||` away in every consumer that writes the rule itself.
+    ///
+    /// Stating it once here makes it a compiler-checked fact rather than a paragraph each consumer
+    /// re-derives — a second implementation of a rule like this is a drift bug waiting to happen.
+    /// An unrecognised phase is never settled: this build cannot know what the node meant.
+    ///
+    /// ```
+    /// use dig_node_control_interface::results::WalletSyncPhase;
+    /// assert!(WalletSyncPhase::Synced.may_render_as_settled());
+    /// assert!(WalletSyncPhase::NoWalletEnrolled.may_render_as_settled());
+    /// // A wallet exists and nothing is watching it — never settled.
+    /// assert!(!WalletSyncPhase::WalletNotUnlocked.may_render_as_settled());
+    /// assert!(!WalletSyncPhase::from("a_newer_token").may_render_as_settled());
+    /// ```
+    pub fn may_render_as_settled(&self) -> bool {
+        // An exhaustive match, not a `matches!`: a phase added later must be classified here
+        // deliberately, and the compiler is what forces that rather than a reviewer noticing.
+        match self {
+            WalletSyncPhase::Synced | WalletSyncPhase::NoWalletEnrolled => true,
+            WalletSyncPhase::NotStarted
+            | WalletSyncPhase::Syncing
+            | WalletSyncPhase::WalletNotUnlocked
+            | WalletSyncPhase::Unrecognized(_) => false,
+        }
     }
 }
 

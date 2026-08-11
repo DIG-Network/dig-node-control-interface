@@ -604,12 +604,15 @@ fn every_phase_decodes_back_to_itself_from_its_own_wire_spelling() {
             results::WalletSyncPhase::ALL.contains(&phase),
             "{spelling:?}: is_recognized() must agree with membership of the known set"
         );
-        // The decisive one: a value calling itself unrecognised must never spell itself as a phase
-        // the far side will read as progress.
+        // The decisive one: a value calling itself unrecognised must never spell itself as ANY
+        // known token. Checking only synced/syncing would leave `no_wallet_enrolled` -- equally an
+        // all-clear -- reachable by a future forging route.
         if !phase.is_recognized() {
             assert!(
-                !["synced", "syncing"].contains(&phase.as_wire()),
-                "{spelling:?} is unrecognised locally but claims progress on the wire"
+                !results::WalletSyncPhase::ALL
+                    .iter()
+                    .any(|known| known.as_wire() == phase.as_wire()),
+                "{spelling:?} is unrecognised locally but spells itself as a known phase"
             );
         }
     }
@@ -2557,4 +2560,137 @@ fn no_wallet_enrolled_is_distinguishable_from_a_wallet_that_is_not_unlocked() {
         serde_json::to_value(&locked).unwrap()["phase"],
         json!("wallet_not_unlocked")
     );
+}
+
+/// **Only two phases may be rendered as settled, and the compiler decides which.**
+///
+/// `Synced` and `NoWalletEnrolled` are the complete pictures. Everything else has something
+/// outstanding, and `WalletNotUnlocked` most of all — a wallet exists and nothing is following it,
+/// which is the one idle state that must never wear a green tick.
+///
+/// Pinned against a literal table rather than by calling the method on itself, so an implementation
+/// that widened the predicate to "any idle phase" — the nearest wrong one, and the conflation this
+/// family exists to prevent — fails here.
+#[test]
+fn only_a_complete_picture_may_render_as_settled() {
+    let expected = [
+        (results::WalletSyncPhase::NotStarted, false),
+        (results::WalletSyncPhase::Syncing, false),
+        (results::WalletSyncPhase::Synced, true),
+        (results::WalletSyncPhase::NoWalletEnrolled, true),
+        (results::WalletSyncPhase::WalletNotUnlocked, false),
+    ];
+    for (phase, settled) in &expected {
+        assert_eq!(
+            phase.may_render_as_settled(),
+            *settled,
+            "{phase:?} is on the wrong side of the settled line"
+        );
+    }
+    assert_eq!(
+        expected.len(),
+        results::WalletSyncPhase::ALL.len(),
+        "every known phase must be classified here"
+    );
+
+    // A phase this build cannot interpret is never settled: it has no idea what the node meant.
+    for unknown in ["a_newer_token", "", "settled", "no_addresses_to_watch"] {
+        assert!(
+            !results::WalletSyncPhase::from(unknown).may_render_as_settled(),
+            "{unknown:?} must not be settled — this build cannot know what it means"
+        );
+    }
+}
+
+/// **A token cannot forge a log line or a label.** The raw accessor stays raw for relaying, and both
+/// display paths escape.
+///
+/// The fixture is the concrete attack: `ESC [ 2 K` erases the current terminal line and `\r` returns
+/// the cursor, so `format!("unknown phase: {token}")` rendered RAW prints a line reading `synced` —
+/// the prefix that said it was unknown is gone. A right-to-left override does the same to a UI
+/// label. Both are node-supplied, and this contract's whole subject is a consumer not asserting
+/// something false about a wallet.
+#[test]
+fn a_token_cannot_forge_a_log_line() {
+    let hostile = "\u{1b}[2K\rsynced\u{202e}";
+    let phase = results::WalletSyncPhase::from(hostile);
+    let token = phase
+        .unrecognized_token_value()
+        .expect("a hostile token is not a known phase");
+
+    // The RAW accessor is deliberately unchanged: a relay must hand on the exact bytes.
+    assert_eq!(token.as_str(), hostile);
+    assert_eq!(phase.as_wire(), hostile, "the wire form stays verbatim");
+
+    // Every DISPLAY path escapes. No bare ESC, CR or bidi override survives.
+    for rendered in [token.to_string(), token.display_bounded(200)] {
+        for forbidden in ['\u{1b}', '\r', '\u{202e}'] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{forbidden:?} survived into a display rendering: {rendered:?}"
+            );
+        }
+        assert!(
+            rendered.contains("synced"),
+            "escaping must stay legible, not redact"
+        );
+    }
+}
+
+/// **A bounded rendering is bounded, and says when it dropped something.**
+///
+/// Nothing caps a token's length on the wire — the contract is transport-agnostic, and rejecting an
+/// over-long token would put back the fail-closed parse this type exists to remove — so the bound
+/// lives at the point of display. A truncated rendering that looked complete would be its own small
+/// lie, hence the marker.
+#[test]
+fn a_bounded_rendering_is_bounded_and_marked() {
+    let long = results::WalletSyncPhase::from("a".repeat(10_000).as_str());
+    let token = long.unrecognized_token_value().unwrap();
+
+    let rendered = token.display_bounded(32);
+    assert!(
+        rendered.trim_end_matches('…').len() <= 32,
+        "escaped content must respect the bound: {} bytes",
+        rendered.len()
+    );
+    assert!(rendered.ends_with('…'), "a truncated rendering must say so");
+
+    // A token that FITS is not marked, so the marker means something.
+    let short = results::WalletSyncPhase::from("a_newer_token");
+    let short_token = short.unrecognized_token_value().unwrap();
+    assert_eq!(short_token.display_bounded(64), "a_newer_token");
+    assert!(!short_token.display_bounded(64).ends_with('…'));
+
+    // The pathological inputs, PINNED rather than proven once by hand. The bound is computed on the
+    // ESCAPED bytes, and a control character expands about sixfold, so expansion is the case a naive
+    // implementation overshoots on -- while slicing the raw string instead would panic on a char
+    // boundary in the multi-byte rows below.
+    for (raw, max) in [
+        ("", 0usize),
+        ("\u{1b}\u{1b}\u{1b}", 0),
+        ("\u{1b}\u{1b}\u{1b}", 5),
+        ("\u{1b}\u{1b}\u{1b}", 6),
+        ("\u{1f600}\u{1f600}", 1),
+        ("\u{1f600}\u{1f600}", 4),
+        ("\u{202e}abc", 3),
+        ("\u{7f}\u{9b}", 32),
+    ] {
+        let phase = results::WalletSyncPhase::from(raw);
+        let Some(token) = phase.unrecognized_token_value() else {
+            continue;
+        };
+        let rendered = token.display_bounded(max);
+
+        assert!(
+            rendered.trim_end_matches('…').len() <= max,
+            "{raw:?} at max={max} rendered {rendered:?}, over the bound"
+        );
+        for forbidden in ['\u{1b}', '\r', '\u{202e}', '\u{7f}', '\u{9b}'] {
+            assert!(
+                !rendered.contains(forbidden) && !token.to_string().contains(forbidden),
+                "{forbidden:?} survived rendering of {raw:?}"
+            );
+        }
+    }
 }
