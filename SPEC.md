@@ -108,7 +108,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string, after_coin_id?:string, limit?:u32}` | `WalletCoinsByParentResult` |
 | `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
-| `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced", peak_height:u32\|null, chia_peer_count:u32\|null}` |
+| `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced"\|"no_wallet_enrolled"\|"wallet_not_unlocked", peak_height:u32\|null, chia_peer_count:u32\|null, watched_addresses:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
@@ -315,17 +315,18 @@ opposite remedies — see §4.2.
   `control.peerStatus`'s `relay.peer_count` counts peers connected to THE RELAY, not to this node.
   It is frequently the only non-zero number on a node connected to nothing, and it is NEVER the
   answer to "how many peers does this node have" — `dig_peer_count` is.
-- **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced", peak_height:u32|null,
-  chia_peer_count:u32|null}`. Whether the node's WALLET CHAIN replica is being kept current, how far
-  it has got, and how many CHIA full-node peers its sync is using. This is NOT `control.sync.status`,
-  which reports §21 DIG store sync and is unrelated.
+- **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced"|"no_wallet_enrolled"|
+  "wallet_not_unlocked", peak_height:u32|null, chia_peer_count:u32|null, watched_addresses:u32|null}`.
+  Whether the node's WALLET CHAIN replica is being kept current, how far it has got, how many CHIA
+  full-node peers its sync is using, and how many addresses it is actually following. This is NOT
+  `control.sync.status`, which reports §21 DIG store sync and is unrelated.
 
-  `phase` MUST be one of the three tokens above, spelled exactly. `"synced"` MUST require BOTH that
+  A conforming node MUST emit one of the five tokens above, spelled exactly. `"synced"` MUST require BOTH that
   the initial catch-up completed AND that at least one Chia peer connection is live at the time of
   the read; a wallet that caught up earlier and has since lost every peer MUST report `"syncing"`.
   `"synced"` is therefore STRICTLY STRONGER than `WalletPeakResult.synced`, which reflects only the
   completed-catch-up flag: `"synced"` implies that flag, the flag does not imply `"synced"`. A
-  boolean MUST NOT be substituted for the three phases — "never started" and "synced at height 0"
+  boolean MUST NOT be substituted for the named phases — "never started" and "synced at height 0"
   are different facts and MUST NOT render the same.
 
   `peak_height` MUST be the node's OWN replica's height, or `null` when it has none. It MUST NOT
@@ -335,7 +336,7 @@ opposite remedies — see §4.2.
   `null` MUST NOT be read as height zero.
 
   `chia_peer_count` counts CHIA FULL-NODE peers the wallet's chain sync is connected to. `0` is an
-  OBSERVED zero and is not a fourth phase: a running sync connected to nothing reports `"syncing"`
+  OBSERVED zero and is not itself a phase: a running sync connected to nothing reports `"syncing"`
   with `0`, which a consumer SHOULD render as "syncing — no peers". `null` means the node cannot
   observe the count and licenses no claim about connectivity. This count is NOT the DIG
   gossip/content peer count from `control.peerStatus` (`connected_peers` / `relay_peer_count`); the
@@ -346,6 +347,51 @@ opposite remedies — see §4.2.
   `chia_peer_count:0` beside `"syncing"` is the honest "syncing — no peers" state and a phase
   separated from its count reads as a contradiction; a DIG content-network count, by contrast, is not
   a wallet fact and MUST NOT be added here for symmetry.
+
+  **The two idle phases.** A sync with no addresses to follow MUST report which of two situations it
+  is in, because they are opposite claims. `"no_wallet_enrolled"` MUST mean no wallet is enrolled on
+  the node: there is nothing to watch, the state is correct and complete, and a consumer MAY present
+  it as settled. `"wallet_not_unlocked"` MUST mean a wallet IS enrolled but the node holds no
+  addresses derived for it, so the user's coins are being followed by nothing; a consumer MUST NOT
+  render it as synced, settled, or up to date, and MUST NOT present a balance read under it as
+  complete. A node MUST NOT emit a single token covering both, and MUST NOT report either as
+  `"synced"`. The common cause of `"wallet_not_unlocked"` is that address derivation needs key
+  material unavailable while the wallet is locked and nothing back-fills it until unlock, which makes
+  it the ordinary state after a restart — the token names the OBSERVATION (no addresses held), not
+  the lock, because a manifest that never carried the keys reaches the same state unlocked.
+
+  `watched_addresses` MUST be the number of addresses the sync is actually following. `0` is an
+  OBSERVED zero; `null` MUST mean the node did not report the number and MUST NOT be rendered as
+  zero. It is the second fact that makes an idle sync readable: `0` beside `"no_wallet_enrolled"` is
+  a complete picture, `0` beside `"wallet_not_unlocked"` is a wallet nobody is following. A node MUST
+  NOT emit `{phase:"synced", watched_addresses:0}` — a sync following no addresses has caught nothing
+  up — and a consumer meeting that pair SHOULD trust the count, which is the narrower claim.
+
+  **An UNKNOWN token MUST NOT fail the response.** A consumer MUST accept any string in `phase` and
+  represent one outside the five tokens as an explicit unrecognised value carrying the token
+  verbatim, never as a deserialization error and never coerced onto a known phase. A closed token set
+  is what turned one added phase into a total read failure in every consumer built against an older
+  contract (dig_ecosystem#2609); a coercion onto `"synced"` or `"syncing"` would be worse still,
+  converting that outage into a confident false statement about the user's funds. A consumer MUST
+  render an unrecognised phase as unknown and MUST NOT infer progress, completion, or a trustworthy
+  balance from it. Symmetrically, a consumer MUST tolerate a payload that OMITS any of the three
+  count fields, reading each absence as unreported rather than zero, so a node predating a field
+  stays readable.
+
+  A phase value MUST NOT report itself as unrecognised while spelling itself as a known token.
+  Decoding any phase's own wire spelling MUST return that same phase. An implementation that lets a
+  caller attach an arbitrary spelling to its unrecognised representation reintroduces the defect this
+  tolerance exists to remove — a value that calls itself unknown locally and arrives at the far side
+  as `"synced"` — and MUST make that state unconstructible rather than merely discouraged.
+
+  **Emission ordering.** Tolerance protects consumers built against a LATER contract than the node;
+  it cannot protect one built against an EARLIER contract, because the tolerance lives in the
+  consumer. A node MUST NOT emit `"no_wallet_enrolled"` or `"wallet_not_unlocked"` until the
+  consumers it serves are known to be at this contract version or later. dig-node and its clients
+  update independently on a user's machine, so a node that adopts the new tokens ahead of its
+  installed clients reproduces the total-parse-failure this revision fixes, on every one of them.
+  The same rule binds every future token: **the contract may grow a phase at any time; a node may
+  only emit it once its consumer floor has caught up.**
 
   `"synced"` MUST NOT be read as a guarantee that the replica's data is FRESH. A live connection to
   a stalled or lagging peer satisfies the predicate while the replica goes stale; the phase reports
