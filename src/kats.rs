@@ -672,11 +672,18 @@ fn the_spec_and_readme_name_every_catalogued_method() {
         // documents. A reimplementer reads them as the definitive set, so a token added to the enum
         // and forgotten in the prose is a real defect, not a tidiness one -- the same reason the
         // method names above are guarded rather than trusted.
+        //
+        // The QUOTED spelling is what is searched for, not the bare word. `synced` and `syncing`
+        // occur throughout both documents as ordinary English and as the unrelated
+        // `WalletPeakResult.synced` FIELD, so a bare `contains` would pass for those two even if the
+        // token itself were deleted -- vacuous for exactly the tokens with the most prose around
+        // them. Every token appears quoted, so requiring the quotes costs nothing and restores the
+        // guard's teeth.
         for phase in results::WalletSyncPhase::ALL {
+            let quoted = format!("{:?}", phase.as_wire());
             assert!(
-                text.contains(phase.as_wire()),
-                "{doc} never mentions the `{}` phase token",
-                phase.as_wire()
+                text.contains(&quoted),
+                "{doc} never mentions the {quoted} phase token in its quoted wire spelling"
             );
         }
     }
