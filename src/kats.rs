@@ -404,25 +404,34 @@ fn golden_response_result_vectors_are_byte_stable() {
         "phase": "a_phase_from_a_newer_node", "peak_height": 5_000_000u32, "chia_peer_count": 3u32,
         "watched_addresses": 12u32
     }));
-    // `control.peerCounts` — the two networks, each named. A node connected to both.
+    // `control.peerCounts` — the three counts, each named. A node connected to both networks, and
+    // knowing of more DIG peers than it holds connections to (the ordinary case).
     assert_result_round_trips::<results::PeerCountsResult>(json!({
-        "dig_peer_count": 6u32, "chia_peer_count": 3u32
+        "dig_peer_count": 6u32, "chia_peer_count": 3u32, "known_dig_peer_count": 41u32
     }));
-    // Observed zeros on BOTH networks: the node looked and found nothing connected. Pinned
-    // separately from the null case below, because a node with no peer network RUNNING has an
-    // unknown count and must not report it as a measured zero.
+    // Observed zeros on every count: the node looked and found nothing. Pinned separately from the
+    // null case below, because a node with no peer network RUNNING has an unknown count and must
+    // not report it as a measured zero.
     assert_result_round_trips::<results::PeerCountsResult>(json!({
-        "dig_peer_count": 0u32, "chia_peer_count": 0u32
+        "dig_peer_count": 0u32, "chia_peer_count": 0u32, "known_dig_peer_count": 0u32
     }));
-    // Unobservable on BOTH networks. `null` is not `0` for either count.
+    // Unobservable on every count. `null` is not `0` for any of them.
     assert_result_round_trips::<results::PeerCountsResult>(json!({
-        "dig_peer_count": null, "chia_peer_count": null
+        "dig_peer_count": null, "chia_peer_count": null, "known_dig_peer_count": null
     }));
-    // One of each, and this vector is the one that matters: it varies the two counts INDEPENDENTLY,
-    // so a serialization that transposed the two field names — the nearest wrong implementation, and
-    // exactly the confusion this method exists to end — cannot survive it.
+    // Three DIFFERENT values, and this vector is the one that matters: it varies all three counts
+    // INDEPENDENTLY, so a serialization that transposed any pair of field names — the nearest wrong
+    // implementation, and exactly the confusion this method exists to end — cannot survive it. The
+    // `known` value is deliberately unequal to `dig_peer_count`, so an implementation that served
+    // the connected count for both fails here rather than reading as plausible.
     assert_result_round_trips::<results::PeerCountsResult>(json!({
-        "dig_peer_count": 6u32, "chia_peer_count": null
+        "dig_peer_count": 6u32, "chia_peer_count": null, "known_dig_peer_count": 41u32
+    }));
+    // THE diagnostic vector (#2570): connected to nobody while knowing of many. This is the state
+    // the field was added to make expressible — a reachability fault, which a client must be able
+    // to tell apart from the discovery fault that the all-zero vector above describes.
+    assert_result_round_trips::<results::PeerCountsResult>(json!({
+        "dig_peer_count": 0u32, "chia_peer_count": 3u32, "known_dig_peer_count": 41u32
     }));
     assert_result_round_trips::<results::WalletBroadcastResult>(json!({
         "accepted": true, "transaction_id": "dd".repeat(32), "rejection": null
@@ -710,18 +719,20 @@ fn the_spec_and_readme_name_every_catalogued_method() {
 /// `peer_count` eventually reaches for the wrong network and gets a plausible number. A rename that
 /// dropped a network out of a key would be invisible to a derived assertion.
 ///
-/// The fixture gives the two counts DIFFERENT values, so an implementation that transposed the
-/// fields — the nearest wrong one — fails here rather than passing on a shape both share.
+/// The fixture gives all three counts DIFFERENT values, so an implementation that transposed any
+/// pair — the nearest wrong one — fails here rather than passing on a shape they share.
 #[test]
 fn each_peer_count_key_names_its_network() {
     let wire = serde_json::to_value(results::PeerCountsResult {
         dig_peer_count: Some(6),
         chia_peer_count: Some(3),
+        known_dig_peer_count: Some(41),
     })
     .unwrap();
 
     assert_eq!(wire["dig_peer_count"], json!(6));
     assert_eq!(wire["chia_peer_count"], json!(3));
+    assert_eq!(wire["known_dig_peer_count"], json!(41));
     // The KEY SET, exactly -- so a bare `peers` / `connected_peers` / `peer_count` cannot appear
     // alongside the named pair either. (`serde_json::Value` orders its map, so this is a set
     // assertion by construction; the emitted TEXT below is what a consumer actually parses.)
@@ -731,14 +742,18 @@ fn each_peer_count_key_names_its_network() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, vec!["chia_peer_count", "dig_peer_count"]);
+    assert_eq!(
+        keys,
+        vec!["chia_peer_count", "dig_peer_count", "known_dig_peer_count"]
+    );
     assert_eq!(
         serde_json::to_string(&results::PeerCountsResult {
             dig_peer_count: Some(6),
             chia_peer_count: Some(3),
+            known_dig_peer_count: Some(41),
         })
         .unwrap(),
-        r#"{"dig_peer_count":6,"chia_peer_count":3}"#,
+        r#"{"dig_peer_count":6,"chia_peer_count":3,"known_dig_peer_count":41}"#,
         "the emitted bytes name each network and give the two counts independently"
     );
 }
@@ -758,6 +773,7 @@ fn both_results_spell_the_chia_count_with_the_same_key() {
     let counts = serde_json::to_value(results::PeerCountsResult {
         dig_peer_count: None,
         chia_peer_count: Some(3),
+        known_dig_peer_count: None,
     })
     .unwrap();
     let sync = serde_json::to_value(results::WalletSyncStatusResult {
@@ -786,6 +802,7 @@ fn an_unobservable_count_is_null_not_zero_on_either_network() {
     let dig_unknown = serde_json::to_value(results::PeerCountsResult {
         dig_peer_count: None,
         chia_peer_count: Some(0),
+        known_dig_peer_count: Some(41),
     })
     .unwrap();
     assert_eq!(dig_unknown["dig_peer_count"], json!(null));
@@ -798,6 +815,7 @@ fn an_unobservable_count_is_null_not_zero_on_either_network() {
     let chia_unknown = serde_json::to_value(results::PeerCountsResult {
         dig_peer_count: Some(0),
         chia_peer_count: None,
+        known_dig_peer_count: Some(41),
     })
     .unwrap();
     assert_eq!(chia_unknown["dig_peer_count"], json!(0));
@@ -1239,13 +1257,15 @@ impl ControlHandler for MockNode {
             synced: true,
         })
     }
-    /// Reports two DIFFERENT counts, so a handler that answered one number twice — or a dispatch
+    /// Reports three DIFFERENT counts, so a handler that answered one number twice — or a dispatch
     /// arm wired to the wallet's sync status, whose chia count this deliberately matches — is
-    /// distinguishable from a correct one by the DIG count alone.
+    /// distinguishable from a correct one by the DIG counts alone. The known count is unequal to
+    /// the connected one for the same reason: aliasing the two must be visible here.
     async fn peer_counts(&self) -> Result<results::PeerCountsResult, ControlError> {
         Ok(results::PeerCountsResult {
             dig_peer_count: Some(6),
             chia_peer_count: Some(3),
+            known_dig_peer_count: Some(41),
         })
     }
     /// Reports a phase and a height NEITHER neighbouring wallet read can produce — `syncing` beside
@@ -2693,4 +2713,51 @@ fn a_bounded_rendering_is_bounded_and_marked() {
             );
         }
     }
+}
+/// **An older node's `control.peerCounts` payload still decodes, and its silence stays silence
+/// (dig_ecosystem#2570).**
+///
+/// The known-peer count was added to a shape that shipped without it, so every node predating it
+/// answers with the two-field object below. Two things must hold, and they are different claims:
+/// the payload must DECODE rather than be rejected for a missing field, and the absent count must
+/// arrive as `None`. A `#[serde(default)]`-by-accident implementation that mapped the silence to
+/// `Some(0)` would satisfy the first and fail the second — and would tell a client the old node had
+/// looked at its address book and found it empty, which it never did.
+///
+/// The fixture keeps `dig_peer_count` at a NON-zero value so the two counts cannot be confused by
+/// coincidence: a decoder that defaulted the new field from the old one would land on `Some(6)`,
+/// which this catches for the same reason a `Some(0)` default does.
+#[test]
+fn an_older_nodes_peer_counts_decode_with_the_known_count_unknown_not_zero() {
+    let legacy: results::PeerCountsResult = serde_json::from_value(json!({
+        "dig_peer_count": 6u32, "chia_peer_count": 3u32
+    }))
+    .expect("a payload from a node predating the known-peer count must decode, not be rejected");
+    assert_eq!(legacy.dig_peer_count, Some(6));
+    assert_eq!(legacy.chia_peer_count, Some(3));
+    assert_eq!(
+        legacy.known_dig_peer_count, None,
+        "a node that never reported a known-peer count has an UNKNOWN one; a zero here would \
+         claim it consulted an address book it was never asked about"
+    );
+}
+
+/// **The known count is carried independently of the connected count (dig_ecosystem#2570).**
+///
+/// The whole point of the field is to express the state `dig_peer_count` cannot: knowing of peers
+/// while holding no connection to any of them. This pins the two as separate observations by
+/// decoding the diagnostic vector and asserting each lands in its own field — an implementation
+/// that aliased the two, the nearest wrong one, reports `0` known here.
+#[test]
+fn knowing_of_peers_while_connected_to_none_is_expressible() {
+    let stranded: results::PeerCountsResult = serde_json::from_value(json!({
+        "dig_peer_count": 0u32, "chia_peer_count": 3u32, "known_dig_peer_count": 41u32
+    }))
+    .expect("the diagnostic vector must decode");
+    assert_eq!(stranded.dig_peer_count, Some(0), "connected to nobody");
+    assert_eq!(
+        stranded.known_dig_peer_count,
+        Some(41),
+        "while knowing of 41 — a reachability fault, not a discovery one"
+    );
 }
