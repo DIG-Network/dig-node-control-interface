@@ -391,7 +391,7 @@ opposite remedies — see §4.2.
   loop while meaning the opposite.
 
   **Rendering an unrecognised token.** The token is untrusted node-supplied text and MUST be escaped
-  before it reaches a terminal, a log, or a UI. A node emitting `"[2K\rsynced"` otherwise
+  before it reaches a terminal, a log, or a UI. A node emitting `"\u{1b}[2K\rsynced"` otherwise
   turns a consumer's `unknown phase: <token>` line into one that reads `synced`, because the escape
   sequence erases the prefix; a right-to-left override does the same to a label. A consumer MUST
   bound the rendered length as well: nothing caps the token on the wire, because rejecting an
