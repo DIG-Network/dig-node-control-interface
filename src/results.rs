@@ -989,7 +989,17 @@ pub enum WalletSyncPhase {
     /// # The payload is untrusted text
     ///
     /// It is whatever the node sent. A consumer that displays it MUST escape and bound it like any
-    /// other foreign string rather than splicing it into a message unchecked.
+    /// other foreign string rather than splicing it into a message unchecked. `Debug` escapes it, as
+    /// `String`'s always has; [`as_wire`](Self::as_wire) deliberately does not, because a relay must
+    /// be able to hand on the exact bytes.
+    ///
+    /// # Not the same idea as [`PeerSoftware::Unknown`]
+    ///
+    /// The two look alike and are not. `PeerSoftware::Unknown` is the ABSENCE of a report — the peer
+    /// said nothing, or said something unparseable, and there is no datum to keep. Here the node DID
+    /// report, and the token it used is a real observation this build cannot interpret. That is why
+    /// this variant carries a payload and that one does not, and why the names differ: calling it
+    /// `Unknown` would suggest nothing was said.
     Unrecognized(String),
 }
 
