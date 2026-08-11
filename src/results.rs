@@ -1000,7 +1000,48 @@ pub enum WalletSyncPhase {
     /// report, and the token it used is a real observation this build cannot interpret. That is why
     /// this variant carries a payload and that one does not, and why the names differ: calling it
     /// `Unknown` would suggest nothing was said.
-    Unrecognized(String),
+    Unrecognized(UnknownPhaseToken),
+}
+
+/// A phase token this build does not recognise, held so it cannot be confused with one it does.
+///
+/// # Why the payload is a type and not a bare `String`
+///
+/// [`WalletSyncPhase::Unrecognized`] serializes whatever it holds. With a public `String` inside,
+/// `Unrecognized("synced".to_owned())` was constructible by any consumer, reported
+/// `is_recognized() == false` locally, went onto the wire as the bare token `"synced"`, and arrived
+/// at the far side as a confident [`WalletSyncPhase::Synced`] — a value that claims the wallet is
+/// caught up while calling itself unrecognised. It was also the one value in the type that did not
+/// round-trip, contradicting the verbatim-carriage guarantee the variant exists to provide.
+///
+/// The field is private and this type has no public constructor, so the only way to reach
+/// `Unrecognized` from outside the crate is [`WalletSyncPhase::from`], which is TOTAL: hand it a
+/// known spelling and it returns that known variant instead. The dishonest value is therefore not
+/// merely discouraged — it cannot be built.
+///
+/// This is deliberately a type-level guard rather than a documented rule. The whole family exists
+/// because a wire-level mismatch went unnoticed until someone built a probe, and a rule that only a
+/// doc comment enforces is the same shape of mistake one layer up.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownPhaseToken(String);
+
+impl UnknownPhaseToken {
+    /// The token exactly as the node sent it.
+    ///
+    /// Untrusted, node-supplied text: escape and bound it before rendering. `Debug` escapes it, as
+    /// `String`'s always has; this accessor deliberately does not, because a relay has to be able to
+    /// hand on the exact bytes.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UnknownPhaseToken {
+    /// The raw token, so it composes in a log line. Same untrusted text as
+    /// [`as_str`](Self::as_str) — bound and escape it at the point of display.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl WalletSyncPhase {
@@ -1031,7 +1072,7 @@ impl WalletSyncPhase {
             WalletSyncPhase::Synced => "synced",
             WalletSyncPhase::NoWalletEnrolled => "no_wallet_enrolled",
             WalletSyncPhase::WalletNotUnlocked => "wallet_not_unlocked",
-            WalletSyncPhase::Unrecognized(token) => token,
+            WalletSyncPhase::Unrecognized(token) => token.as_str(),
         }
     }
 
@@ -1041,7 +1082,7 @@ impl WalletSyncPhase {
     /// open-coded, which is how the two spellings drift apart.
     pub fn unrecognized_token(&self) -> Option<&str> {
         match self {
-            WalletSyncPhase::Unrecognized(token) => Some(token),
+            WalletSyncPhase::Unrecognized(token) => Some(token.as_str()),
             _ => None,
         }
     }
@@ -1065,7 +1106,7 @@ impl From<&str> for WalletSyncPhase {
             "synced" => WalletSyncPhase::Synced,
             "no_wallet_enrolled" => WalletSyncPhase::NoWalletEnrolled,
             "wallet_not_unlocked" => WalletSyncPhase::WalletNotUnlocked,
-            other => WalletSyncPhase::Unrecognized(other.to_owned()),
+            other => WalletSyncPhase::Unrecognized(UnknownPhaseToken(other.to_owned())),
         }
     }
 }

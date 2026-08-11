@@ -516,6 +516,20 @@ fn the_wallet_sync_phase_tokens_are_the_snake_case_wire_spellings() {
             phase.is_recognized(),
             "ALL enumerates the KNOWN phases; Unrecognized is the absence of one"
         );
+        assert_eq!(
+            expected_wire(phase),
+            Some(phase.as_wire()),
+            "{phase:?} disagrees with the compiler-checked spelling table"
+        );
+    }
+
+    // DISTINCT, or the length check below is satisfiable by a duplicate standing in for a dropped
+    // variant — the pigeonhole hole in a bare count comparison.
+    for (i, phase) in results::WalletSyncPhase::ALL.iter().enumerate() {
+        assert!(
+            !results::WalletSyncPhase::ALL[..i].contains(phase),
+            "{phase:?} appears twice in ALL"
+        );
     }
     assert_eq!(
         results::WalletSyncPhase::ALL.len(),
@@ -523,6 +537,82 @@ fn the_wallet_sync_phase_tokens_are_the_snake_case_wire_spellings() {
         "every pinned phase must also appear in ALL — the node side derives its conformance \
          assertion from ALL, so a variant missing here disables that check silently"
     );
+}
+
+/// The wire spelling of every phase, as a match the COMPILER checks for exhaustiveness.
+///
+/// This is the guard the two hand-written tables above cannot provide for themselves. `ALL`, the
+/// `pinned` list, and [`results::WalletSyncPhase::as_wire`] are three separate enumerations of the
+/// same set; a sixth variant added to the enum and to `as_wire` but forgotten in the other two would
+/// leave a real wire token unpinned, and every test would stay green while dig-node's derived
+/// conformance assertion silently shrank.
+///
+/// Adding a variant fails to COMPILE here instead. Whoever fixes the compile error must give the new
+/// phase a spelling, and the assertions above then force it into `ALL` and into `pinned` before the
+/// suite can pass again.
+fn expected_wire(phase: &results::WalletSyncPhase) -> Option<&'static str> {
+    match phase {
+        results::WalletSyncPhase::NotStarted => Some("not_started"),
+        results::WalletSyncPhase::Syncing => Some("syncing"),
+        results::WalletSyncPhase::Synced => Some("synced"),
+        results::WalletSyncPhase::NoWalletEnrolled => Some("no_wallet_enrolled"),
+        results::WalletSyncPhase::WalletNotUnlocked => Some("wallet_not_unlocked"),
+        // Not a wire token: it is whatever a newer node said, and has no fixed spelling to pin.
+        results::WalletSyncPhase::Unrecognized(_) => None,
+    }
+}
+
+/// **No phase value can call itself unrecognised while spelling itself as a known token.**
+///
+/// The defect this pins was real and shipped in an earlier revision of this branch: with a public
+/// `String` inside the variant, `Unrecognized("synced".to_owned())` was constructible by any
+/// consumer. It reported `is_recognized() == false` locally, went onto the wire as the bare token
+/// `"synced"`, and arrived at the far side as a confident `Synced` — the money-lie this family exists
+/// to prevent, reintroduced by the very variant meant to prevent it. It was also the one value in
+/// the type that did not round-trip.
+///
+/// [`results::UnknownPhaseToken`] now has a private field and no public constructor, so the only
+/// route to `Unrecognized` from outside is the TOTAL `From<&str>`, which hands back a known variant
+/// for a known spelling. The property below is what that buys, stated as an invariant over every
+/// value the public API can produce: **decoding a phase's own wire spelling always returns that same
+/// phase.**
+#[test]
+fn every_phase_decodes_back_to_itself_from_its_own_wire_spelling() {
+    let unknown_spellings = [
+        "no_addresses_to_watch",
+        "a_newer_token",
+        "",
+        "SYNCED",
+        " synced",
+    ];
+
+    let reachable = results::WalletSyncPhase::ALL
+        .iter()
+        .map(|phase| phase.as_wire().to_owned())
+        .chain(unknown_spellings.iter().map(|s| (*s).to_owned()));
+
+    for spelling in reachable {
+        let phase = results::WalletSyncPhase::from(spelling.as_str());
+
+        assert_eq!(
+            results::WalletSyncPhase::from(phase.as_wire()),
+            phase,
+            "{spelling:?} produced a phase whose own spelling decodes to something else"
+        );
+        assert_eq!(
+            phase.is_recognized(),
+            results::WalletSyncPhase::ALL.contains(&phase),
+            "{spelling:?}: is_recognized() must agree with membership of the known set"
+        );
+        // The decisive one: a value calling itself unrecognised must never spell itself as a phase
+        // the far side will read as progress.
+        if !phase.is_recognized() {
+            assert!(
+                !["synced", "syncing"].contains(&phase.as_wire()),
+                "{spelling:?} is unrecognised locally but claims progress on the wire"
+            );
+        }
+    }
 }
 
 /// **`not_started` and a synced-at-genesis wallet are different values.** The fixture varies ONLY the
@@ -578,6 +668,28 @@ fn the_spec_and_readme_name_every_catalogued_method() {
                 m.name()
             );
         }
+        // The phase tokens are normative wire contract too, and are spelled out by hand in BOTH
+        // documents. A reimplementer reads them as the definitive set, so a token added to the enum
+        // and forgotten in the prose is a real defect, not a tidiness one -- the same reason the
+        // method names above are guarded rather than trusted.
+        for phase in results::WalletSyncPhase::ALL {
+            assert!(
+                text.contains(phase.as_wire()),
+                "{doc} never mentions the `{}` phase token",
+                phase.as_wire()
+            );
+        }
+    }
+
+    // The catalog's own summary string is the third hand-written copy, and the one a machine reads
+    // when it introspects the surface (§6.2 self-describing).
+    let summary = ControlMethod::WalletSyncStatus.summary();
+    for phase in results::WalletSyncPhase::ALL {
+        assert!(
+            summary.contains(phase.as_wire()),
+            "control.wallet.syncStatus's summary omits the `{}` token",
+            phase.as_wire()
+        );
     }
 }
 
@@ -2421,9 +2533,10 @@ fn no_wallet_enrolled_is_distinguishable_from_a_wallet_that_is_not_unlocked() {
         chia_peer_count: Some(2),
         watched_addresses: Some(0),
     };
+    // Inherits `watched_addresses: Some(0)` from the fixture above: the two states genuinely SHARE
+    // the count, and only the phase differs. Setting it again here would weaken the claim.
     let locked = results::WalletSyncStatusResult {
         phase: results::WalletSyncPhase::WalletNotUnlocked,
-        watched_addresses: Some(0),
         ..no_wallet.clone()
     };
 

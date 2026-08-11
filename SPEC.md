@@ -378,6 +378,21 @@ opposite remedies — see §4.2.
   count fields, reading each absence as unreported rather than zero, so a node predating a field
   stays readable.
 
+  A phase value MUST NOT report itself as unrecognised while spelling itself as a known token.
+  Decoding any phase's own wire spelling MUST return that same phase. An implementation that lets a
+  caller attach an arbitrary spelling to its unrecognised representation reintroduces the defect this
+  tolerance exists to remove — a value that calls itself unknown locally and arrives at the far side
+  as `"synced"` — and MUST make that state unconstructible rather than merely discouraged.
+
+  **Emission ordering.** Tolerance protects consumers built against a LATER contract than the node;
+  it cannot protect one built against an EARLIER contract, because the tolerance lives in the
+  consumer. A node MUST NOT emit `"no_wallet_enrolled"` or `"wallet_not_unlocked"` until the
+  consumers it serves are known to be at this contract version or later. dig-node and its clients
+  update independently on a user's machine, so a node that adopts the new tokens ahead of its
+  installed clients reproduces the total-parse-failure this revision fixes, on every one of them.
+  The same rule binds every future token: **the contract may grow a phase at any time; a node may
+  only emit it once its consumer floor has caught up.**
+
   `"synced"` MUST NOT be read as a guarantee that the replica's data is FRESH. A live connection to
   a stalled or lagging peer satisfies the predicate while the replica goes stale; the phase reports
   that catch-up finished and a peer is attached, i.e. that nothing KNOWN is preventing the replica
