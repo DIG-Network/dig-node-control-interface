@@ -384,6 +384,20 @@ opposite remedies — see §4.2.
   tolerance exists to remove — a value that calls itself unknown locally and arrives at the far side
   as `"synced"` — and MUST make that state unconstructible rather than merely discouraged.
 
+  **Which phases may be presented as SETTLED.** Exactly two: `"synced"` and `"no_wallet_enrolled"`.
+  A consumer MUST NOT present `"not_started"`, `"syncing"`, `"wallet_not_unlocked"`, or an
+  unrecognised token as settled, complete, or nothing-to-do. `"wallet_not_unlocked"` is the one that
+  invites the mistake, because it is idle and looks like `"no_wallet_enrolled"` from inside the sync
+  loop while meaning the opposite.
+
+  **Rendering an unrecognised token.** The token is untrusted node-supplied text and MUST be escaped
+  before it reaches a terminal, a log, or a UI. A node emitting `"[2K\rsynced"` otherwise
+  turns a consumer's `unknown phase: <token>` line into one that reads `synced`, because the escape
+  sequence erases the prefix; a right-to-left override does the same to a label. A consumer MUST
+  bound the rendered length as well: nothing caps the token on the wire, because rejecting an
+  over-long one would reintroduce the fail-closed parse. The raw bytes remain available for RELAYING
+  a payload on unchanged, which is the only use that needs them.
+
   **Emission ordering.** Tolerance protects consumers built against a LATER contract than the node;
   it cannot protect one built against an EARLIER contract, because the tolerance lives in the
   consumer. A node MUST NOT emit `"no_wallet_enrolled"` or `"wallet_not_unlocked"` until the
