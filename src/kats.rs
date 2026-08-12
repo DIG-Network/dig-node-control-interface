@@ -362,15 +362,17 @@ fn golden_response_result_vectors_are_byte_stable() {
     // count is what turns "syncing" into either "syncing" or "syncing, connected to nothing".
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "not_started", "peak_height": null, "chia_peer_count": 0u32,
-        "watched_addresses": 0u32
+        "watched_addresses": 0u32, "subscription_peer_count": null, "chia_peer_peak_height": null
     }));
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "syncing", "peak_height": 4_000_000u32, "chia_peer_count": 3u32,
-        "watched_addresses": 12u32
+        "watched_addresses": 12u32, "subscription_peer_count": 1u32,
+        "chia_peer_peak_height": 4_000_200u32
     }));
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "synced", "peak_height": 5_000_000u32, "chia_peer_count": 5u32,
-        "watched_addresses": 12u32
+        "watched_addresses": 12u32, "subscription_peer_count": 1u32,
+        "chia_peer_peak_height": 5_000_000u32
     }));
     // THE RESTART STATE: a height with no sync running. Not a contradiction -- the height is
     // persisted in the wallet DB while the phase describes this PROCESS -- so the contract permits
@@ -378,31 +380,32 @@ fn golden_response_result_vectors_are_byte_stable() {
     // force a restarted node to fabricate a phase or discard a height it genuinely has.
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "not_started", "peak_height": 4_900_000u32, "chia_peer_count": 0u32,
-        "watched_addresses": 12u32
+        "watched_addresses": 12u32, "subscription_peer_count": null, "chia_peer_peak_height": null
     }));
     // A node that cannot observe the peer count at all: `null`, which is NOT `0`. `0` is a measured
     // zero and licenses "syncing -- no peers"; `null` licenses no claim about connectivity.
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "syncing", "peak_height": null, "chia_peer_count": null,
-        "watched_addresses": null
+        "watched_addresses": null, "subscription_peer_count": null, "chia_peer_peak_height": null
     }));
     // THE TWO IDLE STATES, which differ only in the phase token and mean opposite things. Pinned
     // adjacently and with an identical `watched_addresses: 0`, because the count alone cannot tell
     // them apart -- the token is the only thing carrying "and that is fine" versus "and it is not".
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "no_wallet_enrolled", "peak_height": null, "chia_peer_count": 0u32,
-        "watched_addresses": 0u32
+        "watched_addresses": 0u32, "subscription_peer_count": null, "chia_peer_peak_height": null
     }));
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "wallet_not_unlocked", "peak_height": 4_900_000u32, "chia_peer_count": 2u32,
-        "watched_addresses": 0u32
+        "watched_addresses": 0u32, "subscription_peer_count": null, "chia_peer_peak_height": null
     }));
     // A TOKEN FROM A NEWER NODE, round-tripping VERBATIM. This vector is the contract's promise that
     // an unrecognised phase survives a decode-re-encode unchanged: a consumer that relays or logs
     // the payload hands on what the node actually said, rather than a token this build invented.
     assert_result_round_trips::<results::WalletSyncStatusResult>(json!({
         "phase": "a_phase_from_a_newer_node", "peak_height": 5_000_000u32, "chia_peer_count": 3u32,
-        "watched_addresses": 12u32
+        "watched_addresses": 12u32, "subscription_peer_count": 1u32,
+        "chia_peer_peak_height": 5_000_100u32
     }));
     // `control.peerCounts` — the three counts, each named. A node connected to both networks, and
     // knowing of more DIG peers than it holds connections to (the ordinary case).
@@ -638,6 +641,8 @@ fn never_started_is_distinguishable_from_synced_at_height_zero() {
         peak_height: None,
         chia_peer_count: Some(0),
         watched_addresses: Some(0),
+        subscription_peer_count: None,
+        chia_peer_peak_height: None,
     })
     .unwrap();
     let synced_at_genesis = serde_json::to_value(results::WalletSyncStatusResult {
@@ -645,6 +650,8 @@ fn never_started_is_distinguishable_from_synced_at_height_zero() {
         peak_height: Some(0),
         chia_peer_count: Some(1),
         watched_addresses: Some(4),
+        subscription_peer_count: Some(1),
+        chia_peer_peak_height: Some(0),
     })
     .unwrap();
 
@@ -781,6 +788,8 @@ fn both_results_spell_the_chia_count_with_the_same_key() {
         peak_height: Some(4_000_000),
         chia_peer_count: Some(3),
         watched_addresses: Some(4),
+        subscription_peer_count: Some(1),
+        chia_peer_peak_height: Some(4_000_100),
     })
     .unwrap();
 
@@ -1277,6 +1286,8 @@ impl ControlHandler for MockNode {
             peak_height: Some(4_999_000),
             chia_peer_count: Some(3),
             watched_addresses: Some(4),
+            subscription_peer_count: Some(1),
+            chia_peer_peak_height: Some(4_999_200),
         })
     }
     /// Accepts anything except [`REJECTED_BUNDLE`], which it refuses the way a mempool does — as a
@@ -2512,6 +2523,50 @@ fn a_payload_without_watched_addresses_parses_as_unreported() {
     assert_eq!(explicit_null, legacy);
 }
 
+/// **A payload from a node that predates `subscription_peer_count`/`chia_peer_peak_height` still
+/// parses.** dig_ecosystem#2815 in mirror image with #2609/#2806: a node running before either key
+/// existed omits both, and a client built against the newer contract must still read the rest of the
+/// payload rather than fail closed on it.
+///
+/// Both absent fields decode to `None` — *not reported*, never `Some(0)`, since `0` is a real height/
+/// count a conforming node can genuinely observe.
+#[test]
+fn a_payload_without_the_peer_fields_parses_as_unreported() {
+    // The exact shape a pre-#2806 node emits: no `subscription_peer_count`, no
+    // `chia_peer_peak_height`, both keys absent rather than null.
+    let legacy = serde_json::from_value::<results::WalletSyncStatusResult>(json!({
+        "phase": "syncing", "peak_height": 9_132_747u32, "chia_peer_count": 5u32,
+        "watched_addresses": 0u32
+    }))
+    .expect("a node predating these fields must stay readable");
+
+    assert_eq!(
+        legacy.subscription_peer_count, None,
+        "absent means unreported; Some(0) would claim no supervisor is attached, a stronger claim \
+         than the node made"
+    );
+    assert_eq!(
+        legacy.chia_peer_peak_height, None,
+        "absent means unreported; Some(0) would be a real height, not the unobserved state"
+    );
+    assert_eq!(legacy.chia_peer_count, Some(5));
+
+    // The current 0.115.x wire shape, measured live: both new keys present with real values.
+    let current = serde_json::from_value::<results::WalletSyncStatusResult>(json!({
+        "phase": "syncing", "peak_height": 9_132_747u32, "chia_peer_count": 5u32,
+        "subscription_peer_count": 1u32, "chia_peer_peak_height": 9_140_469u32,
+        "watched_addresses": 0u32
+    }))
+    .expect("the current wire shape must parse");
+
+    assert_eq!(current.subscription_peer_count, Some(1));
+    assert_eq!(current.chia_peer_peak_height, Some(9_140_469));
+    assert_ne!(
+        current.chia_peer_count, current.subscription_peer_count,
+        "the two fields are different observations and must not collapse to the same reading"
+    );
+}
+
 /// **`phase` is the one structurally mandatory field; every count decodes absence as unreported.**
 ///
 /// Pins the real serde behaviour rather than an assumed one. `Option` fields have ALWAYS tolerated a
@@ -2562,6 +2617,8 @@ fn no_wallet_enrolled_is_distinguishable_from_a_wallet_that_is_not_unlocked() {
         peak_height: None,
         chia_peer_count: Some(2),
         watched_addresses: Some(0),
+        subscription_peer_count: None,
+        chia_peer_peak_height: None,
     };
     // Inherits `watched_addresses: Some(0)` from the fixture above: the two states genuinely SHARE
     // the count, and only the phase differs. Setting it again here would weaken the claim.

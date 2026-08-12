@@ -108,7 +108,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string, after_coin_id?:string, limit?:u32}` | `WalletCoinsByParentResult` |
 | `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
-| `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced"\|"no_wallet_enrolled"\|"wallet_not_unlocked", peak_height:u32\|null, chia_peer_count:u32\|null, watched_addresses:u32\|null}` |
+| `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced"\|"no_wallet_enrolled"\|"wallet_not_unlocked", peak_height:u32\|null, chia_peer_count:u32\|null, watched_addresses:u32\|null, subscription_peer_count:u32\|null, chia_peer_peak_height:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
@@ -335,7 +335,8 @@ opposite remedies — see §4.2.
   The field is OPTIONAL on the wire. A node predating it omits it, and a consumer MUST decode that
   omission as `null` (UNKNOWN) rather than rejecting the payload or defaulting it to `0`.
 - **`WalletSyncStatusResult`**: `{phase:"not_started"|"syncing"|"synced"|"no_wallet_enrolled"|
-  "wallet_not_unlocked", peak_height:u32|null, chia_peer_count:u32|null, watched_addresses:u32|null}`.
+  "wallet_not_unlocked", peak_height:u32|null, chia_peer_count:u32|null, watched_addresses:u32|null,
+  subscription_peer_count:u32|null, chia_peer_peak_height:u32|null}`.
   Whether the node's WALLET CHAIN replica is being kept current, how far it has got, how many CHIA
   full-node peers its sync is using, and how many addresses it is actually following. This is NOT
   `control.sync.status`, which reports §21 DIG store sync and is unrelated.
@@ -385,6 +386,22 @@ opposite remedies — see §4.2.
   a complete picture, `0` beside `"wallet_not_unlocked"` is a wallet nobody is following. A node MUST
   NOT emit `{phase:"synced", watched_addresses:0}` — a sync following no addresses has caught nothing
   up — and a consumer meeting that pair SHOULD trust the count, which is the narrower claim.
+
+  `subscription_peer_count` counts peers the REPLICA's own subscription supervisor is writing
+  through. The supervisor holds AT MOST ONE such peer by design, so this is a 0-or-1 fact about
+  whether the replica is currently being fed — NEVER a measure of network reach, and it MUST NOT be
+  summed with `chia_peer_count`. Before dig_ecosystem#2806, `chia_peer_count` on this method
+  incorrectly carried this narrower number, so a node with five wallet-sync peers reported
+  `chia_peer_count:1`; the two fields now exist side by side so a conforming node reports both
+  observations distinctly. `null` means no supervisor is attached at all.
+
+  `chia_peer_peak_height` is the peak height this node's OWN Chia peers have ANNOUNCED — distinct
+  from `peak_height` (the replica's own progress) and from any oracle reading. `null` MUST be used
+  until at least one peer has reported a height; a conforming node MUST NOT report `0` as a stand-in
+  for unobserved, since `0` is itself a real height a peer could announce.
+
+  Both fields are OPTIONAL on the wire. A node predating them omits both keys, and a consumer MUST
+  decode that omission as `null` rather than rejecting the payload or defaulting either to `0`.
 
   **An UNKNOWN token MUST NOT fail the response.** A consumer MUST accept any string in `phase` and
   represent one outside the five tokens as an explicit unrecognised value carrying the token

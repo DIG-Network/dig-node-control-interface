@@ -1433,6 +1433,27 @@ pub struct WalletSyncStatusResult {
     /// `None` means the node did not report the number at all — including because it predates the
     /// field. See the type docs for why that distinction is load-bearing.
     pub watched_addresses: Option<u32>,
+    /// How many peers the REPLICA's own subscription supervisor is writing through. The supervisor
+    /// holds AT MOST ONE subscription peer by design, so this is a 0-or-1 fact about whether the
+    /// replica is currently being kept fed — never a measure of network reach. `None` means no
+    /// supervisor is attached at all, not that it counted zero.
+    ///
+    /// This is deliberately NOT [`chia_peer_count`](Self::chia_peer_count) and MUST NOT be summed
+    /// with it. Before dig_ecosystem#2806 this crate's `chia_peer_count` carried this narrower
+    /// number instead of the wallet's true peer count, so a node with five peers serving every read
+    /// reported `chia_peer_count: 1` — the subscription supervisor's single writer standing in for
+    /// the whole peer set. The two fields exist side by side so that confusion cannot recur: one
+    /// counts what the replica is fed BY, the other counts what the wallet's sync is actually
+    /// CONNECTED to.
+    pub subscription_peer_count: Option<u32>,
+    /// The peak height this node's OWN Chia peers have ANNOUNCED — not the replica's own progress
+    /// (see [`peak_height`](Self::peak_height)) and not any oracle's reading. `None` until at least
+    /// one peer has said something; never `0`, which every real block height is trivially above and
+    /// so can never be an honest "unobserved" stand-in.
+    ///
+    /// A value here is evidence those peers are live and talking, independent of whether the
+    /// replica itself has caught up to it.
+    pub chia_peer_peak_height: Option<u32>,
 }
 
 /// `control.wallet.broadcast` — the outcome of pushing an already-signed bundle.
