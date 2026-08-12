@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.14.0] - 2026-08-12
+
+### Features
+- Add subscription_peer_count + chia_peer_peak_height to WalletSyncStatusResult (#14)
+
 ## [0.13.0] - 2026-08-11
 
 ### Features
