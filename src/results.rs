@@ -1480,6 +1480,52 @@ pub struct WalletBroadcastResult {
     pub rejection: Option<String>,
 }
 
+/// `control.wallet.watch` — the outcome of enrolling public keys.
+///
+/// # Two numbers, because idempotence is only observable with both
+///
+/// [`added`](Self::added) counts the keys this call newly enrolled; [`watched`](Self::watched) is the
+/// size of the whole enrolled set afterwards. A re-enrolment of keys the node already follows is a
+/// SUCCESS that reports `added: 0` with `watched` unchanged — which is how a client tells "already
+/// done" from "nothing happened because the request was ignored". A single number could not: a
+/// caller seeing only the total cannot distinguish its own duplicate call from another client's
+/// concurrent enrolment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletWatchResult {
+    /// How many of the submitted keys were NOT already enrolled and are now.
+    pub added: u32,
+    /// How many keys the node follows in total after this call.
+    pub watched: u32,
+}
+
+/// `control.wallet.unwatch` — the outcome of deregistering public keys.
+///
+/// [`removed`](Self::removed) counts the submitted keys that were actually enrolled; a key that was
+/// never enrolled is not an error, for the same reason a re-enrolment is not one — a client
+/// reconciling its own state must be able to say "make sure these are gone" without first asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletUnwatchResult {
+    /// How many of the submitted keys were enrolled and are no longer.
+    pub removed: u32,
+    /// How many keys the node follows in total after this call.
+    pub watched: u32,
+}
+
+/// `control.wallet.watched` — the public keys the node currently follows.
+///
+/// # No count field
+///
+/// The list is the answer, and its length is the count. A separate number could disagree with the
+/// list it is printed beside, and a client that trusted the number over the rows would reconcile
+/// against a set that was never sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletWatchedResult {
+    /// The enrolled public keys, lowercase 96-hex and unprefixed — the same wire form
+    /// [`WalletWatchParams`](crate::params::WalletWatchParams) accepts, so a client can compare what
+    /// it sent against what came back without normalizing either side.
+    pub public_keys: Vec<String>,
+}
+
 /// `pairing.request` — the pairing handshake bootstrap (OPEN, no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequestResult {

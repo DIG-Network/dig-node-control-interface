@@ -155,6 +155,12 @@ pub enum ControlMethod {
     WalletSyncStatus,
     /// `control.wallet.broadcast` — push an ALREADY-SIGNED spend bundle to the network.
     WalletBroadcast,
+    /// `control.wallet.watch` — enrol PUBLIC keys for the node's chain replica to follow.
+    WalletWatch,
+    /// `control.wallet.unwatch` — deregister enrolled public keys, so the following stops.
+    WalletUnwatch,
+    /// `control.wallet.watched` — list the public keys currently enrolled.
+    WalletWatched,
 
     // ---- Pairing bootstrap (OPEN — no token) ----
     /// `pairing.request` — request a control-token pairing (returns a code to compare).
@@ -204,6 +210,9 @@ impl ControlMethod {
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
+            ControlMethod::WalletWatch => "control.wallet.watch",
+            ControlMethod::WalletUnwatch => "control.wallet.unwatch",
+            ControlMethod::WalletWatched => "control.wallet.watched",
             ControlMethod::PairingRequest => "pairing.request",
             ControlMethod::PairingPoll => "pairing.poll",
         }
@@ -324,7 +333,10 @@ impl ControlMethod {
             | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
-            | ControlMethod::WalletBroadcast => Routing::Delegated,
+            | ControlMethod::WalletBroadcast
+            | ControlMethod::WalletWatch
+            | ControlMethod::WalletUnwatch
+            | ControlMethod::WalletWatched => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
             _ => Routing::Owned,
         }
@@ -369,7 +381,10 @@ impl ControlMethod {
             | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
-            | ControlMethod::WalletBroadcast => Category::Wallet,
+            | ControlMethod::WalletBroadcast
+            | ControlMethod::WalletWatch
+            | ControlMethod::WalletUnwatch
+            | ControlMethod::WalletWatched => Category::Wallet,
         }
     }
 
@@ -413,6 +428,9 @@ impl ControlMethod {
             ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced/no_wallet_enrolled/wallet_not_unlocked), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
+            ControlMethod::WalletWatch => "Enrol PUBLIC keys (48-byte G1, lowercase 96-hex) for the node's chain replica to follow, so their addresses are synced and readable. IDEMPOTENT: re-enrolling a key already enrolled succeeds and changes nothing. Keys, never puzzle hashes -- the node derives the addresses itself, so one derivation serves every client. TOKEN-GATED.",
+            ControlMethod::WalletUnwatch => "Deregister enrolled public keys, so the node stops following their addresses. IDEMPOTENT: a key that was never enrolled is not an error. TOKEN-GATED.",
+            ControlMethod::WalletWatched => "READ-only: the public keys currently enrolled, so a client can reconcile what it asked for against what the node holds. TOKEN-GATED although it is a read -- the caller supplies nothing, so the answer is this node's OWN key set.",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
         }
@@ -458,6 +476,9 @@ impl ControlMethod {
         ControlMethod::WalletPeak,
         ControlMethod::WalletSyncStatus,
         ControlMethod::WalletBroadcast,
+        ControlMethod::WalletWatch,
+        ControlMethod::WalletUnwatch,
+        ControlMethod::WalletWatched,
         ControlMethod::PairingRequest,
         ControlMethod::PairingPoll,
     ];
@@ -519,12 +540,16 @@ mod tests {
         assert_eq!(actual_open, expected_open);
     }
 
-    /// **The push and the arrival cursor are the two token-gated wallet methods.** The fixture
-    /// varies one thing -- which wallet method is asked -- against a category whose other members
-    /// ARE open, so both nearest wrong implementations fail here: one that opens the whole category
-    /// (the state this crate shipped in at `1190a18`) and one that gates it wholesale.
+    /// **The gated wallet methods are the push, the arrival cursor, and the three enrolment
+    /// methods.** The fixture varies one thing -- which wallet method is asked -- against a category
+    /// whose other members ARE open, so both nearest wrong implementations fail here: one that opens
+    /// the whole category (the state this crate shipped in at `1190a18`) and one that gates it
+    /// wholesale.
+    ///
+    /// Written out in catalog order rather than derived, so a method joining the gated side is a
+    /// deliberate edit here -- the review step a broadcast, or an enrolment, must never slip past.
     #[test]
-    fn the_push_and_the_arrival_cursor_are_the_wallet_methods_behind_the_token() {
+    fn the_gated_wallet_methods_are_the_push_the_cursor_and_enrolment() {
         let gated: Vec<&str> = ControlMethod::ALL
             .iter()
             .filter(|m| m.category() == Category::Wallet && m.requires_auth())
@@ -532,7 +557,13 @@ mod tests {
             .collect();
         assert_eq!(
             gated,
-            vec!["control.wallet.arrivals", "control.wallet.broadcast"]
+            vec![
+                "control.wallet.arrivals",
+                "control.wallet.broadcast",
+                "control.wallet.watch",
+                "control.wallet.unwatch",
+                "control.wallet.watched",
+            ]
         );
         assert!(!ControlMethod::WalletBroadcast.is_open_read());
     }
@@ -625,6 +656,44 @@ mod tests {
         assert!(ControlMethod::WalletBroadcast.requires_auth());
     }
 
+    /// **All three enrolment methods are gated — including the one that only reads.**
+    ///
+    /// `control.wallet.watch` and `.unwatch` aim what the node follows, so they are mutations and the
+    /// question barely arises. `control.wallet.watched` is the one a future reader will be tempted to
+    /// open, because it returns nothing but public keys and every other wallet READ in this catalog is
+    /// open. It stays gated under the SAME rule that gates `control.wallet.arrivals`: the caller
+    /// supplies nothing, so the node volunteers its OWN enrolled keys — the node-to-key association,
+    /// which is not public, and which a token-less caller could replay straight into the
+    /// caller-addressed reads.
+    ///
+    /// The control keeps `control.wallet.coinById` open in the same assertion. Without it this test
+    /// would also pass on a wholesale gating of the wallet category, which is a different (and wrong)
+    /// implementation.
+    #[test]
+    fn the_enrolment_methods_are_gated_including_the_read() {
+        for wire in [
+            "control.wallet.watch",
+            "control.wallet.unwatch",
+            "control.wallet.watched",
+        ] {
+            let method = ControlMethod::from_name(wire)
+                .unwrap_or_else(|| panic!("{wire} must be in the catalog"));
+            assert!(
+                !method.is_open_read(),
+                "{wire} either aims this node's subscriptions or names the keys it already \
+                 follows, so it MUST NOT be served token-less"
+            );
+            assert!(method.requires_auth(), "{wire} must require the token");
+            assert_eq!(method.category(), Category::Wallet);
+            assert_eq!(method.routing(), Routing::Delegated);
+        }
+        assert!(
+            ControlMethod::WalletCoinById.is_open_read(),
+            "the caller-addressed reads stay open -- enrolment is gated by the membership rule, \
+             not by gating the wallet category"
+        );
+    }
+
     #[test]
     fn only_pairing_bootstrap_is_open_bootstrap_routed() {
         for &m in ControlMethod::ALL {
@@ -674,6 +743,9 @@ mod tests {
             "control.wallet.peak",
             "control.wallet.syncStatus",
             "control.wallet.broadcast",
+            "control.wallet.watch",
+            "control.wallet.unwatch",
+            "control.wallet.watched",
             "control.peerStatus",
             "control.peerCounts",
             "control.peers.connect",

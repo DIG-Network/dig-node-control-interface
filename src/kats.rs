@@ -884,6 +884,24 @@ fn error_envelope_golden_vector() {
     );
 }
 
+/// Two well-formed enrolment keys (48-byte G1, lowercase 96-hex), and one that is malformed by
+/// being a coin id's length rather than a key's — the nearest wrong spelling a caller reaches for
+/// when it enrols puzzle hashes instead of keys, which is the exact confusion this method's key
+/// form exists to prevent.
+const ENROL_KEY_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+const ENROL_KEY_B: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
+/// The enrolment registry [`MockNode`] serves from.
+///
+/// THREAD-LOCAL rather than global: `cargo test` runs each test on its own thread, so every test
+/// sees an empty registry and one test's enrolment can never make another's idempotence assertion
+/// pass for the wrong reason. `MockNode` is a unit struct that every KAT constructs by name, so
+/// per-instance state is not available to it.
+thread_local! {
+    static ENROLLED: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
 /// A mock node that serves canned typed results — exercises the [`ControlHandler`] dispatcher for
 /// every method group without a running node.
 struct MockNode;
@@ -1309,6 +1327,47 @@ impl ControlHandler for MockNode {
             rejection: None,
         })
     }
+    /// A real (if tiny) set-backed registry, because idempotence is the property the KATs assert and
+    /// a handler that always reports `added: 1` would satisfy a shape-only mock.
+    async fn wallet_watch(
+        &self,
+        params: WalletWatchParams,
+    ) -> Result<results::WalletWatchResult, ControlError> {
+        Ok(ENROLLED.with(|set| {
+            let mut set = set.borrow_mut();
+            let added = params
+                .public_keys
+                .into_iter()
+                .filter(|key| set.insert(key.clone()))
+                .count() as u32;
+            results::WalletWatchResult {
+                added,
+                watched: set.len() as u32,
+            }
+        }))
+    }
+    async fn wallet_unwatch(
+        &self,
+        params: WalletUnwatchParams,
+    ) -> Result<results::WalletUnwatchResult, ControlError> {
+        Ok(ENROLLED.with(|set| {
+            let mut set = set.borrow_mut();
+            let removed = params
+                .public_keys
+                .iter()
+                .filter(|key| set.remove(*key))
+                .count() as u32;
+            results::WalletUnwatchResult {
+                removed,
+                watched: set.len() as u32,
+            }
+        }))
+    }
+    async fn wallet_watched(&self) -> Result<results::WalletWatchedResult, ControlError> {
+        Ok(ENROLLED.with(|set| results::WalletWatchedResult {
+            public_keys: set.borrow().iter().cloned().collect(),
+        }))
+    }
     async fn pairing_request(
         &self,
         _params: RequestParams,
@@ -1572,6 +1631,9 @@ fn minimal_params(m: ControlMethod) -> Value {
         }
         ControlMethod::WalletCoinsByParent => json!({ "parent_coin_id": ABSENT_COIN }),
         ControlMethod::WalletBroadcast => json!({"signed_bundle_hex": "deadbeef"}),
+        ControlMethod::WalletWatch | ControlMethod::WalletUnwatch => {
+            json!({ "public_keys": [ENROL_KEY_A] })
+        }
         _ => json!({}),
     }
 }
@@ -2816,5 +2878,126 @@ fn knowing_of_peers_while_connected_to_none_is_expressible() {
         stranded.known_dig_peer_count,
         Some(41),
         "while knowing of 41 — a reachability fault, not a discovery one"
+    );
+}
+
+/// **Enrolment is idempotent, and the second call is distinguishable from the first.**
+///
+/// The fixture varies ONE key across three calls against a registry that already holds two, so the
+/// two nearest wrong implementations both fail: one that reports `added` as the SUBMITTED count
+/// (the re-enrolment would report 1) and one that reports 0 whenever the set is non-empty (the
+/// genuinely new key would report 0). `watched` is asserted alongside each, because `added` alone
+/// cannot show that a duplicate left the set the same size.
+#[test]
+fn re_enrolling_a_key_succeeds_and_changes_nothing() {
+    let first = round_trip(&WalletWatchParams {
+        public_keys: vec![ENROL_KEY_A.into(), ENROL_KEY_B.into()],
+    })
+    .expect("watch must route");
+    assert_eq!((first.added, first.watched), (2, 2));
+
+    let again = round_trip(&WalletWatchParams {
+        public_keys: vec![ENROL_KEY_A.into()],
+    })
+    .expect("re-enrolment is a success, never an error");
+    assert_eq!(
+        (again.added, again.watched),
+        (0, 2),
+        "an already-enrolled key adds nothing and leaves the set the same size"
+    );
+
+    let novel = round_trip(&WalletWatchParams {
+        public_keys: vec!["c3".repeat(48)],
+    })
+    .expect("watch must route");
+    assert_eq!(
+        (novel.added, novel.watched),
+        (1, 3),
+        "the control: a genuinely new key still enrols, so `added: 0` above is idempotence and \
+         not a handler that never adds"
+    );
+}
+
+/// **A `0x` prefix is normalized AT THE BOUNDARY, not merely tolerated.**
+///
+/// Enrolling the prefixed spelling and then the bare one must report `added: 0` the second time. A
+/// node that accepted both spellings without normalizing would follow the same key twice under two
+/// names, and a client unwatching the bare spelling would leave the prefixed one enrolled forever.
+#[test]
+fn the_prefixed_and_bare_spellings_are_the_same_key() {
+    let prefixed = round_trip(&WalletWatchParams {
+        public_keys: vec![format!("0x{ENROL_KEY_A}")],
+    })
+    .expect("a 0x-prefixed key is accepted");
+    assert_eq!((prefixed.added, prefixed.watched), (1, 1));
+
+    let bare = round_trip(&WalletWatchParams {
+        public_keys: vec![ENROL_KEY_A.into()],
+    })
+    .expect("watch must route");
+    assert_eq!(
+        (bare.added, bare.watched),
+        (0, 1),
+        "the prefix is stripped before the key is stored, so the two spellings are one key"
+    );
+}
+
+/// **One malformed key refuses the WHOLE request — the well-formed keys beside it are NOT enrolled.**
+///
+/// The fixture pairs a valid key with a malformed one, because asserting only the error code cannot
+/// tell a whole-request refusal from a handler that enrolled the good key and then complained. The
+/// follow-up `watched` read is what distinguishes them: after the refusal the registry must still be
+/// empty. A partial enrolment is the dangerous outcome — the client believes it asked for two
+/// addresses, the node follows one, and the next balance read reports the shortfall as absent money.
+#[test]
+fn a_single_malformed_key_refuses_the_whole_enrolment() {
+    let node = MockNode;
+    let req = JsonRpcRequest::new(
+        RequestId::Number(1),
+        ControlMethod::WalletWatch.name(),
+        // 64-hex: the length of a coin id or a puzzle hash, which is the wrong-unit mistake this
+        // method's key form exists to prevent.
+        json!({ "public_keys": [ENROL_KEY_A, SPENT_COIN] }),
+    );
+    let err = block_on(node.dispatch(req)).into_result().unwrap_err();
+    assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+
+    assert!(
+        round_trip(&WalletWatchedParams {})
+            .expect("watched must route")
+            .public_keys
+            .is_empty(),
+        "the valid key submitted beside the malformed one must NOT have been enrolled"
+    );
+}
+
+/// **Unwatch removes exactly the named keys, and `watched` reflects it.**
+///
+/// The unknown key in the same request is the control for idempotence, and the surviving key is the
+/// control against a handler that clears the whole set — an implementation that would otherwise pass
+/// an assertion on `removed` alone.
+#[test]
+fn unwatch_removes_only_what_it_names() {
+    round_trip(&WalletWatchParams {
+        public_keys: vec![ENROL_KEY_A.into(), ENROL_KEY_B.into()],
+    })
+    .expect("watch must route");
+
+    let removed = round_trip(&WalletUnwatchParams {
+        public_keys: vec![ENROL_KEY_A.into(), "d4".repeat(48)],
+    })
+    .expect("unwatching a key that was never enrolled is a success");
+    assert_eq!(
+        (removed.removed, removed.watched),
+        (1, 1),
+        "one of the two named keys was enrolled; the never-enrolled one is not an error"
+    );
+
+    assert_eq!(
+        round_trip(&WalletWatchedParams {})
+            .expect("watched must route")
+            .public_keys,
+        vec![ENROL_KEY_B.to_owned()],
+        "the key that was not named survives -- unwatch is not a clear"
     );
 }
