@@ -110,6 +110,9 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced"\|"no_wallet_enrolled"\|"wallet_not_unlocked", peak_height:u32\|null, chia_peer_count:u32\|null, watched_addresses:u32\|null, subscription_peer_count:u32\|null, chia_peer_peak_height:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
+| `control.wallet.watch` | yes | delegated | `{public_keys:[string]}` (each lowercase 96-hex, `0x` accepted) | `{added:u32, watched:u32}` |
+| `control.wallet.unwatch` | yes | delegated | `{public_keys:[string]}` | `{removed:u32, watched:u32}` |
+| `control.wallet.watched` | yes | delegated | — | `{public_keys:[string]}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
@@ -120,8 +123,12 @@ are served WITHOUT a control token, because each needs only public chain data �
 id, never a seed, a key, or a signature. `control.peerCounts` is open for a second reason: it
 discloses three integers about this node's own connectivity and no address, endpoint or secret. The
 `Token` column above is authoritative; the open set is deliberately named here rather than counted,
-so that adding a method cannot leave a stale number behind. Two wallet methods are token-gated.
-`control.wallet.broadcast` puts bytes on the network. `control.wallet.arrivals` takes only a cursor,
+so that adding a method cannot leave a stale number behind. Five wallet methods are token-gated.
+`control.wallet.broadcast` puts bytes on the network. `control.wallet.watch` / `.unwatch` aim what
+this node follows, so they are mutations. `control.wallet.watched` and `control.wallet.arrivals` are
+reads and are gated all the same, because each takes nothing from the caller and so answers with this
+node's OWN state — the enrolled keys, or the watched puzzle hashes and the receive history behind
+them. `control.wallet.arrivals` takes only a cursor,
 so its answer names this node's OWN watched puzzle hashes and the receive history behind them: the
 chain facts are public, the association between this node and those addresses is not. Membership of
 the open set turns on WHO NAMES THE ADDRESS, not on whether the data is on chain. That difference is normative for clients, because the two refusals demand
@@ -584,16 +591,46 @@ A client MUST branch on which method it called:
   `.coinById` / `.coinSpend` / `.coinsByParent` / `.peak` / `.syncStatus` and `control.peerCounts` — `-32030 UNAUTHORIZED` can only
   come from a node build that predates the method and gates the whole `control.*` namespace. The
   truth is "this node cannot do that yet" and the remedy is an UPGRADE.
-- On `control.wallet.broadcast`, `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is
+- On a GATED method — `control.wallet.broadcast`, `.arrivals`, `.watch`, `.unwatch`, `.watched` — `-32030 UNAUTHORIZED` means exactly what it says, and the remedy is
   the CONTROL TOKEN.
 
 A client that maps both to the same outcome sends a person to fix the wrong thing. `-32601
 METHOD_NOT_FOUND` always means the method is absent, on either.
 
+### 4.2a Wallet enrolment (`control.wallet.watch` / `.unwatch` / `.watched`)
+
+Enrolment is how an authorized local client tells the node WHICH addresses to follow, so that a
+wallet whose keys live outside the node can still be synced and read.
+
+- The unit of enrolment is a **BLS G1 PUBLIC KEY**, 48 bytes, on the wire as lowercase 96-hex,
+  unprefixed; a `0x` prefix MUST be accepted on input and MUST NOT be emitted. A node MUST derive the
+  addresses from an enrolled key using the SAME derivation it applies to keys in its own custody, so
+  that exactly one key→address mapping exists in the ecosystem. Enrolling puzzle hashes instead would
+  require every client to re-derive independently, and a client with a narrower derivation window
+  would under-report the funds it owns.
+- No private key material is ever carried: a public key is public, and enrolment confers no ability
+  to sign. §4.3 is unaffected.
+- `control.wallet.watch` MUST be IDEMPOTENT. Re-enrolling an enrolled key is a SUCCESS reporting
+  `added: 0`; duplicates within one request count once. `control.wallet.unwatch` mirrors it: a key
+  that was never enrolled reports `removed: 0` and is not an error.
+- A node MUST refuse the WHOLE request as `-32602 INVALID_PARAMS` when ANY submitted key is
+  malformed, never the well-formed subset — a partial enrolment leaves the node following fewer
+  addresses than the client believes it asked for, and the client's next balance read would report
+  the shortfall as though the money were absent.
+- The enrolled set MUST PERSIST across node restarts, and `unwatch` MUST actually stop the following
+  — the addresses leave the replica's watched set, not merely the list the node reports.
+- `control.wallet.watched` MUST return exactly the keys enrolment added, in the wire form they were
+  accepted in, and MUST NOT include the node's own custody keys: a caller reconciling against a
+  superset would unwatch keys it never watched.
+- **Privacy.** Enrolling makes this node query its peers for those addresses, so its peers can
+  associate them with this machine. That is already true of the node's own custody keys; it becomes
+  true of the enrolling client's keys too, and a client SHOULD say so where a person can see it.
+
 ### 4.3 The custody boundary (§908)
 
 The node holds no user key and produces no signature. `control.wallet.broadcast` carries signed bytes
-and nothing else: there is no key, seed, phrase, or unsigned-spend-plus-key parameter in this catalog,
+and nothing else. `control.wallet.watch` carries PUBLIC keys, which confer no ability to sign. There
+is no private key, seed, phrase, or unsigned-spend-plus-key parameter in this catalog,
 and none may be added. The node's role on the money path is to read chain state and to push what
 somebody else signed.
 

@@ -303,6 +303,45 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletBroadcastParams,
     ) -> Result<results::WalletBroadcastResult, ControlError>;
+    /// `control.wallet.watch` (TOKEN-GATED)
+    ///
+    /// Enrols PUBLIC keys for the node's chain replica to follow. The implementation MUST derive the
+    /// addresses itself, from the SAME derivation it applies to the keys already in its own custody
+    /// — a second derivation is a second opinion about which addresses a key covers, and the client
+    /// would read the difference as missing money.
+    ///
+    /// It MUST be IDEMPOTENT: keys already enrolled are reported as `added: 0` and the call
+    /// succeeds. It MUST persist the enrolment across restarts — a set that evaporates on restart
+    /// makes a node that syncs today and reports a zero balance tomorrow.
+    ///
+    /// The params are validated at DESERIALIZATION (lowercase 96-hex, `0x` stripped), so any path
+    /// that decodes `WalletWatchParams` refuses a malformed key as `INVALID_PARAMS` — for the WHOLE
+    /// request — before this method is called.
+    async fn wallet_watch(
+        &self,
+        params: params::WalletWatchParams,
+    ) -> Result<results::WalletWatchResult, ControlError>;
+    /// `control.wallet.unwatch` (TOKEN-GATED)
+    ///
+    /// Deregisters keys, and the following MUST actually stop: the addresses leave the replica's
+    /// watched set, not merely the list this node reports. A registry that keeps syncing what it
+    /// says it forgot is the failure this method exists to make impossible.
+    ///
+    /// Deregistering a key that was never enrolled is a success reporting `removed: 0`.
+    async fn wallet_unwatch(
+        &self,
+        params: params::WalletUnwatchParams,
+    ) -> Result<results::WalletUnwatchResult, ControlError>;
+    /// `control.wallet.watched` (READ-only, TOKEN-GATED)
+    ///
+    /// Gated although it is a read: the caller supplies nothing, so the answer names this node's OWN
+    /// enrolled keys.
+    ///
+    /// MUST return exactly the keys enrolment added, in the wire form they were accepted in, so a
+    /// client can compare its own set against the node's by value. MUST NOT include the node's own
+    /// custody keys: this method reports what was ENROLLED through it, and a caller reconciling
+    /// against a superset would unwatch keys it never watched.
+    async fn wallet_watched(&self) -> Result<results::WalletWatchedResult, ControlError>;
     /// `pairing.request` (OPEN)
     async fn pairing_request(
         &self,
@@ -411,6 +450,17 @@ pub trait ControlHandler: Sync {
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
             ControlMethod::WalletSyncStatus => encode(self.wallet_sync_status().await?),
             ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),
+            // Re-validated here idempotently; deserialization already enforced the same rule.
+            ControlMethod::WalletWatch => {
+                let params: params::WalletWatchParams = decode(params)?;
+                encode(self.wallet_watch(params.validated()?).await?)
+            }
+            // Re-validated here idempotently; deserialization already enforced the same rule.
+            ControlMethod::WalletUnwatch => {
+                let params: params::WalletUnwatchParams = decode(params)?;
+                encode(self.wallet_unwatch(params.validated()?).await?)
+            }
+            ControlMethod::WalletWatched => encode(self.wallet_watched().await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),
             ControlMethod::PairingPoll => encode(self.pairing_poll(decode(params)?).await?),
         }

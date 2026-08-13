@@ -637,6 +637,140 @@ pub struct WalletBroadcastParams {
 }
 control_call!(WalletBroadcastParams => ControlMethod::WalletBroadcast, results::WalletBroadcastResult);
 
+/// The length of a BLS G1 public key in lowercase hex characters: 48 bytes.
+const PUBLIC_KEY_HEX_LEN: usize = 96;
+
+/// `control.wallet.watch` params: which PUBLIC keys the node should follow.
+///
+/// # Keys, never puzzle hashes
+///
+/// The node already derives addresses from the public keys it holds in its own custody, through one
+/// standard derivation. Enrolling KEYS reuses that exact derivation for a client's keys too, so the
+/// ecosystem has ONE mapping from key to address and a client and a node can never disagree about
+/// which addresses a key covers. Enrolling puzzle hashes instead would make every client re-derive
+/// independently, and a client whose derivation window is narrower than the node's would silently
+/// under-report the money it owns.
+///
+/// # No key material crosses (§908)
+///
+/// A G1 public key is public. There is deliberately no seed, phrase, private key or signature field
+/// here, and there never may be: enrolment tells the node what to WATCH, and watching needs nothing
+/// a signature could be produced from.
+///
+/// # Idempotent, so a client can reconcile without asking first
+///
+/// Submitting keys the node already follows is a SUCCESS that changes nothing — see
+/// [`WalletWatchResult`](results::WalletWatchResult). Duplicates WITHIN one request count once. An
+/// empty list is accepted and does nothing, because "enrol everything in this (currently empty) set"
+/// is a reconciliation a client legitimately performs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalletWatchParams {
+    /// The public keys to enrol: lowercase 96-hex, unprefixed. A `0x` prefix is TOLERATED on input
+    /// and normalized away by [`Self::validated`]; it is never emitted.
+    pub public_keys: Vec<String>,
+}
+control_call!(WalletWatchParams => ControlMethod::WalletWatch, results::WalletWatchResult);
+
+/// `control.wallet.unwatch` params: which PUBLIC keys the node should stop following.
+///
+/// Takes the same wire form as [`WalletWatchParams`] under the same field name, so a client
+/// reverses an enrolment by re-sending exactly what it sent. Deregistering a key that was never
+/// enrolled is a success, not an error — the mirror of enrolment's idempotence, and what lets a
+/// client assert an end state rather than compute a diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalletUnwatchParams {
+    /// The public keys to deregister: lowercase 96-hex, unprefixed. A `0x` prefix is TOLERATED on
+    /// input and normalized away by [`Self::validated`]; it is never emitted.
+    pub public_keys: Vec<String>,
+}
+control_call!(WalletUnwatchParams => ControlMethod::WalletUnwatch, results::WalletUnwatchResult);
+
+/// `control.wallet.watched` params — none.
+///
+/// The enrolled set is a property of the node, so there is nothing to scope the question by. This
+/// is why the method is TOKEN-GATED although it only reads: the caller supplies nothing, so the
+/// answer is the node's OWN key set — see [`ControlMethod::is_open_read`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletWatchedParams {}
+control_call!(WalletWatchedParams => ControlMethod::WalletWatched, results::WalletWatchedResult);
+
+fn normalize_public_key(public_key: &str) -> Option<&str> {
+    let normalized = public_key.strip_prefix("0x").unwrap_or(public_key);
+    let well_formed = normalized.len() == PUBLIC_KEY_HEX_LEN
+        && normalized
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    well_formed.then_some(normalized)
+}
+
+/// Give an enrolment params type its validating `Deserialize` and its `validated` constructor.
+///
+/// `watch` and `unwatch` carry the IDENTICAL key list under the identical field name, and must
+/// enforce the identical rule: a client reverses an enrolment by re-sending what it sent, so a
+/// spelling one method accepts and the other refuses would leave a key enrolled forever. Written
+/// once so the two cannot drift apart.
+macro_rules! public_keys_params {
+    ($ty:ident, $raw:ident, $error:expr) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                struct $raw {
+                    public_keys: Vec<String>,
+                }
+
+                let raw = $raw::deserialize(deserializer)?;
+                let public_keys = raw
+                    .public_keys
+                    .iter()
+                    .map(|key| {
+                        normalize_public_key(key)
+                            .map(str::to_owned)
+                            .ok_or_else(|| serde::de::Error::custom($error))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Self { public_keys })
+            }
+        }
+
+        impl $ty {
+            /// Normalize and check every key, or reject the request as `-32602 INVALID_PARAMS`.
+            ///
+            /// The whole request is refused when ANY key is malformed — never the well-formed
+            /// subset. A partial enrolment would leave the node following fewer addresses than the
+            /// client believes it asked for, and the client's next balance read would report a
+            /// shortfall as though the money were not there. One bad key is a malformed REQUEST.
+            ///
+            /// Accepts exactly two spellings per key — 96 lowercase hex characters, or the same 96
+            /// preceded by `0x`. Uppercase, whitespace and every other length are refused, because
+            /// the contract's hex wire form is lowercase and unprefixed everywhere else.
+            pub fn validated(self) -> Result<Self, crate::error::ControlError> {
+                let public_keys = self
+                    .public_keys
+                    .iter()
+                    .map(|key| {
+                        normalize_public_key(key).map(str::to_owned).ok_or_else(|| {
+                            crate::error::ControlError::of(
+                                crate::error::ControlErrorCode::InvalidParams,
+                                $error,
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Self { public_keys })
+            }
+        }
+    };
+}
+
+const PUBLIC_KEYS_ERROR: &str =
+    "public_keys must each be lowercase 96-hex (a 48-byte G1 key), optionally 0x-prefixed";
+
+public_keys_params!(WalletWatchParams, RawWalletWatch, PUBLIC_KEYS_ERROR);
+public_keys_params!(WalletUnwatchParams, RawWalletUnwatch, PUBLIC_KEYS_ERROR);
+
 /// `pairing.request` params (OPEN — no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestParams {

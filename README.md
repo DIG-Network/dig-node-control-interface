@@ -48,7 +48,7 @@ address or a coin id, never a key), and `control.peerCounts` (three integers abo
 connectivity). The three `control.pairing.*` admin methods require the MASTER token specifically.
 
 `UNAUTHORIZED` from an OPEN method means the node predates it — upgrade the node. From
-`control.wallet.broadcast` it means what it says — find the token. See `SPEC.md` §4.2.
+a GATED method (`control.wallet.broadcast` / `.arrivals` / `.watch` / `.unwatch` / `.watched`) it means what it says — find the token. See `SPEC.md` §4.2.
 
 ## Full interface reference
 
@@ -135,6 +135,9 @@ and pushes bytes somebody else signed.
 | `control.wallet.peak` | — | del | — | `{peak_height:u32\|null, synced:bool}`; `synced` = catch-up COMPLETED, weaker than `syncStatus`'s |
 | `control.wallet.syncStatus` | — | del | — | `{phase:"not_started"\|"syncing"\|"synced"\|"no_wallet_enrolled"\|"wallet_not_unlocked", peak_height:u32\|null, chia_peer_count:u32\|null, watched_addresses:u32\|null, subscription_peer_count:u32\|null, chia_peer_peak_height:u32\|null}`; `synced` also requires a LIVE Chia peer. `no_wallet_enrolled` = nothing to watch and that is correct; `wallet_not_unlocked` = a wallet EXISTS and nothing is watching it — NEVER render it as settled. `subscription_peer_count` is the replica's 0-or-1 supervisor-fed peer, NOT `chia_peer_count` and MUST NOT be summed with it; `chia_peer_peak_height` is the height this node's own Chia peers announced, distinct from `peak_height`. Both are optional, absent on older nodes. An UNKNOWN token parses to `Unrecognized(token)`, never an error |
 | `control.wallet.broadcast` | T | del | `{signed_bundle_hex:string}` | `{accepted, transaction_id, rejection}`; `accepted` = mempool admission, NOT confirmation |
+| `control.wallet.watch` | T | del | `{public_keys:[string]}` (each a 48-byte G1 key, lowercase 96-hex, `0x` accepted; ANY malformed key refuses the WHOLE request) | `{added:u32, watched:u32}`; enrol PUBLIC keys for the node to follow. IDEMPOTENT — re-enrolling reports `added:0` and succeeds. Keys, never puzzle hashes: the node derives the addresses with the same derivation it uses for its own custody, so there is ONE mapping. Persisted across restarts |
+| `control.wallet.unwatch` | T | del | `{public_keys:[string]}` | `{removed:u32, watched:u32}`; the following actually STOPS. A key that was never enrolled reports `removed:0` and is not an error |
+| `control.wallet.watched` | T | del | — | `{public_keys:[string]}`; the enrolled keys only, never the node's own custody keys. TOKEN-GATED although it is a read — the caller supplies nothing, so the answer is this node's OWN key set |
 
 ### Subscriptions (delegated to the engine)
 
