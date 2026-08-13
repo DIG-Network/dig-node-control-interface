@@ -232,8 +232,8 @@ impl ControlMethod {
     ///
     /// - the pairing bootstrap (`pairing.request` / `pairing.poll`), so a token-less client can
     ///   obtain a token at all;
-    /// - the PEER COUNTS (`control.peerCounts`), which disclose two integers about this node's own
-    ///   connectivity and no address, endpoint or secret;
+    /// - the PEER COUNTS (`control.peerCounts`), which disclose three integers about this node's
+    ///   own connectivity and no address, endpoint or secret;
     /// - the wallet CALLER-ADDRESSED CHAIN READS (`control.wallet.balance` / `.coins` /
     ///   `.coinById` / `.coinSpend` / `.coinsByParent`) and the node's own chain POSITION
     ///   (`.peak` / `.syncStatus`), because each needs only PUBLIC chain data the CALLER already
@@ -270,7 +270,7 @@ impl ControlMethod {
     ///   supplies the address or coin id, so the node relays a public fact and discloses no
     ///   association with itself; the last two name the node's own chain position and no address
     ///   at all;
-    /// - `control.peerCounts`, which is NOT a chain read: it discloses two integers about this
+    /// - `control.peerCounts`, which is NOT a chain read: it discloses three integers about this
     ///   node's own connectivity, and no address, endpoint, peer identity or secret. The identity
     ///   and topology half of the same subject stays gated behind `control.peerStatus`.
     ///
