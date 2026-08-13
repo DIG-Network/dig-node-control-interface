@@ -241,11 +241,17 @@ impl ControlMethod {
     ///   served `control.wallet.balance` open since #1851. A person whose node runs as a service
     ///   with an unreadable token file can still see their own money.
     ///
-    /// Two wallet methods are deliberately NOT in that second group.
-    /// `control.wallet.broadcast` puts bytes on the network, so the token is what stands between a
-    /// local process and a broadcast. `control.wallet.arrivals` names the wallet's OWN watched
-    /// puzzle hashes back to a caller that supplied nothing — see
-    /// [`ControlMethod::is_open_read`]. On both, `UNAUTHORIZED` genuinely means *unauthorized*.
+    /// Five wallet methods are deliberately NOT in that second group:
+    ///
+    /// - `control.wallet.broadcast` puts bytes on the network, so the token is what stands between
+    ///   a local process and a broadcast — a mutation on the chain state itself;
+    /// - `control.wallet.watch` and `.unwatch` aim what this node follows, so they are mutations
+    ///   of this node's own watched-key set;
+    /// - `control.wallet.arrivals` and `.watched` take nothing from the caller and answer back
+    ///   with this node's OWN state — watched puzzle hashes and enrolled public keys respectively.
+    ///
+    /// See [`ControlMethod::is_open_read`]. On all five, `UNAUTHORIZED` genuinely means
+    /// *unauthorized*.
     pub const fn requires_auth(self) -> bool {
         !self.is_open_read()
             && !matches!(
