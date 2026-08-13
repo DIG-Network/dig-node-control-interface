@@ -891,12 +891,12 @@ fn error_envelope_golden_vector() {
 const ENROL_KEY_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const ENROL_KEY_B: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
 
-/// The enrolment registry [`MockNode`] serves from.
-///
-/// THREAD-LOCAL rather than global: `cargo test` runs each test on its own thread, so every test
-/// sees an empty registry and one test's enrolment can never make another's idempotence assertion
-/// pass for the wrong reason. `MockNode` is a unit struct that every KAT constructs by name, so
-/// per-instance state is not available to it.
+// The enrolment registry `MockNode` serves from.
+//
+// THREAD-LOCAL rather than global: `cargo test` runs each test on its own thread, so every test
+// sees an empty registry and one test's enrolment can never make another's idempotence assertion
+// pass for the wrong reason. `MockNode` is a unit struct that every KAT constructs by name, so
+// per-instance state is not available to it.
 thread_local! {
     static ENROLLED: std::cell::RefCell<std::collections::BTreeSet<String>> =
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
