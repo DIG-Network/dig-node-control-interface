@@ -98,7 +98,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null, known_dig_peer_count:u32\|null}` |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
-| `control.subscribe` | yes | delegated | `{store_id:string}` | `{subscribed, added, store_id}` |
+| `control.subscribe` | yes | delegated | `{store_id:string, kind?:"capsule"\|"profile"}` | `{subscribed, added, store_id, kind}` |
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
 | `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
@@ -113,6 +113,8 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.watch` | yes | delegated | `{public_keys:[string]}` (each lowercase 96-hex, `0x` accepted) | `{added:u32, watched:u32}` |
 | `control.wallet.unwatch` | yes | delegated | `{public_keys:[string]}` | `{removed:u32, watched:u32}` |
 | `control.wallet.watched` | yes | delegated | — | `{public_keys:[string]}` |
+| `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
+| `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
@@ -626,10 +628,51 @@ wallet whose keys live outside the node can still be synced and read.
   associate them with this machine. That is already true of the node's own custody keys; it becomes
   true of the enrolling client's keys too, and a client SHOULD say so where a person can see it.
 
+### 4.2b dig-profile bodies (`control.profile.putBody` / `.getBody`)
+
+A dig-profile is a chain-anchored ROOT plus the body that root commits to. The root is written on
+chain by whoever holds the key — never by the node (§4.3). These two methods move only the BODY.
+
+- **`control.profile.putBody` is a trust boundary the node MUST NOT skip.** On every call the node
+  MUST independently resolve the profile's root on chain, recompute the root of the supplied body,
+  and REFUSE the call unless the two agree and that root is CONFIRMED. The caller's `root` is a
+  claim to be checked, never a fact to be trusted.
+- **dig-app receives no exemption.** It signs and pushes the root, but the bytes it then hands over
+  reach the node exactly as a peer's bytes do, and the same rule binds both: a body is checked
+  against the on-chain root and anything that does not match is rejected. A node that stores what it
+  is handed can be made to serve arbitrary bytes to the network under another party's profile id.
+- **Refusal is an ERROR, never a success.** A rejected body MUST NOT return `Ok` with `stored:
+  false`; reaching a successful result asserts both that the root was confirmed and that the body is
+  persisted and servable.
+- **Bodies are bounded at `MAX_BODY_BYTES` = 4 MiB, on the DECODED bytes.** A larger body MUST be
+  refused as `-32602 INVALID_PARAMS` before it is persisted. The bound is half of dig-gossip's
+  `WS_MAX_MESSAGE_BYTES` (8 MiB), the frame ceiling the body must fit inside when this node serves
+  it to a peer over `PROFILE_BODY` (opcode 225); a body accepted here but unservable there would be
+  stored and permanently unsyncable. The contract states the cap so a client can check before it
+  sends rather than discovering it as a failed round trip.
+- **`control.profile.getBody` answers at the root it was ASKED for.** A node MUST NOT substitute a
+  newer body it holds. `body_b64: null` MUST mean "this node was consulted and holds no body at that
+  root"; a read that FAILED MUST return a catalogued error instead.
+
+### 4.2c Subscription `kind` is read tolerantly
+
+`control.subscribe` takes an OPTIONAL `kind` of `"capsule"` or `"profile"`. A `profile` subscription
+additionally follows the profile ROOT and syncs its body from peers.
+
+- **An ABSENT `kind` MUST mean `"capsule"`,** on the wire and on disk. Every subscription written
+  before the field existed is untagged, and a node MUST keep reading those rows: a node that refuses
+  its own pre-existing `subscriptions.json` starts with an empty one, and the upgrade silently
+  unsubscribes the user from everything they had.
+- The same tolerance binds the RESULT: a client MUST parse a `control.subscribe` acknowledgement
+  from a node build that predates the field, treating the absent `kind` as `"capsule"`.
+- An UNRECOGNISED `kind` token is `-32602 INVALID_PARAMS`; absence is not.
+
 ### 4.3 The custody boundary (§908)
 
 The node holds no user key and produces no signature. `control.wallet.broadcast` carries signed bytes
 and nothing else. `control.wallet.watch` carries PUBLIC keys, which confer no ability to sign. There
+`control.profile.putBody` carries body bytes whose root somebody else already signed and confirmed on
+chain. There
 is no private key, seed, phrase, or unsigned-spend-plus-key parameter in this catalog,
 and none may be added. The node's role on the money path is to read chain state and to push what
 somebody else signed.

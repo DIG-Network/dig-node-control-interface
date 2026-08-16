@@ -186,11 +186,37 @@ pub struct PeersDisconnectParams {
 }
 control_call!(PeersDisconnectParams => ControlMethod::PeersDisconnect, results::PeersDisconnectResult);
 
+/// WHAT a subscription follows: ordinary content, or a dig-profile.
+///
+/// Serializes to a lowercase, language-neutral wire token (`"capsule"` / `"profile"`).
+///
+/// # Absent means [`Capsule`](SubscriptionKind::Capsule), and that is a contract, not a convenience
+///
+/// Every subscription written before this field existed is untagged, and a node's
+/// `subscriptions.json` on a real machine is FULL of them. A required `kind` would make those rows
+/// fail to deserialize, and a node that cannot read its own subscription file starts with an empty
+/// one — an upgrade that silently unsubscribes a user from everything they had. So the field is
+/// `#[serde(default)]` everywhere it appears, and the default is the meaning those untagged rows
+/// already had: a capsule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriptionKind {
+    /// Ordinary store content — the meaning every untagged subscription already carries.
+    #[default]
+    Capsule,
+    /// A dig-profile: the node additionally follows the profile ROOT and syncs its body from peers.
+    Profile,
+}
+
 /// `control.subscribe` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeParams {
     /// The store id to subscribe to.
     pub store_id: String,
+    /// What the subscription follows. OMITTED means [`SubscriptionKind::Capsule`], so an older
+    /// client's request and an untagged on-disk row both keep their existing meaning.
+    #[serde(default)]
+    pub kind: SubscriptionKind,
 }
 control_call!(SubscribeParams => ControlMethod::Subscribe, results::SubscribeResult);
 
@@ -786,6 +812,71 @@ pub struct PollParams {
     pub pairing_id: String,
 }
 control_call!(PollParams => ControlMethod::PairingPoll, results::PairingPollResult);
+
+/// The largest dig-profile body the control plane accepts or returns, in bytes: **4 MiB**.
+///
+/// # Why the contract carries the cap instead of the implementation
+///
+/// A client that learns the bound by exceeding it learns it as a failed round trip, after paying to
+/// serialize and send megabytes. Stated here, an app checks before it sends and can tell a person
+/// *this profile is too large* rather than *something went wrong*.
+///
+/// # Why this number
+///
+/// It is HALF of dig-gossip's `WS_MAX_MESSAGE_BYTES` (8 MiB), the frame ceiling a body must fit
+/// inside when a node serves it to a peer over `PROFILE_BODY` (opcode 225). A body accepted here
+/// but unservable there would be stored and then permanently unsyncable — accepted by the node the
+/// app talks to and invisible to every other node. The halving leaves room for the framing,
+/// envelope and base64 expansion that sit around the bytes on that hop.
+///
+/// The cap is on the DECODED body, not on the base64 text that carries it.
+pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+/// `control.profile.putBody` params: the profile body a confirmed chain root commits to.
+///
+/// # The node CHECKS the root; it does not take the caller's word for it
+///
+/// `root` is a CLAIM, and the node's obligation is to refuse it when it is false. An implementation
+/// MUST independently resolve the profile's root on chain, recompute the root of the supplied body,
+/// and reject the call unless the two agree and that root is CONFIRMED. dig-app is a caller like
+/// any other here: it holds the key and signs the root (§908), but the bytes it then hands over
+/// arrive at the node exactly as a peer's bytes do, and the standing rule for this epic is that a
+/// body is checked against the on-chain root and anything that does not match is rejected.
+///
+/// A method documented as *the caller supplies a matching root* invites an implementation that
+/// stores what it is given. That implementation turns the control plane into a way to make a node
+/// serve arbitrary bytes to the network under someone else's profile id.
+///
+/// # No key material crosses (§908)
+///
+/// There is deliberately no seed, private key, signature or unsigned spend field here, and there
+/// never may be. The node persists, serves and fetches bodies; it never signs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfilePutBodyParams {
+    /// The profile's store id: lowercase 64-hex, unprefixed.
+    pub store_id: String,
+    /// The root the body is claimed to hash to: lowercase 64-hex, unprefixed. Checked against the
+    /// chain, never trusted.
+    pub root: String,
+    /// The body itself, standard base64 (padded) of its `DPB` serialization. The DECODED length
+    /// MUST NOT exceed [`MAX_BODY_BYTES`]; a larger body is refused as `INVALID_PARAMS`.
+    pub body_b64: String,
+}
+control_call!(ProfilePutBodyParams => ControlMethod::ProfilePutBody, results::ProfilePutBodyResult);
+
+/// `control.profile.getBody` params: WHICH profile body to read, named by store id + root.
+///
+/// The root is part of the question rather than part of the answer: a caller asks for the body at a
+/// root it already knows, so it can never be handed a body for a DIFFERENT root and mistake it for
+/// the one it asked about. A node holding no body at that root answers `body_b64: null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileGetBodyParams {
+    /// The profile's store id: lowercase 64-hex, unprefixed.
+    pub store_id: String,
+    /// The root to read the body at: lowercase 64-hex, unprefixed.
+    pub root: String,
+}
+control_call!(ProfileGetBodyParams => ControlMethod::ProfileGetBody, results::ProfileGetBodyResult);
 
 #[cfg(test)]
 mod tests {

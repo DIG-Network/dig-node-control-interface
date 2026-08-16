@@ -54,6 +54,10 @@ pub enum Category {
     /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak,
     /// sync status) plus the push of an already-signed spend bundle.
     Wallet,
+    /// dig-profile BODIES: handing the node the bytes a confirmed on-chain root commits to, and
+    /// reading one back. The chain root itself is never written here -- dig-app signs and pushes
+    /// that (§908); this category moves only the bytes an already-confirmed root commits to.
+    Profile,
 }
 
 /// A dig-node CONTROL method.
@@ -162,6 +166,12 @@ pub enum ControlMethod {
     /// `control.wallet.watched` — list the public keys currently enrolled.
     WalletWatched,
 
+    // ---- dig-profile bodies (delegated to the engine) ----
+    /// `control.profile.putBody` — hand the node the profile body a CONFIRMED chain root commits to.
+    ProfilePutBody,
+    /// `control.profile.getBody` — read back the profile body this node holds at a given root.
+    ProfileGetBody,
+
     // ---- Pairing bootstrap (OPEN — no token) ----
     /// `pairing.request` — request a control-token pairing (returns a code to compare).
     PairingRequest,
@@ -213,6 +223,8 @@ impl ControlMethod {
             ControlMethod::WalletWatch => "control.wallet.watch",
             ControlMethod::WalletUnwatch => "control.wallet.unwatch",
             ControlMethod::WalletWatched => "control.wallet.watched",
+            ControlMethod::ProfilePutBody => "control.profile.putBody",
+            ControlMethod::ProfileGetBody => "control.profile.getBody",
             ControlMethod::PairingRequest => "pairing.request",
             ControlMethod::PairingPoll => "pairing.poll",
         }
@@ -342,7 +354,9 @@ impl ControlMethod {
             | ControlMethod::WalletBroadcast
             | ControlMethod::WalletWatch
             | ControlMethod::WalletUnwatch
-            | ControlMethod::WalletWatched => Routing::Delegated,
+            | ControlMethod::WalletWatched
+            | ControlMethod::ProfilePutBody
+            | ControlMethod::ProfileGetBody => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
             _ => Routing::Owned,
         }
@@ -391,6 +405,7 @@ impl ControlMethod {
             | ControlMethod::WalletWatch
             | ControlMethod::WalletUnwatch
             | ControlMethod::WalletWatched => Category::Wallet,
+            ControlMethod::ProfilePutBody | ControlMethod::ProfileGetBody => Category::Profile,
         }
     }
 
@@ -436,6 +451,8 @@ impl ControlMethod {
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
             ControlMethod::WalletWatch => "Enrol PUBLIC keys (48-byte G1, lowercase 96-hex) for the node's chain replica to follow, so their addresses are synced and readable. IDEMPOTENT: re-enrolling a key already enrolled succeeds and changes nothing. Keys, never puzzle hashes -- the node derives the addresses itself, so one derivation serves every client. TOKEN-GATED.",
             ControlMethod::WalletUnwatch => "Deregister enrolled public keys, so the node stops following their addresses. IDEMPOTENT: a key that was never enrolled is not an error. TOKEN-GATED.",
+            ControlMethod::ProfilePutBody => "Hand the node the dig-profile BODY that a chain root commits to. The node INDEPENDENTLY resolves that root on chain and REFUSES any body whose recomputed root is not the confirmed one -- the caller's `root` is a claim to be checked, never a fact to be trusted, and dig-app is a caller like any other. Bodies are capped at MAX_BODY_BYTES (4 MiB). TOKEN-GATED.",
+            ControlMethod::ProfileGetBody => "READ-only: the dig-profile body this node holds at a given store id + root, or `body: null` when it holds none. `null` NEVER means the body could not be read, which is an error. TOKEN-GATED.",
             ControlMethod::WalletWatched => "READ-only: the public keys currently enrolled, so a client can reconcile what it asked for against what the node holds. TOKEN-GATED although it is a read -- the caller supplies nothing, so the answer is this node's OWN key set.",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
@@ -485,6 +502,8 @@ impl ControlMethod {
         ControlMethod::WalletWatch,
         ControlMethod::WalletUnwatch,
         ControlMethod::WalletWatched,
+        ControlMethod::ProfilePutBody,
+        ControlMethod::ProfileGetBody,
         ControlMethod::PairingRequest,
         ControlMethod::PairingPoll,
     ];
@@ -752,6 +771,8 @@ mod tests {
             "control.wallet.watch",
             "control.wallet.unwatch",
             "control.wallet.watched",
+            "control.profile.putBody",
+            "control.profile.getBody",
             "control.peerStatus",
             "control.peerCounts",
             "control.peers.connect",

@@ -139,8 +139,9 @@ fn golden_request_vectors() {
     assert_request(
         &SubscribeParams {
             store_id: STORE.into(),
+            kind: SubscriptionKind::Capsule,
         },
-        json!({"jsonrpc":"2.0","id":1,"method":"control.subscribe","params":{"store_id":STORE}}),
+        json!({"jsonrpc":"2.0","id":1,"method":"control.subscribe","params":{"store_id":STORE,"kind":"capsule"}}),
     );
     assert_request(
         &RequestParams {
@@ -247,7 +248,7 @@ fn golden_response_result_vectors_are_byte_stable() {
         "size_bytes": 2048, "served_root": ROOT
     }));
     assert_result_round_trips::<results::SubscribeResult>(json!({
-        "subscribed": true, "added": true, "store_id": STORE
+        "subscribed": true, "added": true, "store_id": STORE, "kind": "profile"
     }));
     assert_result_round_trips::<results::ListSubscriptionsResult>(json!({
         "subscriptions": [STORE], "count": 1
@@ -1105,6 +1106,7 @@ impl ControlHandler for MockNode {
             subscribed: true,
             added: true,
             store_id: params.store_id,
+            kind: params.kind,
         })
     }
     async fn unsubscribe(
@@ -1368,6 +1370,28 @@ impl ControlHandler for MockNode {
             public_keys: set.borrow().iter().cloned().collect(),
         }))
     }
+    async fn profile_put_body(
+        &self,
+        params: ProfilePutBodyParams,
+    ) -> Result<results::ProfilePutBodyResult, ControlError> {
+        Ok(results::ProfilePutBodyResult {
+            stored: true,
+            store_id: params.store_id,
+            root: params.root,
+            body_bytes: params.body_b64.len() as u64,
+        })
+    }
+    async fn profile_get_body(
+        &self,
+        params: ProfileGetBodyParams,
+    ) -> Result<results::ProfileGetBodyResult, ControlError> {
+        Ok(results::ProfileGetBodyResult {
+            store_id: params.store_id,
+            root: params.root,
+            body_b64: None,
+            body_bytes: 0,
+        })
+    }
     async fn pairing_request(
         &self,
         _params: RequestParams,
@@ -1424,9 +1448,11 @@ fn dispatcher_routes_every_taking_params_method_to_its_typed_handler() {
     assert_eq!(sync.root, ROOT);
     let sub = round_trip(&SubscribeParams {
         store_id: STORE.into(),
+        kind: SubscriptionKind::Profile,
     })
     .unwrap();
     assert!(sub.added);
+    assert_eq!(sub.kind, SubscriptionKind::Profile);
     let conn = round_trip(&PeersConnectParams { peer: "p".into() }).unwrap();
     assert_eq!(conn.peer_id, "p");
     assert_eq!(
@@ -1634,6 +1660,10 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::WalletWatch | ControlMethod::WalletUnwatch => {
             json!({ "public_keys": [ENROL_KEY_A] })
         }
+        ControlMethod::ProfilePutBody => {
+            json!({ "store_id": STORE, "root": ROOT, "body_b64": "" })
+        }
+        ControlMethod::ProfileGetBody => json!({ "store_id": STORE, "root": ROOT }),
         _ => json!({}),
     }
 }
@@ -3000,4 +3030,89 @@ fn unwatch_removes_only_what_it_names() {
         vec![ENROL_KEY_B.to_owned()],
         "the key that was not named survives -- unwatch is not a clear"
     );
+}
+
+/// **An `subscriptions.json` written before `kind` existed still reads, and still means capsule.**
+///
+/// The fixture is the untagged row a real machine already has on disk. The nearest wrong
+/// implementation — a REQUIRED `kind` — fails to decode it, and a node that cannot read its own
+/// subscription file starts with an empty one, so the upgrade silently unsubscribes the user.
+///
+/// The explicit `"profile"` case is the control. Without it this test would also pass on an
+/// implementation that ignored the wire and always answered `Capsule`, which is a different (and
+/// equally wrong) tolerance.
+#[test]
+fn an_untagged_subscription_decodes_as_a_capsule_and_a_tagged_one_is_honoured() {
+    let legacy: SubscribeParams =
+        serde_json::from_value(json!({ "store_id": STORE })).expect("an untagged row must decode");
+    assert_eq!(legacy.kind, SubscriptionKind::Capsule);
+
+    let tagged: SubscribeParams =
+        serde_json::from_value(json!({ "store_id": STORE, "kind": "profile" }))
+            .expect("a tagged row must decode");
+    assert_eq!(tagged.kind, SubscriptionKind::Profile);
+}
+
+/// **A node build that predates `kind` still returns a parseable acknowledgement.**
+///
+/// The same tolerance, in the other direction: an app on the new contract talking to a node that
+/// has not been updated yet. Without `#[serde(default)]` on the result the whole response fails to
+/// parse and a subscription that SUCCEEDED is reported to the user as an error.
+#[test]
+fn a_subscribe_result_from_an_older_node_decodes_as_a_capsule() {
+    let old: results::SubscribeResult =
+        serde_json::from_value(json!({ "subscribed": true, "added": true, "store_id": STORE }))
+            .expect("an older node's acknowledgement must decode");
+    assert_eq!(old.kind, SubscriptionKind::Capsule);
+
+    let new: results::SubscribeResult = serde_json::from_value(
+        json!({ "subscribed": true, "added": true, "store_id": STORE, "kind": "profile" }),
+    )
+    .expect("a tagged acknowledgement must decode");
+    assert_eq!(new.kind, SubscriptionKind::Profile);
+}
+
+/// **The body cap is 4 MiB, and it is half of dig-gossip's frame ceiling by construction.**
+///
+/// Pinned from BOTH sides on purpose. The absolute value alone would survive dig-gossip's ceiling
+/// moving; the ratio alone would survive both numbers drifting together. A body accepted here but
+/// too large for a `PROFILE_BODY` (opcode 225) frame is stored and then permanently unsyncable —
+/// present on the node the app talks to and invisible to every other node.
+#[test]
+fn the_body_cap_is_four_mib_and_half_the_gossip_frame_ceiling() {
+    /// dig-gossip's `WS_MAX_MESSAGE_BYTES`, written literally so a drift on either side is visible.
+    const WS_MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
+    assert_eq!(MAX_BODY_BYTES, 4 * 1024 * 1024);
+    assert_eq!(MAX_BODY_BYTES, WS_MAX_MESSAGE_BYTES / 2);
+}
+
+/// **Each profile method reaches its OWN handler over the real dispatcher.**
+///
+/// Keyed to what only that handler can produce: the put echoes back the exact root it was handed
+/// with a byte count derived from the body it received, while the read answers `body_b64: None` at
+/// a DIFFERENT root. An arm wired to the neighbouring method fails here rather than passing on a
+/// shape the two happen to share.
+#[test]
+fn the_dispatcher_routes_each_profile_method_to_its_own_handler() {
+    let put = round_trip(&ProfilePutBodyParams {
+        store_id: STORE.into(),
+        root: ROOT.into(),
+        body_b64: "QUJD".into(),
+    })
+    .expect("putBody must route");
+    assert!(put.stored);
+    assert_eq!(put.root, ROOT);
+    assert_eq!(put.body_bytes, 4, "the body itself must reach the handler");
+
+    let got = round_trip(&ProfileGetBodyParams {
+        store_id: STORE.into(),
+        root: ABSENT_COIN.into(),
+    })
+    .expect("getBody must route");
+    assert_eq!(
+        got.root, ABSENT_COIN,
+        "a read answers at the root it was ASKED for, never a newer one the node happens to hold"
+    );
+    assert_eq!(got.body_b64, None);
 }
