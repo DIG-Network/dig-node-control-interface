@@ -521,6 +521,11 @@ pub struct SubscribeResult {
     pub added: bool,
     /// The canonical persisted store id (trimmed + lower-cased).
     pub store_id: String,
+    /// What the node recorded the subscription as following. OMITTED means
+    /// [`SubscriptionKind::Capsule`](crate::params::SubscriptionKind::Capsule), so a node build
+    /// that predates the field still parses here rather than failing the whole response.
+    #[serde(default)]
+    pub kind: crate::params::SubscriptionKind,
 }
 
 /// `control.unsubscribe` — the unsubscription acknowledgement.
@@ -1597,6 +1602,45 @@ pub struct WalletArrivalsResult {
     /// first-run client passes it back as `after_seq` to start from NOW instead of replaying the
     /// whole ledger as a burst of toasts.
     pub latest: u64,
+}
+
+/// `control.profile.putBody` — the acknowledgement that the node accepted and persisted a body.
+///
+/// Reaching this result at all means the node RESOLVED the root on chain and found it confirmed and
+/// matching the supplied bytes. A refusal is an error, never a success carrying `stored: false` —
+/// a caller that has to inspect a boolean to learn whether its profile published is a caller that
+/// will forget to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfilePutBodyResult {
+    /// Always `true`: the body is persisted and this node will serve it to peers.
+    pub stored: bool,
+    /// The canonical store id the body was filed under (trimmed + lower-cased).
+    pub store_id: String,
+    /// The CONFIRMED chain root the node verified the body against — echoed so a caller can pin
+    /// which root its bytes now stand behind.
+    pub root: String,
+    /// The DECODED body length in bytes, never above
+    /// [`MAX_BODY_BYTES`](crate::params::MAX_BODY_BYTES).
+    pub body_bytes: u64,
+}
+
+/// `control.profile.getBody` — the body this node holds at a store id + root, if it holds one.
+///
+/// `body_b64: None` MUST mean "this node was consulted and holds no body at that root". It NEVER
+/// means the body could not be read: a read that failed MUST return a catalogued error instead. A
+/// caller that cannot tell those apart shows an empty profile for a profile that exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileGetBodyResult {
+    /// The canonical store id the read was scoped to.
+    pub store_id: String,
+    /// The root the read was scoped to — the SAME root the caller asked for, so a body for another
+    /// root can never arrive here unnoticed.
+    pub root: String,
+    /// The body, standard base64 (padded) of its `DPB` serialization; `None` when this node holds
+    /// no body at that root.
+    pub body_b64: Option<String>,
+    /// The DECODED body length in bytes; `0` when no body is held.
+    pub body_bytes: u64,
 }
 
 #[cfg(test)]

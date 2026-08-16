@@ -181,6 +181,12 @@ pub trait ControlHandler: Sync {
         params: params::PeersDisconnectParams,
     ) -> Result<results::PeersDisconnectResult, ControlError>;
     /// `control.subscribe`
+    ///
+    /// `params.kind` is OPTIONAL on the wire and absent means
+    /// [`SubscriptionKind::Capsule`](params::SubscriptionKind::Capsule). An implementation MUST
+    /// persist untagged rows it already holds as capsules rather than discarding them: a node that
+    /// refuses to read its own pre-existing `subscriptions.json` starts with an empty one, and the
+    /// upgrade silently unsubscribes the user from everything.
     async fn subscribe(
         &self,
         params: params::SubscribeParams,
@@ -342,6 +348,38 @@ pub trait ControlHandler: Sync {
     /// custody keys: this method reports what was ENROLLED through it, and a caller reconciling
     /// against a superset would unwatch keys it never watched.
     async fn wallet_watched(&self) -> Result<results::WalletWatchedResult, ControlError>;
+    /// `control.profile.putBody` (TOKEN-GATED)
+    ///
+    /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
+    /// of the supplied body, and REFUSE the call unless the two agree and that root is confirmed.
+    /// The caller's `root` is a claim to be checked — never a fact to be trusted — and dig-app gets
+    /// no exemption: it holds the key and signs the root (§908), but the bytes reach the node the
+    /// same way a peer's bytes do, and the same check binds both. An implementation that stores
+    /// what it is handed makes this node serve arbitrary bytes under someone else's profile id.
+    ///
+    /// A body whose DECODED length exceeds [`MAX_BODY_BYTES`](params::MAX_BODY_BYTES) (4 MiB) MUST
+    /// be refused as `INVALID_PARAMS`, before it is persisted: a body larger than that cannot be
+    /// served to a peer inside dig-gossip's frame ceiling, so accepting it would store something
+    /// permanently unsyncable.
+    ///
+    /// Returning `Ok` therefore asserts BOTH that the root was confirmed on chain and that the body
+    /// is persisted and servable. A refusal is an error, never an `Ok` carrying `stored: false`.
+    async fn profile_put_body(
+        &self,
+        params: params::ProfilePutBodyParams,
+    ) -> Result<results::ProfilePutBodyResult, ControlError>;
+    /// `control.profile.getBody` (READ-only, TOKEN-GATED)
+    ///
+    /// `Ok(body_b64: None)` MUST mean "this node was consulted and holds no body at that root". A
+    /// read that FAILED MUST return a catalogued error instead — a caller that reads a failure as
+    /// absence renders an existing profile as an empty one.
+    ///
+    /// The returned `root` MUST be the root the caller asked for; a node MUST NOT substitute a
+    /// newer body it happens to hold.
+    async fn profile_get_body(
+        &self,
+        params: params::ProfileGetBodyParams,
+    ) -> Result<results::ProfileGetBodyResult, ControlError>;
     /// `pairing.request` (OPEN)
     async fn pairing_request(
         &self,
@@ -461,6 +499,8 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_unwatch(params.validated()?).await?)
             }
             ControlMethod::WalletWatched => encode(self.wallet_watched().await?),
+            ControlMethod::ProfilePutBody => encode(self.profile_put_body(decode(params)?).await?),
+            ControlMethod::ProfileGetBody => encode(self.profile_get_body(decode(params)?).await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),
             ControlMethod::PairingPoll => encode(self.pairing_poll(decode(params)?).await?),
         }
