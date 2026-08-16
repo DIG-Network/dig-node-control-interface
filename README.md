@@ -139,11 +139,18 @@ and pushes bytes somebody else signed.
 | `control.wallet.unwatch` | T | del | `{public_keys:[string]}` | `{removed:u32, watched:u32}`; the following actually STOPS. A key that was never enrolled reports `removed:0` and is not an error |
 | `control.wallet.watched` | T | del | — | `{public_keys:[string]}`; the enrolled keys only, never the node's own custody keys. TOKEN-GATED although it is a read — the caller supplies nothing, so the answer is this node's OWN key set |
 
+### dig-profile bodies (delegated to the engine)
+
+| Method | Auth | Route | Params | Result |
+|---|---|---|---|---|
+| `control.profile.putBody` | T | del | `{store_id:string, root:string, body_b64:string}` | `{stored:true, store_id, root, body_bytes}`; the node INDEPENDENTLY resolves `root` on chain and REFUSES any body whose recomputed root is not the confirmed one — `root` is a claim to be checked, never a fact to be trusted, and dig-app is a caller like any other. Decoded bodies above `MAX_BODY_BYTES` (4 MiB) are refused as `INVALID_PARAMS` |
+| `control.profile.getBody` | T | del | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}`; `body_b64:null` means this node holds no body at that root and NEVER that the body could not be read, which is an error. The answer is at the root that was ASKED for, never a newer one |
+
 ### Subscriptions (delegated to the engine)
 
 | Method | Auth | Route | Params | Result |
 |---|---|---|---|---|
-| `control.subscribe` | T | del | `{store_id:string}` | `{subscribed:true, added:bool, store_id}` |
+| `control.subscribe` | T | del | `{store_id:string, kind?:"capsule"\|"profile"}` | `{subscribed:true, added:bool, store_id, kind}`; `kind` is OPTIONAL on the wire and ABSENT means `capsule` — the meaning every untagged row in an existing `subscriptions.json` already carries |
 | `control.unsubscribe` | T | del | `{store_id:string}` | `{subscribed:false, removed:bool, store_id}` |
 | `control.listSubscriptions` | T | del | — | `{subscriptions:[string], count}` |
 
