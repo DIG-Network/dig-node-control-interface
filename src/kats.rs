@@ -163,6 +163,23 @@ fn golden_request_vectors() {
         },
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coins","params":{"address":"xch1exampleaddr","asset":"xch"}}),
     );
+    // The two vectors above are the ORIGINAL frozen bytes and stay untouched: $DIG and XCH keep
+    // their bare legacy tokens, so a node built before asset ids were nameable still reads them.
+    // The widening is what follows -- an ADDED case, never an edited one (CLAUDE.md §5.1).
+    assert_request(
+        &WalletBalanceParams {
+            address: "xch1exampleaddr".into(),
+            asset: Asset::Cat(AssetId::from_hex(&"3c".repeat(32)).unwrap()),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.balance","params":{"address":"xch1exampleaddr","asset":{"cat":"3c".repeat(32)}}}),
+    );
+    assert_request(
+        &WalletCoinsParams {
+            address: "xch1exampleaddr".into(),
+            asset: Asset::Cat(AssetId::from_hex(&"3c".repeat(32)).unwrap()),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coins","params":{"address":"xch1exampleaddr","asset":{"cat":"3c".repeat(32)}}}),
+    );
     assert_request(
         &WalletCoinByIdParams {
             coin_id: "ab".repeat(32),

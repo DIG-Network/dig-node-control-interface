@@ -364,7 +364,9 @@ impl Asset {
     /// CONTRACT: byte-identical to `dig_constants::DIG_ASSET_ID`, `chip35_dl_coin::DIG_ASSET_ID`,
     /// and digstore-chain's. It is duplicated here rather than imported because this crate is a
     /// level-00 foundation crate and may not depend sideways on `dig-constants` (CLAUDE.md
-    /// Appendix B); `dig_asset_id_matches_the_ecosystem_constant` pins the two together.
+    /// Appendix B). `dig_asset_id_hex_and_bytes_are_the_same_id` pins THIS crate's two spellings
+    /// of it together; agreement with the ecosystem constant is a source-of-truth obligation on
+    /// whoever changes it, recorded in the `canonical` skill.
     pub const DIG_ASSET_ID_HEX: &'static str =
         "a406d3a9de984d03c9591c10d917593b434d5263cabe2b42f6b367df16832f81";
 
@@ -1147,6 +1149,17 @@ mod tests {
         assert_eq!(AssetId::from_hex(&upper).unwrap(), canonical);
         assert_eq!(AssetId::from_hex(&format!("0x{upper}")).unwrap(), canonical);
         assert_eq!(canonical.to_hex(), OTHER_CAT_HEX);
+    }
+
+    /// The $DIG asset id is written twice in this file — once as hex for callers, once as bytes so
+    /// [`Asset::DIG`] can be `const`. A typo in either would make `"dig"` and the tagged form name
+    /// different tokens, which is precisely the split this design exists to prevent.
+    #[test]
+    fn dig_asset_id_hex_and_bytes_are_the_same_id() {
+        let from_hex = AssetId::from_hex(Asset::DIG_ASSET_ID_HEX).unwrap();
+        assert_eq!(Asset::DIG.asset_id(), Some(&from_hex));
+        assert_eq!(from_hex.to_hex(), Asset::DIG_ASSET_ID_HEX);
+        assert_eq!(Asset::Xch.asset_id(), None);
     }
 
     #[test]
