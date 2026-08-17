@@ -730,3 +730,4 @@ The catalog types are plain serde structs with no non-wasm dependencies, so a br
 (T5's `wasm-bindgen` binding) serializes them to identical JSON. The `serde_json::Value`-typed proxied
 results and the `#[serde(untagged)]` `RequestId` are the only shapes needing a JS-side check; T5 adds a
 Rust↔wasm/JS byte-identical KAT over the vectors in §6.
+
