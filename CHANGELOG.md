@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.17.0] - 2026-08-17
+
+### Features
+- **params:** Widen wire Asset to name an arbitrary CAT by asset id (#17)
+
 ## [0.16.0] - 2026-08-16
 
 ### Features
