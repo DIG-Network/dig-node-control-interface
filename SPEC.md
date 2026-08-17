@@ -101,8 +101,8 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.subscribe` | yes | delegated | `{store_id:string, kind?:"capsule"\|"profile"}` | `{subscribed, added, store_id, kind}` |
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
-| `control.wallet.balance` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `{balance, pending, source, synced, peak_height}` |
-| `control.wallet.coins` | no | delegated | `{address:string, asset:"xch"\|"dig"}` | `WalletCoinsResult` |
+| `control.wallet.balance` | no | delegated | `{address:string, asset:Asset}` | `{balance, pending, source, synced, peak_height}` |
+| `control.wallet.coins` | no | delegated | `{address:string, asset:Asset}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.coinSpend` | no | delegated | `{coin_id:string}` | `WalletCoinSpendResult` |
 | `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string, after_coin_id?:string, limit?:u32}` | `WalletCoinsByParentResult` |
@@ -150,6 +150,31 @@ opposite remedies — see §4.2.
 - **`CapsuleEntry`**: `{capsule:"storeId:root", root:string, size_bytes:u64, last_used_unix_ms:u64}`.
 - **`pairing.poll` token**: the `token` field MUST be omitted while `status` is not `approved`, and
   present exactly once after approval.
+- **`Asset`** — the asset a wallet read is denominated in. Exactly three wire forms are valid:
+
+  | Form | JSON | Meaning |
+  |---|---|---|
+  | XCH token | `"xch"` | Native Chia, denominated in mojos. |
+  | $DIG token | `"dig"` | The $DIG CAT, asset id `a406d3a9de984d03c9591c10d917593b434d5263cabe2b42f6b367df16832f81`. |
+  | CAT by asset id | `{"cat":"<64-hex>"}` | Any CAT, named by its asset id (TAIL hash). |
+
+  The asset id is lowercase 64-hex, unprefixed, on the wire. A `0x` prefix and uppercase digits MUST
+  be ACCEPTED on input and normalized away; neither MUST ever be emitted. Any other string, an object
+  with any other or additional key, and a hex string of any other length MUST be REJECTED — an
+  unrecognized asset MUST NOT be defaulted to XCH or to $DIG.
+
+  **$DIG has exactly one identity.** `"dig"` and `{"cat":"a406…2f81"}` MUST denote the SAME asset and
+  MUST compare equal. An implementation MUST NOT model $DIG as a value distinct from its own asset
+  id: were the two inequal, a balance or coin list filtered by one spelling would silently omit the
+  holdings carrying the other, reporting part of a balance as though it were all of it.
+
+  **$DIG MUST still be EMITTED as `"dig"`**, not as its tagged form. `"xch"` and `"dig"` are the only
+  forms a node or client built before asset ids were nameable understands, so emitting the tagged
+  form for $DIG would break that compatibility direction. The tagged form is for every OTHER CAT.
+
+  Consumers MUST model this as a two-case type — native XCH, or a CAT identified by asset id — with
+  $DIG a named constant of the CAT case rather than a third case.
+
 - **`WalletCoinsResult`**: `{coins:[WalletCoinRecord], source:"db"|"fallback"|null, synced:bool,
   peak_height:u32|null}`. `source`/`synced`/`peak_height` carry exactly the meanings defined for
   `WalletBalanceResult` below. `coins` MUST list the address's spendable coins for the requested
@@ -160,7 +185,7 @@ opposite remedies — see §4.2.
   is normative and not a quality-of-implementation note: an empty list on an unreachable chain tells
   a holder of funds that they hold nothing, and a spend built on that answer refuses with a
   shortfall that is not true.
-- **`WalletCoinRecord`**: `{coin_id:string, asset:"xch"|"dig"|null, amount:u64,
+- **`WalletCoinRecord`**: `{coin_id:string, asset:Asset|null, amount:u64,
   parent_coin_info:string, puzzle_hash:string, created_height:u32|null, spent_height:u32|null}`. All
   hashes are lowercase 64-hex, unprefixed. `created_height:null` means the coin is known only from
   the mempool; `spent_height:null` means unspent. The first three fields are a strict SUPERSET of
@@ -498,7 +523,7 @@ opposite remedies — see §4.2.
   third state meaning "tier unknown", never a defaulted tier; consumers MUST NOT treat it as either.
   `synced:false` means the figures are STALE or fallback-served; `peak_height` is the block height
   the figures reflect (present as `null`, never omitted, when no height applies).
-  The `asset` request field is the lowercase wire token `"xch"`/`"dig"`. This result is a strict
+  The `asset` request field is an **`Asset`** (see "Asset" below). This result is a strict
   SUPERSET of dig-app's `BalanceResponse {balance}`: a consumer reading only `{balance}` deserializes
   it losslessly (unknown fields ignored), which is the no-consumer-change guarantee pinned by a KAT.
 
@@ -730,3 +755,4 @@ The catalog types are plain serde structs with no non-wasm dependencies, so a br
 (T5's `wasm-bindgen` binding) serializes them to identical JSON. The `serde_json::Value`-typed proxied
 results and the `#[serde(untagged)]` `RequestId` are the only shapes needing a JS-side check; T5 adds a
 Rust↔wasm/JS byte-identical KAT over the vectors in §6.
+
