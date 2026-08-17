@@ -296,13 +296,12 @@ impl AssetId {
     /// The canonical wire spelling: lowercase, unprefixed, [`ASSET_ID_HEX_LEN`] characters.
     pub fn to_hex(&self) -> String {
         use core::fmt::Write as _;
-        self.0.iter().fold(
-            String::with_capacity(ASSET_ID_HEX_LEN),
-            |mut acc, byte| {
+        self.0
+            .iter()
+            .fold(String::with_capacity(ASSET_ID_HEX_LEN), |mut acc, byte| {
                 let _ = write!(acc, "{byte:02x}");
                 acc
-            },
-        )
+            })
     }
 }
 
@@ -416,9 +415,7 @@ impl<'de> Deserialize<'de> for Asset {
         #[serde(untagged, deny_unknown_fields)]
         enum Wire {
             Token(String),
-            Tagged {
-                cat: String,
-            },
+            Tagged { cat: String },
         }
 
         match Wire::deserialize(deserializer).map_err(|_| {
@@ -1160,6 +1157,29 @@ mod tests {
         assert_eq!(Asset::DIG.asset_id(), Some(&from_hex));
         assert_eq!(from_hex.to_hex(), Asset::DIG_ASSET_ID_HEX);
         assert_eq!(Asset::Xch.asset_id(), None);
+    }
+
+    /// A rejection has to say WHICH way the input was wrong, or the caller is left guessing at a
+    /// value it can see but cannot fix.
+    #[test]
+    fn parse_errors_name_the_defect_and_reach_the_wire() {
+        assert_eq!(
+            AssetId::from_hex("ab").unwrap_err(),
+            AssetIdParseError::WrongLength { got: 2 }
+        );
+        assert!(AssetIdParseError::WrongLength { got: 2 }
+            .to_string()
+            .contains("64 hex characters"));
+        assert!(AssetIdParseError::NotHex
+            .to_string()
+            .contains("non-hexadecimal"));
+        assert!(AssetId::from_hex(&"3c".repeat(32))
+            .unwrap()
+            .to_string()
+            .starts_with("3c3c"));
+        // The deserializer surfaces the reason rather than a bare "invalid value".
+        let err = serde_json::from_value::<Asset>(json!({ "cat": "zz" })).unwrap_err();
+        assert!(err.to_string().contains("64 hex characters"), "{err}");
     }
 
     #[test]
