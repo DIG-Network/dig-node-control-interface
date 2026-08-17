@@ -228,18 +228,212 @@ pub struct UnsubscribeParams {
 }
 control_call!(UnsubscribeParams => ControlMethod::Unsubscribe, results::UnsubscribeResult);
 
-/// The asset a wallet balance/coin read is denominated in.
+/// The length of a CAT asset id (TAIL hash) in hex characters: a 32-byte hash.
+pub const ASSET_ID_HEX_LEN: usize = 64;
+
+/// A CAT asset id — the TAIL hash that names one token on the Chia chain.
 ///
-/// Serializes to a lowercase, language-neutral wire token (`"xch"` / `"dig"`) — byte-identical to the
-/// frozen consumer type in dig-app (`dig-app-core::wallet::state::Asset`), so the contract and the
-/// consumer share one wire form. Extended additively as the wallet grows to hold more CAT types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Stored as the 32 raw bytes rather than a `String` so two spellings of the same id (uppercase,
+/// `0x`-prefixed) cannot compare unequal. Parsing normalizes; emission is always lowercase and
+/// unprefixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AssetId([u8; 32]);
+
+/// Why an asset id could not be parsed. Deliberately small — an id is either 32 bytes of hex or it
+/// is not an id, and guessing at a near-miss is how a wallet ends up reading the wrong token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetIdParseError {
+    /// Not exactly [`ASSET_ID_HEX_LEN`] hex characters (after an optional `0x` is stripped).
+    WrongLength {
+        /// The length actually supplied.
+        got: usize,
+    },
+    /// A character outside `[0-9a-fA-F]`.
+    NotHex,
+}
+
+impl core::fmt::Display for AssetIdParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WrongLength { got } => write!(
+                f,
+                "asset id must be {ASSET_ID_HEX_LEN} hex characters, got {got}"
+            ),
+            Self::NotHex => f.write_str("asset id contains a non-hexadecimal character"),
+        }
+    }
+}
+
+impl std::error::Error for AssetIdParseError {}
+
+impl AssetId {
+    /// Wrap 32 already-decoded bytes. `const` so canonical ids can be declared as constants.
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw 32 bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Parse a hex asset id. A `0x` prefix and uppercase digits are TOLERATED on input — both are
+    /// what a block explorer prints — and normalized away; neither is ever emitted.
+    pub fn from_hex(hex: &str) -> Result<Self, AssetIdParseError> {
+        let body = hex.strip_prefix("0x").unwrap_or(hex);
+        if body.len() != ASSET_ID_HEX_LEN {
+            return Err(AssetIdParseError::WrongLength { got: body.len() });
+        }
+        let mut bytes = [0u8; 32];
+        for (byte, pair) in bytes.iter_mut().zip(body.as_bytes().chunks_exact(2)) {
+            let hi = decode_hex_digit(pair[0])?;
+            let lo = decode_hex_digit(pair[1])?;
+            *byte = (hi << 4) | lo;
+        }
+        Ok(Self(bytes))
+    }
+
+    /// The canonical wire spelling: lowercase, unprefixed, [`ASSET_ID_HEX_LEN`] characters.
+    pub fn to_hex(&self) -> String {
+        use core::fmt::Write as _;
+        self.0.iter().fold(
+            String::with_capacity(ASSET_ID_HEX_LEN),
+            |mut acc, byte| {
+                let _ = write!(acc, "{byte:02x}");
+                acc
+            },
+        )
+    }
+}
+
+/// Decode one ASCII hex digit into its nibble value.
+fn decode_hex_digit(c: u8) -> Result<u8, AssetIdParseError> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(AssetIdParseError::NotHex),
+    }
+}
+
+impl core::fmt::Display for AssetId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// The asset a wallet balance/coin read is denominated in: native XCH, or any CAT by asset id.
+///
+/// # Why there is no separate `Dig` variant
+///
+/// $DIG is a CAT, so it is [`Asset::DIG`] — an associated constant, not a variant. A three-variant
+/// `{Xch, Dig, Cat(id)}` would give $DIG two INEQUAL spellings, and a balance or coin list filtered
+/// by one of them would silently omit everything carrying the other: a wallet reporting half a
+/// balance as though it were the whole. One token, one value.
+///
+/// # Wire form (additive — CLAUDE.md §5.1)
+///
+/// | Value | JSON |
+/// |---|---|
+/// | [`Asset::Xch`] | `"xch"` |
+/// | [`Asset::DIG`] | `"dig"` |
+/// | any other CAT | `{"cat":"<64-hex>"}` |
+///
+/// Both legacy tokens are still ACCEPTED and `"dig"` is still EMITTED, so a node or client built
+/// before this release keeps understanding, and being understood by, one built after it.
+/// `{"cat":"<the $DIG asset id>"}` is also accepted and normalizes to [`Asset::DIG`].
+///
+/// Byte-identical to dig-app's consumer type (`dig-app-core::wallet::state::Asset`), recorded in the
+/// `canonical` skill so the two implementations cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Asset {
     /// Native Chia (XCH), denominated in mojos.
     Xch,
-    /// The DIG CAT, denominated in its base units.
-    Dig,
+    /// A CAT, named by its asset id and denominated in its own base units.
+    Cat(AssetId),
+}
+
+/// The legacy wire token for native Chia.
+const XCH_TOKEN: &str = "xch";
+/// The legacy wire token for $DIG, still emitted so older peers keep understanding this crate.
+const DIG_TOKEN: &str = "dig";
+
+impl Asset {
+    /// Canonical $DIG CAT asset id (TAIL hash) on Chia mainnet, as lowercase hex.
+    ///
+    /// CONTRACT: byte-identical to `dig_constants::DIG_ASSET_ID`, `chip35_dl_coin::DIG_ASSET_ID`,
+    /// and digstore-chain's. It is duplicated here rather than imported because this crate is a
+    /// level-00 foundation crate and may not depend sideways on `dig-constants` (CLAUDE.md
+    /// Appendix B); `dig_asset_id_matches_the_ecosystem_constant` pins the two together.
+    pub const DIG_ASSET_ID_HEX: &'static str =
+        "a406d3a9de984d03c9591c10d917593b434d5263cabe2b42f6b367df16832f81";
+
+    /// $DIG, the CAT every capsule payment is denominated in.
+    pub const DIG: Asset = Asset::Cat(AssetId::new([
+        0xa4, 0x06, 0xd3, 0xa9, 0xde, 0x98, 0x4d, 0x03, 0xc9, 0x59, 0x1c, 0x10, 0xd9, 0x17, 0x59,
+        0x3b, 0x43, 0x4d, 0x52, 0x63, 0xca, 0xbe, 0x2b, 0x42, 0xf6, 0xb3, 0x67, 0xdf, 0x16, 0x83,
+        0x2f, 0x81,
+    ]));
+
+    /// Whether this asset is $DIG, however it was spelled on the wire.
+    pub fn is_dig(&self) -> bool {
+        *self == Self::DIG
+    }
+
+    /// The CAT asset id, or `None` for native XCH.
+    pub fn asset_id(&self) -> Option<&AssetId> {
+        match self {
+            Self::Xch => None,
+            Self::Cat(id) => Some(id),
+        }
+    }
+}
+
+impl Serialize for Asset {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Xch => serializer.serialize_str(XCH_TOKEN),
+            // $DIG keeps its legacy token: a node built before the widening understands only the
+            // two bare strings, and emitting the tagged form for it would break that direction.
+            other if other.is_dig() => serializer.serialize_str(DIG_TOKEN),
+            Self::Cat(id) => {
+                use serde::ser::SerializeMap as _;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cat", &id.to_hex())?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Asset {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The two accepted wire shapes, kept private so the tagged form is the ONLY map that
+        /// parses — an unknown key must be an error, never a silently ignored asset name.
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum Wire {
+            Token(String),
+            Tagged {
+                cat: String,
+            },
+        }
+
+        match Wire::deserialize(deserializer).map_err(|_| {
+            serde::de::Error::custom(
+                "expected \"xch\", \"dig\", or {\"cat\":\"<64-hex asset id>\"}",
+            )
+        })? {
+            Wire::Token(token) if token == XCH_TOKEN => Ok(Self::Xch),
+            Wire::Token(token) if token == DIG_TOKEN => Ok(Self::DIG),
+            Wire::Token(token) => Err(serde::de::Error::custom(format!(
+                "unknown asset {token:?}: expected \"xch\", \"dig\", or {{\"cat\":\"<64-hex asset id>\"}}"
+            ))),
+            Wire::Tagged { cat } => AssetId::from_hex(&cat)
+                .map(Self::Cat)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 /// `control.wallet.balance` params: which address + asset to read the balance of.
@@ -883,6 +1077,111 @@ mod tests {
     use super::*;
     use crate::traits::build_request;
     use serde_json::json;
+
+    /// An asset id that is emphatically NOT $DIG, so a round-trip through it cannot be satisfied
+    /// by an implementation that only ever answers about $DIG.
+    const OTHER_CAT_HEX: &str = "1c2b3a4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809";
+
+    /// The legacy spellings are what an ALREADY-DEPLOYED dig-node and dig-app emit today. This is
+    /// the load-bearing additive-discipline test (§5.1): if widening the enum ever stops accepting
+    /// them, every peer built before this release becomes unreadable.
+    #[test]
+    fn legacy_xch_and_dig_spellings_still_deserialize() {
+        assert_eq!(
+            serde_json::from_value::<Asset>(json!("xch")).unwrap(),
+            Asset::Xch
+        );
+        assert_eq!(
+            serde_json::from_value::<Asset>(json!("dig")).unwrap(),
+            Asset::DIG
+        );
+    }
+
+    /// $DIG keeps EMITTING its legacy token. A newer client talking to an OLDER node must still be
+    /// understood, and an older node knows only `"xch"`/`"dig"` — so emitting `{"cat":…}` for $DIG
+    /// would break the compatibility direction the legacy test above cannot see.
+    #[test]
+    fn dig_still_serializes_to_its_legacy_token() {
+        assert_eq!(serde_json::to_value(Asset::DIG).unwrap(), json!("dig"));
+        assert_eq!(serde_json::to_value(Asset::Xch).unwrap(), json!("xch"));
+    }
+
+    /// The new capability: an arbitrary CAT, named by asset id, survives a full round-trip.
+    #[test]
+    fn an_arbitrary_cat_round_trips_by_asset_id() {
+        let asset = Asset::Cat(AssetId::from_hex(OTHER_CAT_HEX).unwrap());
+        let wire = serde_json::to_value(asset).unwrap();
+        assert_eq!(wire, json!({ "cat": OTHER_CAT_HEX }));
+        assert_eq!(serde_json::from_value::<Asset>(wire).unwrap(), asset);
+    }
+
+    /// $DIG has exactly ONE value, however it was spelled on the wire.
+    ///
+    /// This is the test that rules out a three-variant `{Xch, Dig, Cat(id)}`, where
+    /// `Dig != Cat(DIG_ASSET_ID)` and a balance filtered by one spelling silently omits the coins
+    /// carrying the other — a wallet reporting half a balance as if it were the whole.
+    #[test]
+    fn dig_spelled_either_way_is_one_and_the_same_value() {
+        let via_token: Asset = serde_json::from_value(json!("dig")).unwrap();
+        let via_asset_id: Asset =
+            serde_json::from_value(json!({ "cat": Asset::DIG_ASSET_ID_HEX })).unwrap();
+        assert_eq!(via_token, via_asset_id);
+        assert_eq!(via_token, Asset::DIG);
+        assert!(via_asset_id.is_dig());
+    }
+
+    /// The 64-hex length is a published bound, so it is pinned from BOTH sides: one nibble short
+    /// and one nibble long must both fail, and exactly 64 must pass.
+    #[test]
+    fn asset_id_hex_length_is_bounded_on_both_sides() {
+        assert!(AssetId::from_hex(&"a".repeat(63)).is_err());
+        assert!(AssetId::from_hex(&"a".repeat(64)).is_ok());
+        assert!(AssetId::from_hex(&"a".repeat(65)).is_err());
+    }
+
+    /// Input is tolerant of the two forms a human copies out of a block explorer; output is not.
+    #[test]
+    fn asset_id_normalizes_prefix_and_case_but_emits_lowercase_unprefixed() {
+        let upper = OTHER_CAT_HEX.to_uppercase();
+        let canonical = AssetId::from_hex(OTHER_CAT_HEX).unwrap();
+        assert_eq!(AssetId::from_hex(&upper).unwrap(), canonical);
+        assert_eq!(AssetId::from_hex(&format!("0x{upper}")).unwrap(), canonical);
+        assert_eq!(canonical.to_hex(), OTHER_CAT_HEX);
+    }
+
+    #[test]
+    fn malformed_assets_are_rejected_rather_than_guessed_at() {
+        assert!(AssetId::from_hex(&"z".repeat(64)).is_err());
+        // An unknown bare token is not silently treated as a CAT name.
+        assert!(serde_json::from_value::<Asset>(json!("usdc")).is_err());
+        // The tagged form carries exactly one recognized key.
+        assert!(serde_json::from_value::<Asset>(json!({})).is_err());
+        assert!(serde_json::from_value::<Asset>(json!({ "tail": OTHER_CAT_HEX })).is_err());
+        assert!(serde_json::from_value::<Asset>(json!({ "cat": "ab" })).is_err());
+    }
+
+    /// The params types that CARRY an asset must carry the widened one — the whole point of the
+    /// change is that these two questions become askable about an arbitrary CAT.
+    #[test]
+    fn balance_and_coins_reads_can_name_an_arbitrary_cat() {
+        let cat = Asset::Cat(AssetId::from_hex(OTHER_CAT_HEX).unwrap());
+        assert_eq!(
+            serde_json::to_value(WalletBalanceParams {
+                address: "xch1exampleaddr".into(),
+                asset: cat,
+            })
+            .unwrap(),
+            json!({ "address": "xch1exampleaddr", "asset": { "cat": OTHER_CAT_HEX } })
+        );
+        assert_eq!(
+            serde_json::to_value(WalletCoinsParams {
+                address: "xch1exampleaddr".into(),
+                asset: cat,
+            })
+            .unwrap(),
+            json!({ "address": "xch1exampleaddr", "asset": { "cat": OTHER_CAT_HEX } })
+        );
+    }
 
     #[test]
     fn no_param_call_serializes_params_to_empty_object() {

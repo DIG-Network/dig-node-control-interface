@@ -152,7 +152,7 @@ fn golden_request_vectors() {
     assert_request(
         &WalletBalanceParams {
             address: "xch1exampleaddr".into(),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
         },
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.balance","params":{"address":"xch1exampleaddr","asset":"dig"}}),
     );
@@ -1149,7 +1149,8 @@ impl ControlHandler for MockNode {
                 asset: Some(params.asset),
                 amount: match params.asset {
                     Asset::Xch => 1,
-                    Asset::Dig => 2,
+                    a if a.is_dig() => 2,
+                    Asset::Cat(_) => 3,
                 },
                 parent_coin_info: "11".repeat(32),
                 puzzle_hash: "22".repeat(32),
@@ -1677,13 +1678,13 @@ fn minimal_params(m: ControlMethod) -> Value {
 fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
     let coins = round_trip(&WalletCoinsParams {
         address: "xch1mintfunder".into(),
-        asset: Asset::Dig,
+        asset: Asset::DIG,
     })
     .expect("coins must route");
     assert_eq!(coins.coins[0].coin_id, "xch1mintfunder");
     assert_eq!(
         coins.coins[0].asset,
-        Some(Asset::Dig),
+        Some(Asset::DIG),
         "an address+asset read KNOWS the asset and must keep reporting it concretely --          `null` is reserved for a read that classified nothing"
     );
     assert_eq!(
@@ -2275,7 +2276,7 @@ fn dig_apps_frozen_engine_shapes_deserialize_our_wallet_results() {
     let coins = serde_json::to_value(results::WalletCoinsResult {
         coins: vec![results::WalletCoinRecord {
             coin_id: "aa".repeat(32),
-            asset: Some(Asset::Dig),
+            asset: Some(Asset::DIG),
             amount: 2_000_000_000_000,
             parent_coin_info: "bb".repeat(32),
             puzzle_hash: "cc".repeat(32),
@@ -2293,7 +2294,7 @@ fn dig_apps_frozen_engine_shapes_deserialize_our_wallet_results() {
         read.coins,
         vec![AppCoinRecord {
             coin_id: "aa".repeat(32),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             amount: 2_000_000_000_000,
         }]
     );
