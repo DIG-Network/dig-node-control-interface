@@ -928,10 +928,20 @@ struct MockNode;
 /// [`crate::params::canonical_peer_ip`].
 pub const MOCK_TRUSTED_CHIA_PEER: &str = "203.0.113.7";
 
+/// A peer [`MockNode`] holds as BANNED, so the un-ban-without-trust case is reachable.
+///
+/// It exists because that case is real, not hypothetical: an upsert that clears the ban flag and
+/// leaves the trusted flag alone grants no corroboration bypass, and the result has to say so.
+pub const MOCK_BANNED_CHIA_PEER: &str = "198.51.100.9";
+
 /// The verbatim warning [`MockNode`] returns as `ChiaPeersAddResult::notice`.
 ///
 /// A node authors its own wording; what the contract fixes is that the sentence EXISTS on the wire
 /// and names the corroboration bypass, so a client quotes it instead of restating it.
+/// What [`MockNode`] says when the entry was un-banned but NOT trusted.
+pub const MOCK_UNBANNED_WITHOUT_TRUST_NOTICE: &str =
+    "This peer is no longer banned, but it was NOT granted trust: chain answers from it still      require corroboration from other peers.";
+
 pub const MOCK_CORROBORATION_BYPASS_NOTICE: &str =
     "This node will now believe 203.0.113.7 WITHOUT corroboration: chain answers from it are \
      accepted on their own, with no agreement from other peers. Add only a node you run yourself.";
@@ -1132,12 +1142,19 @@ impl ControlHandler for MockNode {
         params: ChiaPeersAddParams,
     ) -> Result<results::ChiaPeersAddResult, ControlError> {
         let ip = crate::params::canonical_peer_ip(&params.ip)?;
+        // Adding a BANNED peer clears the ban and grants no trust, so the bypass did not happen
+        // and the result must not claim it did.
+        let trusted = ip != MOCK_BANNED_CHIA_PEER;
         Ok(results::ChiaPeersAddResult {
             added: true,
             ip,
             port: 8444,
-            corroboration_bypassed: true,
-            notice: MOCK_CORROBORATION_BYPASS_NOTICE.to_string(),
+            corroboration_bypassed: trusted,
+            notice: if trusted {
+                MOCK_CORROBORATION_BYPASS_NOTICE.to_string()
+            } else {
+                MOCK_UNBANNED_WITHOUT_TRUST_NOTICE.to_string()
+            },
         })
     }
     async fn chia_peers_list(&self) -> Result<results::ChiaPeersListResult, ControlError> {
@@ -3338,5 +3355,35 @@ fn the_spec_method_table_is_not_interrupted_by_prose() {
     assert!(
         last.contains("`pairing.poll`"),
         "the table stops early — the open bootstrap rows have fallen out of it. Last row: {last}"
+    );
+}
+
+/// **The add result reports the trust state that RESULTED, not the one that was requested.**
+///
+/// A constant `true` is a claim about custody-grade authority that nothing checks. The fixture
+/// varies ONE thing — whether the address was already held as banned — and the un-ban path is the
+/// case that actually occurs: an upsert clears the ban flag and leaves the trusted flag alone, so
+/// the peer ends up untrusted while the caller is told they configured a trusted node. An operator
+/// who believes that is silently depending on corroboration they were told they had bypassed.
+#[test]
+fn adding_a_banned_peer_reports_that_no_bypass_was_granted() {
+    let trusted = round_trip(&ChiaPeersAddParams {
+        ip: MOCK_TRUSTED_CHIA_PEER.into(),
+    })
+    .expect("add must route");
+    let unbanned = round_trip(&ChiaPeersAddParams {
+        ip: MOCK_BANNED_CHIA_PEER.into(),
+    })
+    .expect("add must route");
+
+    assert!(trusted.added && unbanned.added, "both calls succeed");
+    assert!(trusted.corroboration_bypassed);
+    assert!(
+        !unbanned.corroboration_bypassed,
+        "the entry did not end up trusted, so the result must not claim the bypass"
+    );
+    assert!(
+        !unbanned.notice.trim().is_empty(),
+        "the person still needs to be told what actually happened"
     );
 }
