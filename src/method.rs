@@ -139,7 +139,14 @@ pub enum ControlMethod {
     // dialled peers untrusted precisely so that agreement across several concurrently-queried
     // peers is what makes a read safe. A trusted peer is exempted from that agreement, so a wrong
     // or hostile one is believed on its own. Every surface that offers these MUST say so.
-    /// `control.chiaPeers.add` — trust a Chia full node by IP, bypassing corroboration for it.
+    //
+    // Trust comes from the operator declaring a node THEIR OWN — that is the whole of the
+    // authorisation, and the wording everywhere in this crate says exactly that. It is not
+    // "a node you vouch for": the unbounded authority a trusted peer holds is justified by the
+    // operator controlling both ends, which is false of a stranger's node however well
+    // recommended. A person can be talked into vouching for an address; they cannot be talked
+    // into believing they run it.
+    /// `control.chiaPeers.add` — trust a Chia full node you RUN, bypassing corroboration for it.
     ChiaPeersAdd,
     /// `control.chiaPeers.list` — the trusted Chia full-node peers this node tracks.
     ChiaPeersList,
@@ -341,6 +348,9 @@ impl ControlMethod {
     /// A paired (scoped) token can drive ordinary `control.*` mutations but MUST NOT mint more
     /// tokens or revoke itself — so listing/approving/revoking pairings requires the master token
     /// (a local file read), never a paired token.
+    ///
+    /// This names the pairing LIFECYCLE only. The predicate an auth gate consults is
+    /// [`ControlMethod::requires_master_token`], of which this is a strict subset.
     pub const fn is_pairing_admin(self) -> bool {
         matches!(
             self,
@@ -348,6 +358,40 @@ impl ControlMethod {
                 | ControlMethod::PairingApprove
                 | ControlMethod::PairingRevoke
         )
+    }
+
+    /// Does this method require the MASTER control token — the local file read — rather than any
+    /// valid token?
+    ///
+    /// **This, not [`ControlMethod::is_pairing_admin`], is the predicate an auth gate consults.**
+    /// The master tier is not "pairing administration"; it is every method whose effect OUTLIVES
+    /// the token that invoked it, and pairing administration is one instance of that shape.
+    ///
+    /// The rule, stated so a later method can be judged against it rather than by analogy: a
+    /// method belongs here when a caller holding a paired token could use it to acquire authority
+    /// it keeps AFTER that token is revoked. `pairing.revoke` is the designated remedy for a
+    /// compromised paired app, so any method that survives it has escaped the remedy.
+    ///
+    /// The two members outside the pairing lifecycle are `control.chiaPeers.add` and
+    /// `control.chiaPeers.remove`, and they are here for exactly that reason. `add` writes a
+    /// standing entry into the peer store the wallet replica reads, and a peer in that set is
+    /// believed WITHOUT corroboration — it can dictate money-bearing chain facts (peak height, and
+    /// therefore confirmation counts). Once written, the caller no longer needs the token at all,
+    /// and revoking the token does not remove the entry. A paired token must therefore not be able
+    /// to write one. `remove` is the only un-trust remedy and is gated with it, so a paired token
+    /// cannot strip the peers an operator deliberately trusts.
+    ///
+    /// `control.chiaPeers.list` deliberately stays on the ordinary token tier: it is a READ, it
+    /// grants nothing that outlives the token, and gating it would leave a paired client unable to
+    /// show the operator the trust state it is subject to. That matches `control.wallet.arrivals`,
+    /// which is gated at the ordinary tier for disclosing an association without conferring
+    /// authority.
+    pub const fn requires_master_token(self) -> bool {
+        self.is_pairing_admin()
+            || matches!(
+                self,
+                ControlMethod::ChiaPeersAdd | ControlMethod::ChiaPeersRemove
+            )
     }
 
     /// How the node routes this method (shell-owned, engine-delegated, or open bootstrap).
@@ -432,7 +476,7 @@ impl ControlMethod {
     /// A one-line human/agent description for the discovery catalogue.
     pub const fn summary(self) -> &'static str {
         match self {
-            ControlMethod::ChiaPeersAdd => "Trust a Chia full node by IP. A trusted peer BYPASSES CORROBORATION: this node normally believes a chain answer only when several independently-dialled peers agree, and a trusted peer is believed on its own -- so a wrong or hostile one can feed this node a false view of the chain. Add only a node you run or otherwise trust yourself.",
+            ControlMethod::ChiaPeersAdd => "Trust a Chia full node by IP. A trusted peer BYPASSES CORROBORATION: this node normally believes a chain answer only when several independently-dialled peers agree, and a trusted peer is believed on its own -- so a wrong or hostile one can feed this node a false view of the chain. Add only a node you run yourself.",
             ControlMethod::ChiaPeersList => "The Chia full-node peers this node tracks, each flagged user_managed: true where a person added it by hand and it is therefore trusted without corroboration.",
             ControlMethod::ChiaPeersRemove => "Stop trusting a Chia full node, optionally banning it. Removing restores corroboration for that peer: chain answers must once again be agreed by independently-dialled peers.",
             ControlMethod::Status => "A rich node status snapshot (version, uptime, addr, cache, hosted/pinned counts, sync availability).",

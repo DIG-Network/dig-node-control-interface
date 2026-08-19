@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{ControlError, ControlErrorCode};
 use crate::method::ControlMethod;
 use crate::results;
 use crate::traits::ControlCall;
@@ -186,16 +187,99 @@ pub struct PeersDisconnectParams {
 }
 control_call!(PeersDisconnectParams => ControlMethod::PeersDisconnect, results::PeersDisconnectResult);
 
+/// The CANONICAL textual form of a Chia peer address, or an `INVALID_PARAMS` error.
+///
+/// Every `ip` this crate declares — in `control.chiaPeers.add` / `.remove` params and in every
+/// result that echoes one — is a bare IP literal in this form. A conforming node MUST canonicalise
+/// through this function on the way IN and store the result, so `add`, `remove` and `list` all
+/// spell the same peer the same way.
+///
+/// **Why the contract owns this rather than each implementation.** `remove` is the only way to
+/// un-trust a peer that is believed WITHOUT corroboration, and it matches by address. If the form
+/// is left to the implementation, an operator who adds `2001:db8::1` and removes `2001:DB8:0:0::1`
+/// has named the same peer twice and un-trusted nothing — an un-trust that silently does not
+/// happen. Canonicalising is what makes the two spellings one key.
+///
+/// The rules, normatively:
+///
+/// - the value MUST parse as an IPv4 or IPv6 literal ([`std::net::IpAddr`]). A hostname, an empty
+///   string, an `ip:port`, a CIDR block or a bracketed `[..]` form is REJECTED. Rejecting
+///   non-literals is also what bounds the ban list: `remove {ban: true}` persists a row keyed by
+///   this string, so an unvalidated key is unbounded at-rest growth driven by one small call;
+/// - surrounding whitespace is trimmed before parsing, and nothing else is;
+/// - the canonical rendering is [`std::net::IpAddr`]'s own `Display` — dotted-quad for v4, and for
+///   v6 the RFC 5952 lowercase, maximally-compressed form, WITHOUT brackets and WITHOUT a zone id.
+///
+/// Bracketing belongs to the socket-address form, never to this field: see
+/// [`chia_peer_endpoint`], which is the ONLY sanctioned way to join an `ip` to a port.
+///
+/// ```
+/// use dig_node_control_interface::params::canonical_peer_ip;
+/// assert_eq!(canonical_peer_ip(" 2001:0DB8:0000::1 ").unwrap(), "2001:db8::1");
+/// assert!(canonical_peer_ip("[::1]").is_err());
+/// assert!(canonical_peer_ip("node.example.com").is_err());
+/// ```
+pub fn canonical_peer_ip(raw: &str) -> Result<String, ControlError> {
+    raw.trim()
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.to_string())
+        .map_err(|_| {
+            ControlError::of(
+                ControlErrorCode::InvalidParams,
+                format!(
+                    "ip must be a bare IPv4 or IPv6 literal (no brackets, no port, no hostname), got: {raw:?}"
+                ),
+            )
+        })
+}
+
+/// Join a canonical peer `ip` to a port, bracketing IPv6 as RFC 3986 requires.
+///
+/// The one place a peer address and a port are ever concatenated. Formatting `"{ip}:{port}"` by
+/// hand is the bug this exists to prevent: `::1` and `8444` render as `::1:8444`, which is not a
+/// malformed string a parser rejects — it is a DIFFERENT valid IPv6 address, so the mistake
+/// survives validation and silently retargets the peer.
+///
+/// ```
+/// use dig_node_control_interface::params::chia_peer_endpoint;
+/// assert_eq!(chia_peer_endpoint("::1", 8444), "[::1]:8444");
+/// assert_eq!(chia_peer_endpoint("203.0.113.7", 8444), "203.0.113.7:8444");
+/// ```
+pub fn chia_peer_endpoint(ip: &str, port: u16) -> String {
+    match ip.trim().parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => format!("[{v6}]:{port}"),
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}:{port}"),
+        Err(_) => format!("{ip}:{port}"),
+    }
+}
+
+/// The maximum number of BANNED Chia peers a conforming node persists.
+///
+/// A ban is a row written at the request of one small control call and kept across restarts, so
+/// without a ceiling the blocklist is unbounded at-rest state a caller can grow for free. On
+/// overflow a node MUST evict its OLDEST ban rather than refuse the newest — a bounded list that
+/// forgets is recoverable, and a full one that refuses turns the ceiling into a denial of the ban
+/// facility itself.
+///
+/// The value is deliberately generous against the honest use (a handful of misbehaving peers) and
+/// small against the abusive one. Banned entries are enumerable through `control.chiaPeers.list`
+/// and clearable through `control.chiaPeers.remove` with `ban: false`.
+pub const MAX_BANNED_CHIA_PEERS: usize = 256;
+
 /// `control.chiaPeers.add` params — the Chia full node to start TRUSTING.
 ///
 /// Trust is the whole point of this call and it is not free: a trusted peer is exempted from the
 /// corroboration this node otherwise requires (NC-12 — dialled peers are untrusted, and agreement
 /// across several concurrently-queried peers is what makes a chain read safe). An implementation
 /// MUST tell the person that before it writes the entry.
+///
+/// The trust NC-12 authorises is the operator declaring a node THEIR OWN. That is what justifies
+/// the unbounded authority the entry carries, and it does not extend to a node somebody else runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChiaPeersAddParams {
-    /// The peer's IP address. The standard full-node port is assumed (the Sage `add_peer` request
-    /// shape carries no port either).
+    /// The peer's IP address, canonical per [`canonical_peer_ip`] — a bare literal, no brackets,
+    /// no port. The standard full-node port is assumed (the Sage `add_peer` request shape carries
+    /// no port either).
     pub ip: String,
 }
 control_call!(ChiaPeersAddParams => ControlMethod::ChiaPeersAdd, results::ChiaPeersAddResult);
@@ -203,10 +287,23 @@ control_call!(ChiaPeersAddParams => ControlMethod::ChiaPeersAdd, results::ChiaPe
 /// `control.chiaPeers.remove` params — the Chia full node to stop trusting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChiaPeersRemoveParams {
-    /// The peer's IP address.
+    /// The peer's IP address, canonical per [`canonical_peer_ip`]. Matching is by that canonical
+    /// form, so an address spelled differently from the stored entry still names the same peer.
     pub ip: String,
     /// Ban rather than forget: the peer is kept but excluded, so discovery cannot re-add it.
     /// Absent means `false`, which merely forgets the entry.
+    ///
+    /// A ban is EXACT-match on this one address — never a subnet — and it is local to this node,
+    /// with no effect on any other node's peer set. It persists until removed, bounded by
+    /// [`MAX_BANNED_CHIA_PEERS`], is enumerated by `control.chiaPeers.list` (`banned: true`), and
+    /// is cleared by calling `remove` again with `ban: false`. **Clearing a ban that way grants no
+    /// trust**: `add` also un-bans, but `add` confers the corroboration bypass, so it must not be
+    /// the only route back — an over-broad ban is not a reason to trust the peer it hit.
+    ///
+    /// Every banned peer is one fewer source of agreement. NC-12 rests on several independently
+    /// chosen peers agreeing, so a caller that bans steadily shrinks the honest pool toward the
+    /// peers it chose; that is why banning is on the master-token tier
+    /// ([`ControlMethod::requires_master_token`]) and why the set is bounded and visible.
     #[serde(default)]
     pub ban: bool,
 }

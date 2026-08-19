@@ -515,22 +515,41 @@ pub struct PeersDisconnectResult {
 /// One tracked Chia full-node peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChiaPeerEntry {
-    /// The peer's IP address.
+    /// The peer's IP address, in the canonical form defined by
+    /// [`crate::params::canonical_peer_ip`] — a bare literal, never bracketed and never carrying a
+    /// port.
     pub ip: String,
     /// The peer's port (the standard full-node port unless the entry says otherwise).
     pub port: u16,
-    /// The peak height this peer last reported. `0` where the node has no telemetry for it yet —
-    /// never a fabricated height.
-    pub peak_height: u32,
+    /// The peak height this peer last reported, or `null` where the node has NO telemetry for it
+    /// yet.
+    ///
+    /// `null` means UNOBSERVABLE, never zero — the convention `control.peerCounts` and
+    /// `control.wallet.peak` already use, and it matters more here: this is the one signal an
+    /// operator has for judging whether a peer they trust WITHOUT corroboration is current or
+    /// stuck, and a peer nobody has polled must not read as a peer stalled at genesis.
+    ///
+    /// A reported height is that peer's CLAIM, never a fact this node verified — never a
+    /// fabricated height, and never to be aggregated into a chain position (NC-12: a maximum over
+    /// claimed peaks is whatever the most dishonest peer says).
+    pub peak_height: Option<u32>,
     /// TRUE where a person added this peer by hand, which is exactly the set that is trusted
     /// WITHOUT corroboration. Discovered peers are `false` and stay subject to agreement.
     pub user_managed: bool,
+    /// TRUE where this entry is BANNED — kept so discovery cannot re-add it, and excluded from
+    /// every chain read.
+    ///
+    /// Banned entries appear in this list because it is the ONLY enumeration of the banned set,
+    /// and a blocklist a person cannot read is a blocklist they cannot correct.
+    pub banned: bool,
 }
 
-/// `control.chiaPeers.list` — every tracked, non-banned Chia peer.
+/// `control.chiaPeers.list` — every tracked Chia peer: trusted, discovered and banned alike.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChiaPeersListResult {
-    /// The tracked peers, trusted and discovered alike — read `user_managed` to tell them apart.
+    /// The tracked peers — read `user_managed` to tell the trusted set from the discovered one,
+    /// and `banned` to see the exclusions. A conforming node MUST NOT omit banned entries: this
+    /// list is the only way to enumerate them.
     pub peers: Vec<ChiaPeerEntry>,
 }
 
@@ -539,24 +558,58 @@ pub struct ChiaPeersListResult {
 pub struct ChiaPeersAddResult {
     /// Always `true` on success (idempotent — re-adding a known peer succeeds and un-bans it).
     pub added: bool,
-    /// The peer's IP address, as stored.
+    /// The peer's IP address as stored, in the canonical form defined by
+    /// [`crate::params::canonical_peer_ip`].
     pub ip: String,
     /// The port the entry was stored at.
     pub port: u16,
-    /// Always `true`, and stated on the wire rather than left to a doc page: this peer is now
-    /// believed WITHOUT corroboration from other peers. A client rendering this result can quote
-    /// the cost from the result itself instead of restating it and drifting.
+    /// Whether this peer is NOW believed without corroboration — the RESULTING trust state, not a
+    /// restatement of what was asked for.
+    ///
+    /// `true` in the ordinary case, and a conforming node MUST report `false` where the entry did
+    /// not end up trusted, however that came about (an upsert that touches other columns and
+    /// leaves the trusted flag alone is how it happens in practice). Reported honestly, this is
+    /// the only way an operator learns that the node they believe they configured is still subject
+    /// to corroboration; reported as a constant, it is a claim about custody-grade authority that
+    /// nothing checks.
     pub corroboration_bypassed: bool,
+    /// The human-readable warning the node authored for this call, to be rendered VERBATIM to the
+    /// person who made it.
+    ///
+    /// This is the field a client quotes instead of restating the cost locally and drifting from
+    /// the node's wording. It MUST be non-empty and MUST name the corroboration bypass; a client
+    /// MUST NOT paraphrase, truncate or suppress it.
+    pub notice: String,
+}
+
+/// What `control.chiaPeers.remove` actually DID.
+///
+/// An enum rather than a boolean, and deliberately with no always-true companion field, because
+/// `remove` is the ONLY way to un-trust a peer holding unbounded authority over the money-bearing
+/// wallet replica. A remedy that cannot report its own failure is worse than no remedy: the
+/// operator believes they revoked custody-grade trust and they did not. A consumer has to MATCH on
+/// this, so it cannot render "nothing was there" as "it is gone".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChiaPeerRemovalOutcome {
+    /// A matching entry existed and is gone — or, with `ban`, is now banned.
+    Removed,
+    /// NOTHING matched the address given. The trusted set is unchanged, so any peer the caller
+    /// meant to un-trust is STILL trusted — most often because the address was spelled differently
+    /// from the stored entry. A client MUST surface this as a failure to act, never as success.
+    NoSuchPeer,
 }
 
 /// `control.chiaPeers.remove` — the acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChiaPeersRemoveResult {
-    /// Always `true` (idempotent — removing an absent peer still succeeds).
-    pub removed: bool,
-    /// The peer's IP address, as targeted.
+    /// What happened — see [`ChiaPeerRemovalOutcome`]. There is no `removed: true` here, on
+    /// purpose.
+    pub outcome: ChiaPeerRemovalOutcome,
+    /// The peer's IP address as targeted, in the canonical form defined by
+    /// [`crate::params::canonical_peer_ip`].
     pub ip: String,
-    /// Whether the peer was banned rather than merely forgotten.
+    /// Whether the peer is now BANNED rather than merely forgotten.
     pub banned: bool,
 }
 

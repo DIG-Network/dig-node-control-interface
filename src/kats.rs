@@ -924,6 +924,18 @@ thread_local! {
 /// every method group without a running node.
 struct MockNode;
 
+/// The one Chia peer [`MockNode`] pretends to have trusted, canonical per
+/// [`crate::params::canonical_peer_ip`].
+pub const MOCK_TRUSTED_CHIA_PEER: &str = "203.0.113.7";
+
+/// The verbatim warning [`MockNode`] returns as `ChiaPeersAddResult::notice`.
+///
+/// A node authors its own wording; what the contract fixes is that the sentence EXISTS on the wire
+/// and names the corroboration bypass, so a client quotes it instead of restating it.
+pub const MOCK_CORROBORATION_BYPASS_NOTICE: &str =
+    "This node will now believe 203.0.113.7 WITHOUT corroboration: chain answers from it are \
+     accepted on their own, with no agreement from other peers. Add only a node you run yourself.";
+
 #[async_trait::async_trait]
 impl ControlHandler for MockNode {
     async fn status(&self) -> Result<results::StatusResult, ControlError> {
@@ -1119,31 +1131,52 @@ impl ControlHandler for MockNode {
         &self,
         params: ChiaPeersAddParams,
     ) -> Result<results::ChiaPeersAddResult, ControlError> {
+        let ip = crate::params::canonical_peer_ip(&params.ip)?;
         Ok(results::ChiaPeersAddResult {
             added: true,
-            ip: params.ip,
+            ip,
             port: 8444,
             corroboration_bypassed: true,
+            notice: MOCK_CORROBORATION_BYPASS_NOTICE.to_string(),
         })
     }
     async fn chia_peers_list(&self) -> Result<results::ChiaPeersListResult, ControlError> {
         Ok(results::ChiaPeersListResult {
-            peers: vec![results::ChiaPeerEntry {
-                ip: "203.0.113.7".into(),
-                port: 8444,
-                peak_height: 0,
-                user_managed: true,
-            }],
+            peers: vec![
+                results::ChiaPeerEntry {
+                    ip: MOCK_TRUSTED_CHIA_PEER.into(),
+                    port: 8444,
+                    peak_height: Some(6_000_010),
+                    user_managed: true,
+                    banned: false,
+                },
+                // A peer nobody has polled yet: `null`, never `0` — see `ChiaPeerEntry`.
+                results::ChiaPeerEntry {
+                    ip: "2001:db8::2".into(),
+                    port: 8444,
+                    peak_height: None,
+                    user_managed: false,
+                    banned: false,
+                },
+            ],
         })
     }
     async fn chia_peers_remove(
         &self,
         params: ChiaPeersRemoveParams,
     ) -> Result<results::ChiaPeersRemoveResult, ControlError> {
+        let ip = crate::params::canonical_peer_ip(&params.ip)?;
+        // The mock knows ONE peer, so it can answer the question honestly instead of asserting
+        // success — which is the whole point of the outcome enum.
+        let outcome = if ip == MOCK_TRUSTED_CHIA_PEER {
+            results::ChiaPeerRemovalOutcome::Removed
+        } else {
+            results::ChiaPeerRemovalOutcome::NoSuchPeer
+        };
         Ok(results::ChiaPeersRemoveResult {
-            removed: true,
-            ip: params.ip,
-            banned: params.ban,
+            outcome,
+            banned: params.ban && outcome == results::ChiaPeerRemovalOutcome::Removed,
+            ip,
         })
     }
     async fn subscribe(
