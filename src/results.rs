@@ -2331,6 +2331,13 @@ mod tests {
         let unobserved = serde_json::to_value(entry(None)).unwrap();
         let genesis = serde_json::to_value(entry(Some(0))).unwrap();
 
+        // Indexing a MISSING key also yields `Null`, so presence is asserted first — otherwise
+        // an implementation that skipped the field entirely would pass this test while telling a
+        // reader nothing at all about the peer.
+        assert!(
+            unobserved.get("peak_height").is_some(),
+            "the key must be PRESENT and null, not omitted: {unobserved}"
+        );
         assert_eq!(unobserved["peak_height"], serde_json::Value::Null);
         assert_eq!(genesis["peak_height"], 0);
         assert_ne!(

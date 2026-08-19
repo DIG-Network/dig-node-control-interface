@@ -3200,3 +3200,111 @@ fn the_dispatcher_routes_each_profile_method_to_its_own_handler() {
     );
     assert_eq!(got.body_b64, None);
 }
+
+// ---- control.chiaPeers.* (dig_ecosystem#2870) -----------------------------------------------
+
+/// **Adding a trusted peer puts the WARNING TEXT on the wire, not merely a flag.**
+///
+/// `corroboration_bypassed` records that a cost was paid; it cannot be quoted. The whole reason
+/// this result carries `notice` is so a client renders the node's own sentence instead of
+/// restating the cost locally and drifting from it — so the KAT asserts a quotable, non-empty
+/// string that NAMES the bypass reaches the caller through the real dispatcher.
+#[test]
+fn adding_a_trusted_peer_returns_the_bypass_warning_as_quotable_text() {
+    let added = round_trip(&ChiaPeersAddParams {
+        ip: " 203.0.113.7 ".into(),
+    })
+    .expect("chiaPeers.add must route");
+
+    assert!(added.added);
+    assert_eq!(
+        added.ip, MOCK_TRUSTED_CHIA_PEER,
+        "the stored address is the CANONICAL form, so remove and list can match it"
+    );
+    assert!(added.corroboration_bypassed);
+    assert!(
+        !added.notice.trim().is_empty(),
+        "an empty notice discloses nothing"
+    );
+    assert!(
+        added.notice.to_lowercase().contains("corroboration"),
+        "the notice must name the cost it exists to disclose: {}",
+        added.notice
+    );
+}
+
+/// **Removing a peer that was never trusted reports that it removed NOTHING.**
+///
+/// The fixture varies ONE actor: the same call is made twice, once naming the peer the node
+/// actually holds and once naming a peer it does not, with everything else identical. An
+/// implementation that answers "removed" unconditionally passes the first and fails here — which
+/// is the point, because `remove` is the only way to un-trust a peer that is believed without
+/// corroboration, and an operator acts on its answer.
+#[test]
+fn removing_a_peer_the_node_never_had_is_not_reported_as_a_removal() {
+    let hit = round_trip(&ChiaPeersRemoveParams {
+        ip: MOCK_TRUSTED_CHIA_PEER.into(),
+        ban: false,
+    })
+    .expect("chiaPeers.remove must route");
+    assert_eq!(hit.outcome, results::ChiaPeerRemovalOutcome::Removed);
+
+    let miss = round_trip(&ChiaPeersRemoveParams {
+        ip: "198.51.100.4".into(),
+        ban: false,
+    })
+    .expect("chiaPeers.remove must route");
+    assert_eq!(
+        miss.outcome,
+        results::ChiaPeerRemovalOutcome::NoSuchPeer,
+        "a peer the node never held must not be reported as un-trusted"
+    );
+    assert_ne!(
+        hit.outcome, miss.outcome,
+        "the two cases must be distinguishable at the call site"
+    );
+}
+
+/// **An address that is not a bare IP literal is refused at the boundary.**
+///
+/// A rejected address is never written, which is what keeps the ban list — a persisted row keyed
+/// by this string — from growing without bound on arbitrary text.
+#[test]
+fn a_peer_address_that_is_not_an_ip_literal_is_refused() {
+    for bad in ["[203.0.113.7]", "203.0.113.7:8444", "peer.example.com", ""] {
+        let err = round_trip(&ChiaPeersAddParams { ip: bad.into() })
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} must be refused"));
+        assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+    }
+}
+
+/// **A peer nobody has polled lists a `null` peak, and the trusted flag tells the sets apart.**
+///
+/// `peak_height` is the one signal for judging whether a peer trusted WITHOUT corroboration is
+/// current or stuck, so "not polled" must not render as "stalled at genesis" — the two peers in
+/// this fixture differ in exactly that, and in nothing else that could carry the distinction.
+#[test]
+fn the_peer_list_separates_an_unobserved_peak_from_a_real_one() {
+    let listed = futures::executor::block_on(MockNode.chia_peers_list()).expect("list must answer");
+    let trusted = listed
+        .peers
+        .iter()
+        .find(|p| p.user_managed)
+        .expect("the mock holds one trusted peer");
+    let discovered = listed
+        .peers
+        .iter()
+        .find(|p| !p.user_managed)
+        .expect("and one discovered peer");
+
+    assert!(
+        trusted.peak_height.is_some(),
+        "a polled peer reports its claimed height"
+    );
+    assert_eq!(
+        discovered.peak_height, None,
+        "a peer nobody polled is UNOBSERVABLE, never height zero"
+    );
+    assert!(!trusted.banned && !discovered.banned);
+}
