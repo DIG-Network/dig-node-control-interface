@@ -186,6 +186,32 @@ pub struct PeersDisconnectParams {
 }
 control_call!(PeersDisconnectParams => ControlMethod::PeersDisconnect, results::PeersDisconnectResult);
 
+/// `control.chiaPeers.add` params — the Chia full node to start TRUSTING.
+///
+/// Trust is the whole point of this call and it is not free: a trusted peer is exempted from the
+/// corroboration this node otherwise requires (NC-12 — dialled peers are untrusted, and agreement
+/// across several concurrently-queried peers is what makes a chain read safe). An implementation
+/// MUST tell the person that before it writes the entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersAddParams {
+    /// The peer's IP address. The standard full-node port is assumed (the Sage `add_peer` request
+    /// shape carries no port either).
+    pub ip: String,
+}
+control_call!(ChiaPeersAddParams => ControlMethod::ChiaPeersAdd, results::ChiaPeersAddResult);
+
+/// `control.chiaPeers.remove` params — the Chia full node to stop trusting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersRemoveParams {
+    /// The peer's IP address.
+    pub ip: String,
+    /// Ban rather than forget: the peer is kept but excluded, so discovery cannot re-add it.
+    /// Absent means `false`, which merely forgets the entry.
+    #[serde(default)]
+    pub ban: bool,
+}
+control_call!(ChiaPeersRemoveParams => ControlMethod::ChiaPeersRemove, results::ChiaPeersRemoveResult);
+
 /// WHAT a subscription follows: ordinary content, or a dig-profile.
 ///
 /// Serializes to a lowercase, language-neutral wire token (`"capsule"` / `"profile"`).

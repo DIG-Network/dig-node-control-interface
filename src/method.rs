@@ -132,6 +132,20 @@ pub enum ControlMethod {
     /// `control.peers.disconnect` — drop a pooled peer by peer_id.
     PeersDisconnect,
 
+    // ---- Trusted CHIA full-node peers (shell-owned) ----
+    //
+    // A DIFFERENT network from `control.peers.*` above, which are DIG gossip peers. These name
+    // Chia full nodes the wallet replica will TRUST, and trust here is a real cost: NC-12 makes
+    // dialled peers untrusted precisely so that agreement across several concurrently-queried
+    // peers is what makes a read safe. A trusted peer is exempted from that agreement, so a wrong
+    // or hostile one is believed on its own. Every surface that offers these MUST say so.
+    /// `control.chiaPeers.add` — trust a Chia full node by IP, bypassing corroboration for it.
+    ChiaPeersAdd,
+    /// `control.chiaPeers.list` — the trusted Chia full-node peers this node tracks.
+    ChiaPeersList,
+    /// `control.chiaPeers.remove` — stop trusting a Chia full node (optionally banning it).
+    ChiaPeersRemove,
+
     // ---- Subscriptions (delegated to the engine) ----
     /// `control.subscribe` — subscribe the node to a store (watch + gap-fill).
     Subscribe,
@@ -208,6 +222,9 @@ impl ControlMethod {
             ControlMethod::PeerCounts => "control.peerCounts",
             ControlMethod::PeersConnect => "control.peers.connect",
             ControlMethod::PeersDisconnect => "control.peers.disconnect",
+            ControlMethod::ChiaPeersAdd => "control.chiaPeers.add",
+            ControlMethod::ChiaPeersList => "control.chiaPeers.list",
+            ControlMethod::ChiaPeersRemove => "control.chiaPeers.remove",
             ControlMethod::Subscribe => "control.subscribe",
             ControlMethod::Unsubscribe => "control.unsubscribe",
             ControlMethod::ListSubscriptions => "control.listSubscriptions",
@@ -389,7 +406,10 @@ impl ControlMethod {
             ControlMethod::PeerStatus
             | ControlMethod::PeerCounts
             | ControlMethod::PeersConnect
-            | ControlMethod::PeersDisconnect => Category::Peers,
+            | ControlMethod::PeersDisconnect
+            | ControlMethod::ChiaPeersAdd
+            | ControlMethod::ChiaPeersList
+            | ControlMethod::ChiaPeersRemove => Category::Peers,
             ControlMethod::Subscribe
             | ControlMethod::Unsubscribe
             | ControlMethod::ListSubscriptions => Category::Subscriptions,
@@ -412,6 +432,9 @@ impl ControlMethod {
     /// A one-line human/agent description for the discovery catalogue.
     pub const fn summary(self) -> &'static str {
         match self {
+            ControlMethod::ChiaPeersAdd => "Trust a Chia full node by IP. A trusted peer BYPASSES CORROBORATION: this node normally believes a chain answer only when several independently-dialled peers agree, and a trusted peer is believed on its own -- so a wrong or hostile one can feed this node a false view of the chain. Add only a node you run or otherwise trust yourself.",
+            ControlMethod::ChiaPeersList => "The Chia full-node peers this node tracks, each flagged user_managed: true where a person added it by hand and it is therefore trusted without corroboration.",
+            ControlMethod::ChiaPeersRemove => "Stop trusting a Chia full node, optionally banning it. Removing restores corroboration for that peer: chain answers must once again be agreed by independently-dialled peers.",
             ControlMethod::Status => "A rich node status snapshot (version, uptime, addr, cache, hosted/pinned counts, sync availability).",
             ControlMethod::ConfigGet => "The node's effective configuration (addr/port, upstream + override, cache dir/shared, config path, sync availability).",
             ControlMethod::ConfigSetUpstream => "Persist an upstream-RPC override; takes effect on next node start (requires_restart).",
@@ -487,6 +510,9 @@ impl ControlMethod {
         ControlMethod::PeerCounts,
         ControlMethod::PeersConnect,
         ControlMethod::PeersDisconnect,
+        ControlMethod::ChiaPeersAdd,
+        ControlMethod::ChiaPeersList,
+        ControlMethod::ChiaPeersRemove,
         ControlMethod::Subscribe,
         ControlMethod::Unsubscribe,
         ControlMethod::ListSubscriptions,
@@ -785,6 +811,39 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(delegated, expected);
+    }
+
+    /// **The trusted-Chia-peer methods are declared, gated, and say what they cost.**
+    ///
+    /// A trusted peer BYPASSES corroboration (NC-12: dialled peers are untrusted and agreement
+    /// across ~5 concurrently-queried peers is what makes a read safe). The catalog is what a
+    /// machine reads before offering the control, so the cost is stated HERE and not only in a
+    /// doc page — a client that surfaces `summary()` surfaces the warning with it.
+    #[test]
+    fn the_trusted_chia_peer_methods_are_gated_and_disclose_the_corroboration_bypass() {
+        let declared: BTreeSet<&str> = ControlMethod::ALL.iter().map(|m| m.name()).collect();
+        for name in [
+            "control.chiaPeers.add",
+            "control.chiaPeers.list",
+            "control.chiaPeers.remove",
+        ] {
+            assert!(declared.contains(name), "{name} is not in the catalog");
+            let m = ControlMethod::from_name(name).expect("from_name round-trips");
+            assert_eq!(m.category(), Category::Peers, "{name} is a peers method");
+            assert_eq!(m.routing(), Routing::Owned, "{name} is served by the shell");
+            assert!(m.requires_auth(), "{name} must require the control token");
+            assert!(!m.is_open_read(), "{name} is not an open read");
+        }
+        // The COST, not merely the capability: the two methods that change the trusted set must
+        // name the bypass. A summary that only described the action would let a client offer the
+        // control while silently withholding what it gives up.
+        for name in ["control.chiaPeers.add", "control.chiaPeers.remove"] {
+            let summary = ControlMethod::from_name(name).unwrap().summary();
+            assert!(
+                summary.to_lowercase().contains("corroboration"),
+                "{name} summary must name the corroboration bypass, got: {summary}"
+            );
+        }
     }
 
     #[test]

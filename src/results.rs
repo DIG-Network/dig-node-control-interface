@@ -512,6 +512,54 @@ pub struct PeersDisconnectResult {
     pub peer_id: String,
 }
 
+/// One tracked Chia full-node peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeerEntry {
+    /// The peer's IP address.
+    pub ip: String,
+    /// The peer's port (the standard full-node port unless the entry says otherwise).
+    pub port: u16,
+    /// The peak height this peer last reported. `0` where the node has no telemetry for it yet —
+    /// never a fabricated height.
+    pub peak_height: u32,
+    /// TRUE where a person added this peer by hand, which is exactly the set that is trusted
+    /// WITHOUT corroboration. Discovered peers are `false` and stay subject to agreement.
+    pub user_managed: bool,
+}
+
+/// `control.chiaPeers.list` — every tracked, non-banned Chia peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersListResult {
+    /// The tracked peers, trusted and discovered alike — read `user_managed` to tell them apart.
+    pub peers: Vec<ChiaPeerEntry>,
+}
+
+/// `control.chiaPeers.add` — the acknowledgement, including the cost that was paid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersAddResult {
+    /// Always `true` on success (idempotent — re-adding a known peer succeeds and un-bans it).
+    pub added: bool,
+    /// The peer's IP address, as stored.
+    pub ip: String,
+    /// The port the entry was stored at.
+    pub port: u16,
+    /// Always `true`, and stated on the wire rather than left to a doc page: this peer is now
+    /// believed WITHOUT corroboration from other peers. A client rendering this result can quote
+    /// the cost from the result itself instead of restating it and drifting.
+    pub corroboration_bypassed: bool,
+}
+
+/// `control.chiaPeers.remove` — the acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersRemoveResult {
+    /// Always `true` (idempotent — removing an absent peer still succeeds).
+    pub removed: bool,
+    /// The peer's IP address, as targeted.
+    pub ip: String,
+    /// Whether the peer was banned rather than merely forgotten.
+    pub banned: bool,
+}
+
 /// `control.subscribe` — the subscription acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeResult {

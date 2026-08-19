@@ -1115,6 +1115,37 @@ impl ControlHandler for MockNode {
             peer_id: params.peer,
         })
     }
+    async fn chia_peers_add(
+        &self,
+        params: ChiaPeersAddParams,
+    ) -> Result<results::ChiaPeersAddResult, ControlError> {
+        Ok(results::ChiaPeersAddResult {
+            added: true,
+            ip: params.ip,
+            port: 8444,
+            corroboration_bypassed: true,
+        })
+    }
+    async fn chia_peers_list(&self) -> Result<results::ChiaPeersListResult, ControlError> {
+        Ok(results::ChiaPeersListResult {
+            peers: vec![results::ChiaPeerEntry {
+                ip: "203.0.113.7".into(),
+                port: 8444,
+                peak_height: 0,
+                user_managed: true,
+            }],
+        })
+    }
+    async fn chia_peers_remove(
+        &self,
+        params: ChiaPeersRemoveParams,
+    ) -> Result<results::ChiaPeersRemoveResult, ControlError> {
+        Ok(results::ChiaPeersRemoveResult {
+            removed: true,
+            ip: params.ip,
+            banned: params.ban,
+        })
+    }
     async fn subscribe(
         &self,
         params: SubscribeParams,
@@ -1663,6 +1694,8 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::UpdaterPause => json!({}),
         ControlMethod::PairingApprove => json!({"pairing_id": "x"}),
         ControlMethod::PairingRevoke => json!({"token_id": "x"}),
+        ControlMethod::ChiaPeersAdd => json!({"ip": "203.0.113.7"}),
+        ControlMethod::ChiaPeersRemove => json!({"ip": "203.0.113.7"}),
         ControlMethod::PeersConnect | ControlMethod::PeersDisconnect => json!({"peer": "p"}),
         ControlMethod::Subscribe | ControlMethod::Unsubscribe => json!({"store_id": STORE}),
         ControlMethod::PairingRequest => json!({"client_name": "c"}),

@@ -180,6 +180,21 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::PeersDisconnectParams,
     ) -> Result<results::PeersDisconnectResult, ControlError>;
+    /// `control.chiaPeers.add` — start trusting a Chia full node.
+    ///
+    /// An implementation MUST write through to the ONE peer store its wallet replica reads; a
+    /// second peer list is a drift bug waiting to happen.
+    async fn chia_peers_add(
+        &self,
+        params: params::ChiaPeersAddParams,
+    ) -> Result<results::ChiaPeersAddResult, ControlError>;
+    /// `control.chiaPeers.list` — the tracked Chia full-node peers.
+    async fn chia_peers_list(&self) -> Result<results::ChiaPeersListResult, ControlError>;
+    /// `control.chiaPeers.remove` — stop trusting a Chia full node.
+    async fn chia_peers_remove(
+        &self,
+        params: params::ChiaPeersRemoveParams,
+    ) -> Result<results::ChiaPeersRemoveResult, ControlError>;
     /// `control.subscribe`
     ///
     /// `params.kind` is OPTIONAL on the wire and absent means
@@ -465,6 +480,11 @@ pub trait ControlHandler: Sync {
             ControlMethod::PeerCounts => encode(self.peer_counts().await?),
             ControlMethod::PeersConnect => encode(self.peers_connect(decode(params)?).await?),
             ControlMethod::PeersDisconnect => encode(self.peers_disconnect(decode(params)?).await?),
+            ControlMethod::ChiaPeersAdd => encode(self.chia_peers_add(decode(params)?).await?),
+            ControlMethod::ChiaPeersList => encode(self.chia_peers_list().await?),
+            ControlMethod::ChiaPeersRemove => {
+                encode(self.chia_peers_remove(decode(params)?).await?)
+            }
             ControlMethod::Subscribe => encode(self.subscribe(decode(params)?).await?),
             ControlMethod::Unsubscribe => encode(self.unsubscribe(decode(params)?).await?),
             ControlMethod::ListSubscriptions => encode(self.list_subscriptions().await?),

@@ -98,6 +98,9 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null, known_dig_peer_count:u32\|null}` |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
+| `control.chiaPeers.add` | yes | owned | `{ip:string}` | `{added, ip, port, corroboration_bypassed}` |
+| `control.chiaPeers.list` | yes | owned | none | `{peers:[{ip,port,peak_height,user_managed}]}` |
+| `control.chiaPeers.remove` | yes | owned | `{ip:string, ban?:bool}` | `{removed, ip, banned}` |
 | `control.subscribe` | yes | delegated | `{store_id:string, kind?:"capsule"\|"profile"}` | `{subscribed, added, store_id, kind}` |
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
@@ -115,6 +118,13 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.watched` | yes | delegated | — | `{public_keys:[string]}` |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
+
+A trusted Chia peer BYPASSES CORROBORATION. A conforming node treats dialled Chia peers as
+untrusted and believes a chain answer only when several independently-queried peers agree
+(NC-12); a peer added through `control.chiaPeers.add` is exempted from that agreement and is
+believed on its own. An implementation MUST state that cost where a person adds one, and MUST
+serve `control.chiaPeers.*` from the SAME peer store its wallet replica reads -- a second peer
+list would let the trusted set and the consulted set drift apart silently.
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
 | `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
 
