@@ -822,6 +822,79 @@ mod tests {
         );
     }
 
+    /// **The master-token tier is the pairing lifecycle PLUS the trusted-peer mutations.**
+    ///
+    /// The set is asserted whole, because the risk is a method quietly joining or leaving it. The
+    /// two non-pairing members are here for a stated reason — `chiaPeers.add` grants authority
+    /// that SURVIVES `pairing.revoke`, so a paired token holding it escapes the very remedy for a
+    /// compromised paired app.
+    #[test]
+    fn the_master_token_tier_is_pairing_admin_plus_the_trusted_peer_mutations() {
+        let master: BTreeSet<&str> = ControlMethod::ALL
+            .iter()
+            .filter(|m| m.requires_master_token())
+            .map(|m| m.name())
+            .collect();
+        let expected: BTreeSet<&str> = [
+            "control.pairing.list",
+            "control.pairing.approve",
+            "control.pairing.revoke",
+            "control.chiaPeers.add",
+            "control.chiaPeers.remove",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(master, expected);
+
+        // Pairing administration is a STRICT subset, not a synonym: a gate that consults
+        // `is_pairing_admin` instead of `requires_master_token` lets a paired token add a peer.
+        for &m in ControlMethod::ALL {
+            assert!(
+                !m.is_pairing_admin() || m.requires_master_token(),
+                "{} is pairing-admin but not master-tier",
+                m.name()
+            );
+        }
+        assert!(
+            master.len()
+                > ControlMethod::ALL
+                    .iter()
+                    .filter(|m| m.is_pairing_admin())
+                    .count(),
+            "the two predicates must not be interchangeable"
+        );
+
+        // Master implies the token is required at all.
+        for &m in ControlMethod::ALL {
+            assert!(
+                !m.requires_master_token() || m.requires_auth(),
+                "{}",
+                m.name()
+            );
+        }
+    }
+
+    /// **The trust wording stays inside NC-12's authorisation: a node the operator RUNS.**
+    ///
+    /// NC-12 permits trust only from "the operator declaring it their own node". Widening that to
+    /// vouching moves the case outside the justification for the unbounded authority the entry
+    /// carries, and "a node you vouch for" is a phrase somebody can be talked into applying to a
+    /// stranger's address.
+    #[test]
+    fn the_add_summary_authorises_only_a_node_the_operator_runs() {
+        let summary = ControlMethod::ChiaPeersAdd.summary().to_lowercase();
+        assert!(
+            summary.contains("a node you run"),
+            "add must name the operator-run scope, got: {summary}"
+        );
+        for widened in ["vouch", "otherwise trust", "trust yourself", "recommend"] {
+            assert!(
+                !summary.contains(widened),
+                "add summary widens operator trust past NC-12 with {widened:?}: {summary}"
+            );
+        }
+    }
+
     #[test]
     fn delegated_set_matches_the_engine_surface() {
         let delegated: BTreeSet<&str> = ControlMethod::ALL
@@ -878,6 +951,16 @@ mod tests {
             assert!(m.requires_auth(), "{name} must require the control token");
             assert!(!m.is_open_read(), "{name} is not an open read");
         }
+        // The MUTATIONS need the MASTER token; the READ deliberately does not. `add` writes
+        // standing, corroboration-free authority that outlives the token that wrote it — a paired
+        // token must not be able to install it, and `remove` is the only way back out.
+        assert!(ControlMethod::ChiaPeersAdd.requires_master_token());
+        assert!(ControlMethod::ChiaPeersRemove.requires_master_token());
+        assert!(
+            !ControlMethod::ChiaPeersList.requires_master_token(),
+            "list grants nothing that outlives the token; gating it would blind a paired client \
+             to the trust state it is subject to"
+        );
         // The COST, not merely the capability: the two methods that change the trusted set must
         // name the bypass. A summary that only described the action would let a client offer the
         // control while silently withholding what it gives up.

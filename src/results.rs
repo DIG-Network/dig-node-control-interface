@@ -2273,4 +2273,116 @@ mod tests {
             );
         }
     }
+
+    /// **`remove` can report that it removed NOTHING, and the two answers are distinguishable on
+    /// the wire.**
+    ///
+    /// The fixture varies ONE thing — the outcome — and holds `ip` and `banned` fixed, so the
+    /// difference it detects can only be the outcome itself. A result type carrying `removed: true`
+    /// unconditionally would make these two JSON documents identical, which is exactly the state
+    /// where an operator reads "un-trusted" off a call that un-trusted nothing.
+    #[test]
+    fn a_removal_that_matched_nothing_is_not_serialised_as_a_removal() {
+        let removed = ChiaPeersRemoveResult {
+            outcome: ChiaPeerRemovalOutcome::Removed,
+            ip: "203.0.113.7".into(),
+            banned: false,
+        };
+        let missed = ChiaPeersRemoveResult {
+            outcome: ChiaPeerRemovalOutcome::NoSuchPeer,
+            ..removed.clone()
+        };
+
+        let a = serde_json::to_value(&removed).unwrap();
+        let b = serde_json::to_value(&missed).unwrap();
+        assert_ne!(a, b, "the two outcomes must differ on the wire");
+        assert_eq!(a["outcome"], "removed");
+        assert_eq!(b["outcome"], "no_such_peer");
+
+        // No field of the miss may be a success flag a client could render as one. Every other
+        // field is identical by construction, so this asserts the outcome is the ONLY signal.
+        let miss_obj = b.as_object().unwrap();
+        assert!(
+            !miss_obj
+                .values()
+                .any(|v| v == &serde_json::Value::Bool(true)),
+            "a miss must carry no `true` a client can mistake for success: {b}"
+        );
+
+        // And it round-trips, so a consumer cannot lose the distinction by decoding.
+        let back: ChiaPeersRemoveResult = serde_json::from_value(b).unwrap();
+        assert_eq!(back.outcome, ChiaPeerRemovalOutcome::NoSuchPeer);
+    }
+
+    /// **An unpolled peer serialises as `null`, never as height zero.**
+    ///
+    /// `peak_height` is the one signal for judging whether a peer trusted WITHOUT corroboration is
+    /// current or stuck. The fixture holds a genuinely-observed `0` beside the unobserved peer,
+    /// because a `u32` field collapses those two into the same byte and the collapse is the defect.
+    #[test]
+    fn an_unobserved_peak_is_null_and_an_observed_zero_is_not() {
+        let entry = |peak| ChiaPeerEntry {
+            ip: "203.0.113.7".into(),
+            port: 8444,
+            peak_height: peak,
+            user_managed: true,
+            banned: false,
+        };
+        let unobserved = serde_json::to_value(entry(None)).unwrap();
+        let genesis = serde_json::to_value(entry(Some(0))).unwrap();
+
+        assert_eq!(unobserved["peak_height"], serde_json::Value::Null);
+        assert_eq!(genesis["peak_height"], 0);
+        assert_ne!(
+            unobserved["peak_height"], genesis["peak_height"],
+            "unobservable and observed-zero must not render the same"
+        );
+    }
+
+    /// **A banned peer is enumerable — `list` is the only place the blocklist is visible.**
+    #[test]
+    fn the_peer_list_can_carry_a_banned_entry() {
+        let listed = ChiaPeersListResult {
+            peers: vec![ChiaPeerEntry {
+                ip: "203.0.113.9".into(),
+                port: 8444,
+                peak_height: None,
+                user_managed: false,
+                banned: true,
+            }],
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["peers"][0]["banned"], true);
+        let back: ChiaPeersListResult = serde_json::from_value(json).unwrap();
+        assert!(back.peers[0].banned);
+    }
+
+    /// **The add result carries the warning TEXT, not only a flag saying a cost was paid.**
+    ///
+    /// The field exists so a client can quote the node's own sentence rather than restate it and
+    /// drift. A boolean cannot be quoted, so the assertion is that a quotable, non-empty string
+    /// naming the bypass reaches the wire under a stable key.
+    #[test]
+    fn the_add_result_carries_a_quotable_bypass_notice() {
+        let json = serde_json::to_value(ChiaPeersAddResult {
+            added: true,
+            ip: "203.0.113.7".into(),
+            port: 8444,
+            corroboration_bypassed: true,
+            notice: "believed WITHOUT corroboration".into(),
+        })
+        .unwrap();
+
+        let notice = json["notice"]
+            .as_str()
+            .expect("notice is a string on the wire");
+        assert!(
+            !notice.trim().is_empty(),
+            "an empty notice discloses nothing"
+        );
+        assert!(
+            notice.to_lowercase().contains("corroboration"),
+            "the notice must name the cost it exists to disclose: {notice}"
+        );
+    }
 }

@@ -1374,4 +1374,80 @@ mod tests {
         assert_eq!(RequestParams::METHOD.name(), "pairing.request");
         assert_eq!(PollParams::METHOD.name(), "pairing.poll");
     }
+
+    /// **Two spellings of one address canonicalise to one key — which is what makes `remove` able
+    /// to find what `add` stored.**
+    ///
+    /// The fixture is deliberately not a pair of identical strings: each pair differs in the ways
+    /// a person actually types an address (case, leading zeroes, an uncompressed run, whitespace),
+    /// so a canonicaliser that only trimmed would pass the last pair and fail the rest.
+    #[test]
+    fn spellings_of_the_same_peer_canonicalise_to_one_key() {
+        for (typed, also_typed) in [
+            ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:DB8::1"),
+            ("::1", "0:0:0:0:0:0:0:1"),
+            (" 203.0.113.7 ", "203.0.113.7"),
+        ] {
+            let a = canonical_peer_ip(typed).expect("typed form is a literal");
+            let b = canonical_peer_ip(also_typed).expect("second form is a literal");
+            assert_eq!(a, b, "{typed} and {also_typed} name one peer");
+        }
+        // And the canonical form is the compressed lowercase one, not merely SOME agreed form.
+        assert_eq!(canonical_peer_ip("2001:DB8:0:0::1").unwrap(), "2001:db8::1");
+    }
+
+    /// **Anything that is not a bare IP literal is REFUSED.**
+    ///
+    /// This is the bound on the ban list: `remove {ban: true}` persists a row keyed by this
+    /// string, so accepting arbitrary text is unbounded at-rest growth for the cost of one call.
+    /// Each rejected case is one a naive implementation accepts: a hostname resolves, a bracketed
+    /// form round-trips through some parsers, and `ip:port` is what a person copies out of a log.
+    #[test]
+    fn a_peer_ip_that_is_not_a_bare_literal_is_refused() {
+        for bad in [
+            "",
+            "   ",
+            "node.example.com",
+            "[2001:db8::1]",
+            "[2001:db8::1]:8444",
+            "203.0.113.7:8444",
+            "203.0.113.0/24",
+            "not an address",
+        ] {
+            let Err(err) = canonical_peer_ip(bad) else {
+                panic!("{bad:?} must be refused, it was accepted");
+            };
+            assert_eq!(
+                err.code_enum(),
+                Some(ControlErrorCode::InvalidParams),
+                "{bad:?} must be an INVALID_PARAMS refusal, not some other failure"
+            );
+        }
+    }
+
+    /// **Joining an address to a port brackets IPv6 — the un-bracketed form is a DIFFERENT valid
+    /// address, so the mistake survives validation.**
+    ///
+    /// `::1` + `8444` formatted by hand is `::1:8444`, which parses fine and points somewhere
+    /// else. The assertion is therefore not merely "it contains brackets": the naive rendering is
+    /// checked to be a parseable address that is NOT the peer, which is what makes the bug silent.
+    #[test]
+    fn joining_a_v6_peer_to_a_port_cannot_produce_a_different_address() {
+        assert_eq!(chia_peer_endpoint("::1", 8444), "[::1]:8444");
+        assert_eq!(
+            chia_peer_endpoint("2001:db8::1", 8444),
+            "[2001:db8::1]:8444"
+        );
+        assert_eq!(chia_peer_endpoint("203.0.113.7", 8444), "203.0.113.7:8444");
+
+        let naive = format!("{}:{}", "::1", 8444);
+        let hijacked: std::net::IpAddr =
+            naive.parse().expect("the naive join is itself an address");
+        assert_ne!(
+            hijacked,
+            "::1".parse::<std::net::IpAddr>().unwrap(),
+            "the naive join must be a DIFFERENT address — that is why the helper exists"
+        );
+        assert_ne!(chia_peer_endpoint("::1", 8444), naive);
+    }
 }
