@@ -49,9 +49,16 @@ rides over it.
 - The two **pairing-bootstrap** methods `pairing.request` / `pairing.poll` are **OPEN** (no token), so
   a token-less client (e.g. an MV3 extension that cannot read a local file) can obtain a scoped token
   after local operator approval.
-- The three **pairing-administration** methods (`control.pairing.list` / `.approve` / `.revoke`)
-  require the **MASTER** control token specifically, never a scoped paired token — a paired controller
-  can drive ordinary mutations but MUST NOT mint more tokens or revoke itself.
+- The **MASTER** control token specifically, never a scoped paired token, is required by every
+  method whose effect OUTLIVES the token that invoked it. A paired controller can drive ordinary
+  mutations, but anything it could still be holding after `control.pairing.revoke` — the remedy for
+  a compromised paired app — is outside its tier. Two groups qualify:
+  - the three **pairing-administration** methods (`control.pairing.list` / `.approve` / `.revoke`):
+    a paired controller MUST NOT mint more tokens or revoke itself;
+  - the two **trusted-Chia-peer mutations** (`control.chiaPeers.add` / `.remove`): `add` writes a
+    standing peer entry that is believed WITHOUT corroboration, revocation does not remove it, and
+    after the call the caller no longer needs the token at all. `control.chiaPeers.list` is a read
+    and stays on the ordinary tier.
 
 ## 3. Envelope
 
@@ -98,9 +105,9 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.peerCounts` | no | delegated | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null, known_dig_peer_count:u32\|null}` |
 | `control.peers.connect` | yes | delegated | `{peer:string}` | `{connected, peer_id}` |
 | `control.peers.disconnect` | yes | delegated | `{peer:string}` | `{disconnected, peer_id}` |
-| `control.chiaPeers.add` | yes | owned | `{ip:string}` | `{added, ip, port, corroboration_bypassed}` |
-| `control.chiaPeers.list` | yes | owned | none | `{peers:[{ip,port,peak_height,user_managed}]}` |
-| `control.chiaPeers.remove` | yes | owned | `{ip:string, ban?:bool}` | `{removed, ip, banned}` |
+| `control.chiaPeers.add` | master | owned | `{ip:string}` | `{added, ip, port, corroboration_bypassed, notice:string}` |
+| `control.chiaPeers.list` | yes | owned | none | `{peers:[{ip,port,peak_height:u32\|null,user_managed,banned}]}` |
+| `control.chiaPeers.remove` | master | owned | `{ip:string, ban?:bool}` | `{outcome:"removed"\|"no_such_peer", ip, banned}` |
 | `control.subscribe` | yes | delegated | `{store_id:string, kind?:"capsule"\|"profile"}` | `{subscribed, added, store_id, kind}` |
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
@@ -118,6 +125,10 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.watched` | yes | delegated | — | `{public_keys:[string]}` |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
+| `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
+| `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
+
+### Trusted Chia peers
 
 A trusted Chia peer BYPASSES CORROBORATION. A conforming node treats dialled Chia peers as
 untrusted and believes a chain answer only when several independently-queried peers agree
@@ -125,8 +136,41 @@ untrusted and believes a chain answer only when several independently-queried pe
 believed on its own. An implementation MUST state that cost where a person adds one, and MUST
 serve `control.chiaPeers.*` from the SAME peer store its wallet replica reads -- a second peer
 list would let the trusted set and the consulted set drift apart silently.
-| `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
-| `pairing.poll` | no | open | `{pairing_id:string}` | `{status, token?}` |
+
+The trust NC-12 authorises is the operator declaring a node THEIR OWN. Every surface an
+implementation offers MUST say that, and MUST NOT widen it to a node the operator merely vouches
+for: the entry carries unbounded authority over the wallet replica precisely because the operator
+controls both ends, which is false of somebody else's node.
+
+`control.chiaPeers.add` and `control.chiaPeers.remove` REQUIRE THE MASTER TOKEN. A paired token
+MUST NOT reach them. `add` writes standing authority that outlives the token that wrote it --
+after the call the caller no longer needs the token, and `control.pairing.revoke` removes the token
+but not the peer entry, so a paired token able to call `add` escapes the remedy for a compromised
+paired app. `control.chiaPeers.list` is a read that confers nothing and stays on the ordinary
+token tier.
+
+`ip` is a BARE IP LITERAL in canonical form: `IpAddr` display -- dotted-quad for v4, and for v6 the
+RFC 5952 lowercase maximally-compressed form, without brackets and without a zone id. A node MUST
+canonicalise on the way in, MUST reject anything that is not an IP literal (a hostname, an empty
+string, `ip:port`, a CIDR block, a bracketed form), and MUST match `add`, `remove` and `list`
+against that one form -- otherwise an operator who spells an address two ways un-trusts nothing.
+When an address and a port are joined, v6 MUST be bracketed: `::1` and `8444` written as
+`::1:8444` is a DIFFERENT valid address, so the mistake survives validation.
+
+`control.chiaPeers.remove` MUST report whether it removed anything. `outcome` is `"removed"` when a
+matching entry existed and `"no_such_peer"` when nothing matched; a client MUST surface the second
+as a failure to act. `remove` is the only way to un-trust a peer, so a success it cannot withhold
+is a lie about whether a privileged action took effect.
+
+`corroboration_bypassed` reports the RESULTING trust state, not the request: a node MUST report
+`false` where the entry did not end up trusted. `notice` carries the node's own warning text and
+MUST be non-empty, MUST name the corroboration bypass, and is rendered verbatim -- it exists so a
+client quotes the node rather than restating the cost and drifting from it.
+
+A ban is exact-match on one address, local to this node, persisted until removed, bounded at 256
+entries (oldest evicted on overflow), enumerated by `control.chiaPeers.list` as `banned: true`, and
+cleared by `remove` with `ban: false`. Clearing a ban that way MUST NOT grant trust; `add` also
+un-bans, but it confers the bypass, so it MUST NOT be the only route back.
 
 The wallet CHAIN READS (`control.wallet.balance` / `.coins` / `.coinById` / `.coinSpend` /
 `.coinsByParent` / `.peak` /

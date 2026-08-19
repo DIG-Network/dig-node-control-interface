@@ -117,9 +117,9 @@ token, **M** = requires the MASTER token, **—** = open. `Route`: how the node 
 | `control.peerCounts` | — | del | — | `{dig_peer_count:u32\|null, chia_peer_count:u32\|null, known_dig_peer_count:u32\|null}` — DIG content/gossip peers CONNECTED, CHIA full-node peers, and DIG peers this node KNOWS OF (its own address book — a local lower bound, never the network size); `0` is observed, `null` unobservable |
 | `control.peers.connect` | T | del | `{peer:string}` (address or peer_id) | `{connected:true, peer_id}` |
 | `control.peers.disconnect` | T | del | `{peer:string}` (peer_id) | `{disconnected:true, peer_id}` |
-| `control.chiaPeers.add` | T | own | `{ip:string}` | `{added:true, ip, port, corroboration_bypassed:true}` |
-| `control.chiaPeers.list` | T | own | none | `{peers:[{ip,port,peak_height,user_managed}]}` |
-| `control.chiaPeers.remove` | T | own | `{ip:string, ban?:bool}` | `{removed:true, ip, banned}` |
+| `control.chiaPeers.add` | M | own | `{ip:string}` (bare IP literal, canonical) | `{added:true, ip, port, corroboration_bypassed, notice:string}` — trusting a peer means believing it WITHOUT corroboration, so it takes the MASTER token: the entry outlives the token that wrote it and `control.pairing.revoke` does not remove it |
+| `control.chiaPeers.list` | T | own | none | `{peers:[{ip,port,peak_height:u32\|null,user_managed,banned}]}` — `peak_height` is that peer's CLAIM; `null` unobservable, never `0`. The only enumeration of the banned set |
+| `control.chiaPeers.remove` | M | own | `{ip:string, ban?:bool}` | `{outcome:"removed"\|"no_such_peer", ip, banned}` — the ONLY un-trust remedy, so it reports when it matched nothing rather than always succeeding |
 
 ### Wallet chain transport (delegated to the engine)
 
