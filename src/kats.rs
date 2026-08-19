@@ -3308,3 +3308,35 @@ fn the_peer_list_separates_an_unobserved_peak_from_a_real_one() {
     );
     assert!(!trusted.banned && !discovered.banned);
 }
+
+/// **The normative method table renders as ONE table, with the open bootstrap rows inside it.**
+///
+/// A blank line terminates a markdown table, so a paragraph placed between rows does not merely
+/// look untidy — everything after it renders as literal pipe text. When that happened here the
+/// rows that fell out were `pairing.request` and `pairing.poll`, the only TOKEN-LESS methods in
+/// the catalog, so a reimplementer reading SPEC.md saw the gated surface and missed the bootstrap
+/// entirely.
+///
+/// The check is anchored on the LAST row rather than on a row count, so adding a method is free
+/// and interrupting the table is not.
+#[test]
+fn the_spec_method_table_is_not_interrupted_by_prose() {
+    const SPEC: &str = include_str!("../SPEC.md");
+
+    let mut rows = SPEC
+        .lines()
+        .skip_while(|l| !l.starts_with("| Method | Auth |"))
+        .skip(2) // the header and its separator
+        .take_while(|l| l.starts_with('|'));
+
+    let table: Vec<&str> = rows.by_ref().collect();
+    assert!(
+        table.iter().any(|l| l.contains("`control.chiaPeers.add`")),
+        "the trusted-peer rows belong in the table"
+    );
+    let last = table.last().expect("the catalog table has rows");
+    assert!(
+        last.contains("`pairing.poll`"),
+        "the table stops early — the open bootstrap rows have fallen out of it. Last row: {last}"
+    );
+}
