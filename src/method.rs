@@ -132,6 +132,27 @@ pub enum ControlMethod {
     /// `control.peers.disconnect` — drop a pooled peer by peer_id.
     PeersDisconnect,
 
+    // ---- Trusted CHIA full-node peers (shell-owned) ----
+    //
+    // A DIFFERENT network from `control.peers.*` above, which are DIG gossip peers. These name
+    // Chia full nodes the wallet replica will TRUST, and trust here is a real cost: NC-12 makes
+    // dialled peers untrusted precisely so that agreement across several concurrently-queried
+    // peers is what makes a read safe. A trusted peer is exempted from that agreement, so a wrong
+    // or hostile one is believed on its own. Every surface that offers these MUST say so.
+    //
+    // Trust comes from the operator declaring a node THEIR OWN — that is the whole of the
+    // authorisation, and the wording everywhere in this crate says exactly that. It is not
+    // "a node you vouch for": the unbounded authority a trusted peer holds is justified by the
+    // operator controlling both ends, which is false of a stranger's node however well
+    // recommended. A person can be talked into vouching for an address; they cannot be talked
+    // into believing they run it.
+    /// `control.chiaPeers.add` — trust a Chia full node you RUN, bypassing corroboration for it.
+    ChiaPeersAdd,
+    /// `control.chiaPeers.list` — the trusted Chia full-node peers this node tracks.
+    ChiaPeersList,
+    /// `control.chiaPeers.remove` — stop trusting a Chia full node (optionally banning it).
+    ChiaPeersRemove,
+
     // ---- Subscriptions (delegated to the engine) ----
     /// `control.subscribe` — subscribe the node to a store (watch + gap-fill).
     Subscribe,
@@ -208,6 +229,9 @@ impl ControlMethod {
             ControlMethod::PeerCounts => "control.peerCounts",
             ControlMethod::PeersConnect => "control.peers.connect",
             ControlMethod::PeersDisconnect => "control.peers.disconnect",
+            ControlMethod::ChiaPeersAdd => "control.chiaPeers.add",
+            ControlMethod::ChiaPeersList => "control.chiaPeers.list",
+            ControlMethod::ChiaPeersRemove => "control.chiaPeers.remove",
             ControlMethod::Subscribe => "control.subscribe",
             ControlMethod::Unsubscribe => "control.unsubscribe",
             ControlMethod::ListSubscriptions => "control.listSubscriptions",
@@ -324,6 +348,9 @@ impl ControlMethod {
     /// A paired (scoped) token can drive ordinary `control.*` mutations but MUST NOT mint more
     /// tokens or revoke itself — so listing/approving/revoking pairings requires the master token
     /// (a local file read), never a paired token.
+    ///
+    /// This names the pairing LIFECYCLE only. The predicate an auth gate consults is
+    /// [`ControlMethod::requires_master_token`], of which this is a strict subset.
     pub const fn is_pairing_admin(self) -> bool {
         matches!(
             self,
@@ -331,6 +358,40 @@ impl ControlMethod {
                 | ControlMethod::PairingApprove
                 | ControlMethod::PairingRevoke
         )
+    }
+
+    /// Does this method require the MASTER control token — the local file read — rather than any
+    /// valid token?
+    ///
+    /// **This, not [`ControlMethod::is_pairing_admin`], is the predicate an auth gate consults.**
+    /// The master tier is not "pairing administration"; it is every method whose effect OUTLIVES
+    /// the token that invoked it, and pairing administration is one instance of that shape.
+    ///
+    /// The rule, stated so a later method can be judged against it rather than by analogy: a
+    /// method belongs here when a caller holding a paired token could use it to acquire authority
+    /// it keeps AFTER that token is revoked. `pairing.revoke` is the designated remedy for a
+    /// compromised paired app, so any method that survives it has escaped the remedy.
+    ///
+    /// The two members outside the pairing lifecycle are `control.chiaPeers.add` and
+    /// `control.chiaPeers.remove`, and they are here for exactly that reason. `add` writes a
+    /// standing entry into the peer store the wallet replica reads, and a peer in that set is
+    /// believed WITHOUT corroboration — it can dictate money-bearing chain facts (peak height, and
+    /// therefore confirmation counts). Once written, the caller no longer needs the token at all,
+    /// and revoking the token does not remove the entry. A paired token must therefore not be able
+    /// to write one. `remove` is the only un-trust remedy and is gated with it, so a paired token
+    /// cannot strip the peers an operator deliberately trusts.
+    ///
+    /// `control.chiaPeers.list` deliberately stays on the ordinary token tier: it is a READ, it
+    /// grants nothing that outlives the token, and gating it would leave a paired client unable to
+    /// show the operator the trust state it is subject to. That matches `control.wallet.arrivals`,
+    /// which is gated at the ordinary tier for disclosing an association without conferring
+    /// authority.
+    pub const fn requires_master_token(self) -> bool {
+        self.is_pairing_admin()
+            || matches!(
+                self,
+                ControlMethod::ChiaPeersAdd | ControlMethod::ChiaPeersRemove
+            )
     }
 
     /// How the node routes this method (shell-owned, engine-delegated, or open bootstrap).
@@ -389,7 +450,10 @@ impl ControlMethod {
             ControlMethod::PeerStatus
             | ControlMethod::PeerCounts
             | ControlMethod::PeersConnect
-            | ControlMethod::PeersDisconnect => Category::Peers,
+            | ControlMethod::PeersDisconnect
+            | ControlMethod::ChiaPeersAdd
+            | ControlMethod::ChiaPeersList
+            | ControlMethod::ChiaPeersRemove => Category::Peers,
             ControlMethod::Subscribe
             | ControlMethod::Unsubscribe
             | ControlMethod::ListSubscriptions => Category::Subscriptions,
@@ -412,6 +476,9 @@ impl ControlMethod {
     /// A one-line human/agent description for the discovery catalogue.
     pub const fn summary(self) -> &'static str {
         match self {
+            ControlMethod::ChiaPeersAdd => "Trust a Chia full node by IP. A trusted peer BYPASSES CORROBORATION: this node normally believes a chain answer only when several independently-dialled peers agree, and a trusted peer is believed on its own -- so a wrong or hostile one can feed this node a false view of the chain. Add only a node you run yourself.",
+            ControlMethod::ChiaPeersList => "The Chia full-node peers this node tracks, each flagged user_managed: true where a person added it by hand and it is therefore trusted without corroboration.",
+            ControlMethod::ChiaPeersRemove => "Stop trusting a Chia full node, optionally banning it. Removing restores corroboration for that peer: chain answers must once again be agreed by independently-dialled peers.",
             ControlMethod::Status => "A rich node status snapshot (version, uptime, addr, cache, hosted/pinned counts, sync availability).",
             ControlMethod::ConfigGet => "The node's effective configuration (addr/port, upstream + override, cache dir/shared, config path, sync availability).",
             ControlMethod::ConfigSetUpstream => "Persist an upstream-RPC override; takes effect on next node start (requires_restart).",
@@ -487,6 +554,9 @@ impl ControlMethod {
         ControlMethod::PeerCounts,
         ControlMethod::PeersConnect,
         ControlMethod::PeersDisconnect,
+        ControlMethod::ChiaPeersAdd,
+        ControlMethod::ChiaPeersList,
+        ControlMethod::ChiaPeersRemove,
         ControlMethod::Subscribe,
         ControlMethod::Unsubscribe,
         ControlMethod::ListSubscriptions,
@@ -752,6 +822,79 @@ mod tests {
         );
     }
 
+    /// **The master-token tier is the pairing lifecycle PLUS the trusted-peer mutations.**
+    ///
+    /// The set is asserted whole, because the risk is a method quietly joining or leaving it. The
+    /// two non-pairing members are here for a stated reason — `chiaPeers.add` grants authority
+    /// that SURVIVES `pairing.revoke`, so a paired token holding it escapes the very remedy for a
+    /// compromised paired app.
+    #[test]
+    fn the_master_token_tier_is_pairing_admin_plus_the_trusted_peer_mutations() {
+        let master: BTreeSet<&str> = ControlMethod::ALL
+            .iter()
+            .filter(|m| m.requires_master_token())
+            .map(|m| m.name())
+            .collect();
+        let expected: BTreeSet<&str> = [
+            "control.pairing.list",
+            "control.pairing.approve",
+            "control.pairing.revoke",
+            "control.chiaPeers.add",
+            "control.chiaPeers.remove",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(master, expected);
+
+        // Pairing administration is a STRICT subset, not a synonym: a gate that consults
+        // `is_pairing_admin` instead of `requires_master_token` lets a paired token add a peer.
+        for &m in ControlMethod::ALL {
+            assert!(
+                !m.is_pairing_admin() || m.requires_master_token(),
+                "{} is pairing-admin but not master-tier",
+                m.name()
+            );
+        }
+        assert!(
+            master.len()
+                > ControlMethod::ALL
+                    .iter()
+                    .filter(|m| m.is_pairing_admin())
+                    .count(),
+            "the two predicates must not be interchangeable"
+        );
+
+        // Master implies the token is required at all.
+        for &m in ControlMethod::ALL {
+            assert!(
+                !m.requires_master_token() || m.requires_auth(),
+                "{}",
+                m.name()
+            );
+        }
+    }
+
+    /// **The trust wording stays inside NC-12's authorisation: a node the operator RUNS.**
+    ///
+    /// NC-12 permits trust only from "the operator declaring it their own node". Widening that to
+    /// vouching moves the case outside the justification for the unbounded authority the entry
+    /// carries, and "a node you vouch for" is a phrase somebody can be talked into applying to a
+    /// stranger's address.
+    #[test]
+    fn the_add_summary_authorises_only_a_node_the_operator_runs() {
+        let summary = ControlMethod::ChiaPeersAdd.summary().to_lowercase();
+        assert!(
+            summary.contains("a node you run"),
+            "add must name the operator-run scope, got: {summary}"
+        );
+        for widened in ["vouch", "otherwise trust", "trust yourself", "recommend"] {
+            assert!(
+                !summary.contains(widened),
+                "add summary widens operator trust past NC-12 with {widened:?}: {summary}"
+            );
+        }
+    }
+
     #[test]
     fn delegated_set_matches_the_engine_surface() {
         let delegated: BTreeSet<&str> = ControlMethod::ALL
@@ -785,6 +928,49 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(delegated, expected);
+    }
+
+    /// **The trusted-Chia-peer methods are declared, gated, and say what they cost.**
+    ///
+    /// A trusted peer BYPASSES corroboration (NC-12: dialled peers are untrusted and agreement
+    /// across ~5 concurrently-queried peers is what makes a read safe). The catalog is what a
+    /// machine reads before offering the control, so the cost is stated HERE and not only in a
+    /// doc page — a client that surfaces `summary()` surfaces the warning with it.
+    #[test]
+    fn the_trusted_chia_peer_methods_are_gated_and_disclose_the_corroboration_bypass() {
+        let declared: BTreeSet<&str> = ControlMethod::ALL.iter().map(|m| m.name()).collect();
+        for name in [
+            "control.chiaPeers.add",
+            "control.chiaPeers.list",
+            "control.chiaPeers.remove",
+        ] {
+            assert!(declared.contains(name), "{name} is not in the catalog");
+            let m = ControlMethod::from_name(name).expect("from_name round-trips");
+            assert_eq!(m.category(), Category::Peers, "{name} is a peers method");
+            assert_eq!(m.routing(), Routing::Owned, "{name} is served by the shell");
+            assert!(m.requires_auth(), "{name} must require the control token");
+            assert!(!m.is_open_read(), "{name} is not an open read");
+        }
+        // The MUTATIONS need the MASTER token; the READ deliberately does not. `add` writes
+        // standing, corroboration-free authority that outlives the token that wrote it — a paired
+        // token must not be able to install it, and `remove` is the only way back out.
+        assert!(ControlMethod::ChiaPeersAdd.requires_master_token());
+        assert!(ControlMethod::ChiaPeersRemove.requires_master_token());
+        assert!(
+            !ControlMethod::ChiaPeersList.requires_master_token(),
+            "list grants nothing that outlives the token; gating it would blind a paired client \
+             to the trust state it is subject to"
+        );
+        // The COST, not merely the capability: the two methods that change the trusted set must
+        // name the bypass. A summary that only described the action would let a client offer the
+        // control while silently withholding what it gives up.
+        for name in ["control.chiaPeers.add", "control.chiaPeers.remove"] {
+            let summary = ControlMethod::from_name(name).unwrap().summary();
+            assert!(
+                summary.to_lowercase().contains("corroboration"),
+                "{name} summary must name the corroboration bypass, got: {summary}"
+            );
+        }
     }
 
     #[test]

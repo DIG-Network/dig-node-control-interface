@@ -512,6 +512,107 @@ pub struct PeersDisconnectResult {
     pub peer_id: String,
 }
 
+/// One tracked Chia full-node peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeerEntry {
+    /// The peer's IP address, in the canonical form defined by
+    /// [`crate::params::canonical_peer_ip`] — a bare literal, never bracketed and never carrying a
+    /// port.
+    pub ip: String,
+    /// The peer's port (the standard full-node port unless the entry says otherwise).
+    pub port: u16,
+    /// The peak height this peer last reported, or `null` where the node has NO telemetry for it
+    /// yet.
+    ///
+    /// `null` means UNOBSERVABLE, never zero — the convention `control.peerCounts` and
+    /// `control.wallet.peak` already use, and it matters more here: this is the one signal an
+    /// operator has for judging whether a peer they trust WITHOUT corroboration is current or
+    /// stuck, and a peer nobody has polled must not read as a peer stalled at genesis.
+    ///
+    /// A reported height is that peer's CLAIM, never a fact this node verified — never a
+    /// fabricated height, and never to be aggregated into a chain position (NC-12: a maximum over
+    /// claimed peaks is whatever the most dishonest peer says).
+    pub peak_height: Option<u32>,
+    /// TRUE where a person added this peer by hand, which is exactly the set that is trusted
+    /// WITHOUT corroboration. Discovered peers are `false` and stay subject to agreement.
+    pub user_managed: bool,
+    /// TRUE where this entry is BANNED — kept so discovery cannot re-add it, and excluded from
+    /// every chain read.
+    ///
+    /// Banned entries appear in this list because it is the ONLY enumeration of the banned set,
+    /// and a blocklist a person cannot read is a blocklist they cannot correct.
+    pub banned: bool,
+}
+
+/// `control.chiaPeers.list` — every tracked Chia peer: trusted, discovered and banned alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersListResult {
+    /// The tracked peers — read `user_managed` to tell the trusted set from the discovered one,
+    /// and `banned` to see the exclusions. A conforming node MUST NOT omit banned entries: this
+    /// list is the only way to enumerate them.
+    pub peers: Vec<ChiaPeerEntry>,
+}
+
+/// `control.chiaPeers.add` — the acknowledgement, including the cost that was paid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersAddResult {
+    /// Always `true` on success (idempotent — re-adding a known peer succeeds and un-bans it).
+    pub added: bool,
+    /// The peer's IP address as stored, in the canonical form defined by
+    /// [`crate::params::canonical_peer_ip`].
+    pub ip: String,
+    /// The port the entry was stored at.
+    pub port: u16,
+    /// Whether this peer is NOW believed without corroboration — the RESULTING trust state, not a
+    /// restatement of what was asked for.
+    ///
+    /// `true` in the ordinary case, and a conforming node MUST report `false` where the entry did
+    /// not end up trusted, however that came about (an upsert that touches other columns and
+    /// leaves the trusted flag alone is how it happens in practice). Reported honestly, this is
+    /// the only way an operator learns that the node they believe they configured is still subject
+    /// to corroboration; reported as a constant, it is a claim about custody-grade authority that
+    /// nothing checks.
+    pub corroboration_bypassed: bool,
+    /// The human-readable warning the node authored for this call, to be rendered VERBATIM to the
+    /// person who made it.
+    ///
+    /// This is the field a client quotes instead of restating the cost locally and drifting from
+    /// the node's wording. It MUST be non-empty and MUST name the corroboration bypass; a client
+    /// MUST NOT paraphrase, truncate or suppress it.
+    pub notice: String,
+}
+
+/// What `control.chiaPeers.remove` actually DID.
+///
+/// An enum rather than a boolean, and deliberately with no always-true companion field, because
+/// `remove` is the ONLY way to un-trust a peer holding unbounded authority over the money-bearing
+/// wallet replica. A remedy that cannot report its own failure is worse than no remedy: the
+/// operator believes they revoked custody-grade trust and they did not. A consumer has to MATCH on
+/// this, so it cannot render "nothing was there" as "it is gone".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChiaPeerRemovalOutcome {
+    /// A matching entry existed and is gone — or, with `ban`, is now banned.
+    Removed,
+    /// NOTHING matched the address given. The trusted set is unchanged, so any peer the caller
+    /// meant to un-trust is STILL trusted — most often because the address was spelled differently
+    /// from the stored entry. A client MUST surface this as a failure to act, never as success.
+    NoSuchPeer,
+}
+
+/// `control.chiaPeers.remove` — the acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiaPeersRemoveResult {
+    /// What happened — see [`ChiaPeerRemovalOutcome`]. There is no `removed: true` here, on
+    /// purpose.
+    pub outcome: ChiaPeerRemovalOutcome,
+    /// The peer's IP address as targeted, in the canonical form defined by
+    /// [`crate::params::canonical_peer_ip`].
+    pub ip: String,
+    /// Whether the peer is now BANNED rather than merely forgotten.
+    pub banned: bool,
+}
+
 /// `control.subscribe` — the subscription acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeResult {
@@ -2171,5 +2272,124 @@ mod tests {
                 "raw diverged from the parsed parts for {advertised:?} — `raw` is now                  load-bearing; see this test's doc comment before changing anything"
             );
         }
+    }
+
+    /// **`remove` can report that it removed NOTHING, and the two answers are distinguishable on
+    /// the wire.**
+    ///
+    /// The fixture varies ONE thing — the outcome — and holds `ip` and `banned` fixed, so the
+    /// difference it detects can only be the outcome itself. A result type carrying `removed: true`
+    /// unconditionally would make these two JSON documents identical, which is exactly the state
+    /// where an operator reads "un-trusted" off a call that un-trusted nothing.
+    #[test]
+    fn a_removal_that_matched_nothing_is_not_serialised_as_a_removal() {
+        let removed = ChiaPeersRemoveResult {
+            outcome: ChiaPeerRemovalOutcome::Removed,
+            ip: "203.0.113.7".into(),
+            banned: false,
+        };
+        let missed = ChiaPeersRemoveResult {
+            outcome: ChiaPeerRemovalOutcome::NoSuchPeer,
+            ..removed.clone()
+        };
+
+        let a = serde_json::to_value(&removed).unwrap();
+        let b = serde_json::to_value(&missed).unwrap();
+        assert_ne!(a, b, "the two outcomes must differ on the wire");
+        assert_eq!(a["outcome"], "removed");
+        assert_eq!(b["outcome"], "no_such_peer");
+
+        // No field of the miss may be a success flag a client could render as one. Every other
+        // field is identical by construction, so this asserts the outcome is the ONLY signal.
+        let miss_obj = b.as_object().unwrap();
+        assert!(
+            !miss_obj
+                .values()
+                .any(|v| v == &serde_json::Value::Bool(true)),
+            "a miss must carry no `true` a client can mistake for success: {b}"
+        );
+
+        // And it round-trips, so a consumer cannot lose the distinction by decoding.
+        let back: ChiaPeersRemoveResult = serde_json::from_value(b).unwrap();
+        assert_eq!(back.outcome, ChiaPeerRemovalOutcome::NoSuchPeer);
+    }
+
+    /// **An unpolled peer serialises as `null`, never as height zero.**
+    ///
+    /// `peak_height` is the one signal for judging whether a peer trusted WITHOUT corroboration is
+    /// current or stuck. The fixture holds a genuinely-observed `0` beside the unobserved peer,
+    /// because a `u32` field collapses those two into the same byte and the collapse is the defect.
+    #[test]
+    fn an_unobserved_peak_is_null_and_an_observed_zero_is_not() {
+        let entry = |peak| ChiaPeerEntry {
+            ip: "203.0.113.7".into(),
+            port: 8444,
+            peak_height: peak,
+            user_managed: true,
+            banned: false,
+        };
+        let unobserved = serde_json::to_value(entry(None)).unwrap();
+        let genesis = serde_json::to_value(entry(Some(0))).unwrap();
+
+        // Indexing a MISSING key also yields `Null`, so presence is asserted first — otherwise
+        // an implementation that skipped the field entirely would pass this test while telling a
+        // reader nothing at all about the peer.
+        assert!(
+            unobserved.get("peak_height").is_some(),
+            "the key must be PRESENT and null, not omitted: {unobserved}"
+        );
+        assert_eq!(unobserved["peak_height"], serde_json::Value::Null);
+        assert_eq!(genesis["peak_height"], 0);
+        assert_ne!(
+            unobserved["peak_height"], genesis["peak_height"],
+            "unobservable and observed-zero must not render the same"
+        );
+    }
+
+    /// **A banned peer is enumerable — `list` is the only place the blocklist is visible.**
+    #[test]
+    fn the_peer_list_can_carry_a_banned_entry() {
+        let listed = ChiaPeersListResult {
+            peers: vec![ChiaPeerEntry {
+                ip: "203.0.113.9".into(),
+                port: 8444,
+                peak_height: None,
+                user_managed: false,
+                banned: true,
+            }],
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["peers"][0]["banned"], true);
+        let back: ChiaPeersListResult = serde_json::from_value(json).unwrap();
+        assert!(back.peers[0].banned);
+    }
+
+    /// **The add result carries the warning TEXT, not only a flag saying a cost was paid.**
+    ///
+    /// The field exists so a client can quote the node's own sentence rather than restate it and
+    /// drift. A boolean cannot be quoted, so the assertion is that a quotable, non-empty string
+    /// naming the bypass reaches the wire under a stable key.
+    #[test]
+    fn the_add_result_carries_a_quotable_bypass_notice() {
+        let json = serde_json::to_value(ChiaPeersAddResult {
+            added: true,
+            ip: "203.0.113.7".into(),
+            port: 8444,
+            corroboration_bypassed: true,
+            notice: "believed WITHOUT corroboration".into(),
+        })
+        .unwrap();
+
+        let notice = json["notice"]
+            .as_str()
+            .expect("notice is a string on the wire");
+        assert!(
+            !notice.trim().is_empty(),
+            "an empty notice discloses nothing"
+        );
+        assert!(
+            notice.to_lowercase().contains("corroboration"),
+            "the notice must name the cost it exists to disclose: {notice}"
+        );
     }
 }

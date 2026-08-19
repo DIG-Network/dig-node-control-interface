@@ -924,6 +924,28 @@ thread_local! {
 /// every method group without a running node.
 struct MockNode;
 
+/// The one Chia peer [`MockNode`] pretends to have trusted, canonical per
+/// [`crate::params::canonical_peer_ip`].
+pub const MOCK_TRUSTED_CHIA_PEER: &str = "203.0.113.7";
+
+/// A peer [`MockNode`] holds as BANNED, so the un-ban-without-trust case is reachable.
+///
+/// It exists because that case is real, not hypothetical: an upsert that clears the ban flag and
+/// leaves the trusted flag alone grants no corroboration bypass, and the result has to say so.
+pub const MOCK_BANNED_CHIA_PEER: &str = "198.51.100.9";
+
+/// The verbatim warning [`MockNode`] returns as `ChiaPeersAddResult::notice`.
+///
+/// A node authors its own wording; what the contract fixes is that the sentence EXISTS on the wire
+/// and names the corroboration bypass, so a client quotes it instead of restating it.
+/// What [`MockNode`] says when the entry was un-banned but NOT trusted.
+pub const MOCK_UNBANNED_WITHOUT_TRUST_NOTICE: &str =
+    "This peer is no longer banned, but it was NOT granted trust: chain answers from it still      require corroboration from other peers.";
+
+pub const MOCK_CORROBORATION_BYPASS_NOTICE: &str =
+    "This node will now believe 203.0.113.7 WITHOUT corroboration: chain answers from it are \
+     accepted on their own, with no agreement from other peers. Add only a node you run yourself.";
+
 #[async_trait::async_trait]
 impl ControlHandler for MockNode {
     async fn status(&self) -> Result<results::StatusResult, ControlError> {
@@ -1113,6 +1135,65 @@ impl ControlHandler for MockNode {
         Ok(results::PeersDisconnectResult {
             disconnected: true,
             peer_id: params.peer,
+        })
+    }
+    async fn chia_peers_add(
+        &self,
+        params: ChiaPeersAddParams,
+    ) -> Result<results::ChiaPeersAddResult, ControlError> {
+        let ip = crate::params::canonical_peer_ip(&params.ip)?;
+        // Adding a BANNED peer clears the ban and grants no trust, so the bypass did not happen
+        // and the result must not claim it did.
+        let trusted = ip != MOCK_BANNED_CHIA_PEER;
+        Ok(results::ChiaPeersAddResult {
+            added: true,
+            ip,
+            port: 8444,
+            corroboration_bypassed: trusted,
+            notice: if trusted {
+                MOCK_CORROBORATION_BYPASS_NOTICE.to_string()
+            } else {
+                MOCK_UNBANNED_WITHOUT_TRUST_NOTICE.to_string()
+            },
+        })
+    }
+    async fn chia_peers_list(&self) -> Result<results::ChiaPeersListResult, ControlError> {
+        Ok(results::ChiaPeersListResult {
+            peers: vec![
+                results::ChiaPeerEntry {
+                    ip: MOCK_TRUSTED_CHIA_PEER.into(),
+                    port: 8444,
+                    peak_height: Some(6_000_010),
+                    user_managed: true,
+                    banned: false,
+                },
+                // A peer nobody has polled yet: `null`, never `0` — see `ChiaPeerEntry`.
+                results::ChiaPeerEntry {
+                    ip: "2001:db8::2".into(),
+                    port: 8444,
+                    peak_height: None,
+                    user_managed: false,
+                    banned: false,
+                },
+            ],
+        })
+    }
+    async fn chia_peers_remove(
+        &self,
+        params: ChiaPeersRemoveParams,
+    ) -> Result<results::ChiaPeersRemoveResult, ControlError> {
+        let ip = crate::params::canonical_peer_ip(&params.ip)?;
+        // The mock knows ONE peer, so it can answer the question honestly instead of asserting
+        // success — which is the whole point of the outcome enum.
+        let outcome = if ip == MOCK_TRUSTED_CHIA_PEER {
+            results::ChiaPeerRemovalOutcome::Removed
+        } else {
+            results::ChiaPeerRemovalOutcome::NoSuchPeer
+        };
+        Ok(results::ChiaPeersRemoveResult {
+            outcome,
+            banned: params.ban && outcome == results::ChiaPeerRemovalOutcome::Removed,
+            ip,
         })
     }
     async fn subscribe(
@@ -1663,6 +1744,8 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::UpdaterPause => json!({}),
         ControlMethod::PairingApprove => json!({"pairing_id": "x"}),
         ControlMethod::PairingRevoke => json!({"token_id": "x"}),
+        ControlMethod::ChiaPeersAdd => json!({"ip": "203.0.113.7"}),
+        ControlMethod::ChiaPeersRemove => json!({"ip": "203.0.113.7"}),
         ControlMethod::PeersConnect | ControlMethod::PeersDisconnect => json!({"peer": "p"}),
         ControlMethod::Subscribe | ControlMethod::Unsubscribe => json!({"store_id": STORE}),
         ControlMethod::PairingRequest => json!({"client_name": "c"}),
@@ -3133,4 +3216,174 @@ fn the_dispatcher_routes_each_profile_method_to_its_own_handler() {
         "a read answers at the root it was ASKED for, never a newer one the node happens to hold"
     );
     assert_eq!(got.body_b64, None);
+}
+
+// ---- control.chiaPeers.* (dig_ecosystem#2870) -----------------------------------------------
+
+/// **Adding a trusted peer puts the WARNING TEXT on the wire, not merely a flag.**
+///
+/// `corroboration_bypassed` records that a cost was paid; it cannot be quoted. The whole reason
+/// this result carries `notice` is so a client renders the node's own sentence instead of
+/// restating the cost locally and drifting from it — so the KAT asserts a quotable, non-empty
+/// string that NAMES the bypass reaches the caller through the real dispatcher.
+#[test]
+fn adding_a_trusted_peer_returns_the_bypass_warning_as_quotable_text() {
+    let added = round_trip(&ChiaPeersAddParams {
+        ip: " 203.0.113.7 ".into(),
+    })
+    .expect("chiaPeers.add must route");
+
+    assert!(added.added);
+    assert_eq!(
+        added.ip, MOCK_TRUSTED_CHIA_PEER,
+        "the stored address is the CANONICAL form, so remove and list can match it"
+    );
+    assert!(added.corroboration_bypassed);
+    assert!(
+        !added.notice.trim().is_empty(),
+        "an empty notice discloses nothing"
+    );
+    assert!(
+        added.notice.to_lowercase().contains("corroboration"),
+        "the notice must name the cost it exists to disclose: {}",
+        added.notice
+    );
+}
+
+/// **Removing a peer that was never trusted reports that it removed NOTHING.**
+///
+/// The fixture varies ONE actor: the same call is made twice, once naming the peer the node
+/// actually holds and once naming a peer it does not, with everything else identical. An
+/// implementation that answers "removed" unconditionally passes the first and fails here — which
+/// is the point, because `remove` is the only way to un-trust a peer that is believed without
+/// corroboration, and an operator acts on its answer.
+#[test]
+fn removing_a_peer_the_node_never_had_is_not_reported_as_a_removal() {
+    let hit = round_trip(&ChiaPeersRemoveParams {
+        ip: MOCK_TRUSTED_CHIA_PEER.into(),
+        ban: false,
+    })
+    .expect("chiaPeers.remove must route");
+    assert_eq!(hit.outcome, results::ChiaPeerRemovalOutcome::Removed);
+
+    let miss = round_trip(&ChiaPeersRemoveParams {
+        ip: "198.51.100.4".into(),
+        ban: false,
+    })
+    .expect("chiaPeers.remove must route");
+    assert_eq!(
+        miss.outcome,
+        results::ChiaPeerRemovalOutcome::NoSuchPeer,
+        "a peer the node never held must not be reported as un-trusted"
+    );
+    assert_ne!(
+        hit.outcome, miss.outcome,
+        "the two cases must be distinguishable at the call site"
+    );
+}
+
+/// **An address that is not a bare IP literal is refused at the boundary.**
+///
+/// A rejected address is never written, which is what keeps the ban list — a persisted row keyed
+/// by this string — from growing without bound on arbitrary text.
+#[test]
+fn a_peer_address_that_is_not_an_ip_literal_is_refused() {
+    for bad in ["[203.0.113.7]", "203.0.113.7:8444", "peer.example.com", ""] {
+        let err = round_trip(&ChiaPeersAddParams { ip: bad.into() })
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} must be refused"));
+        assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+    }
+}
+
+/// **A peer nobody has polled lists a `null` peak, and the trusted flag tells the sets apart.**
+///
+/// `peak_height` is the one signal for judging whether a peer trusted WITHOUT corroboration is
+/// current or stuck, so "not polled" must not render as "stalled at genesis" — the two peers in
+/// this fixture differ in exactly that, and in nothing else that could carry the distinction.
+#[test]
+fn the_peer_list_separates_an_unobserved_peak_from_a_real_one() {
+    let listed = futures::executor::block_on(MockNode.chia_peers_list()).expect("list must answer");
+    let trusted = listed
+        .peers
+        .iter()
+        .find(|p| p.user_managed)
+        .expect("the mock holds one trusted peer");
+    let discovered = listed
+        .peers
+        .iter()
+        .find(|p| !p.user_managed)
+        .expect("and one discovered peer");
+
+    assert!(
+        trusted.peak_height.is_some(),
+        "a polled peer reports its claimed height"
+    );
+    assert_eq!(
+        discovered.peak_height, None,
+        "a peer nobody polled is UNOBSERVABLE, never height zero"
+    );
+    assert!(!trusted.banned && !discovered.banned);
+}
+
+/// **The normative method table renders as ONE table, with the open bootstrap rows inside it.**
+///
+/// A blank line terminates a markdown table, so a paragraph placed between rows does not merely
+/// look untidy — everything after it renders as literal pipe text. When that happened here the
+/// rows that fell out were `pairing.request` and `pairing.poll`, the only TOKEN-LESS methods in
+/// the catalog, so a reimplementer reading SPEC.md saw the gated surface and missed the bootstrap
+/// entirely.
+///
+/// The check is anchored on the LAST row rather than on a row count, so adding a method is free
+/// and interrupting the table is not.
+#[test]
+fn the_spec_method_table_is_not_interrupted_by_prose() {
+    const SPEC: &str = include_str!("../SPEC.md");
+
+    let mut rows = SPEC
+        .lines()
+        .skip_while(|l| !l.starts_with("| Method | Auth |"))
+        .skip(2) // the header and its separator
+        .take_while(|l| l.starts_with('|'));
+
+    let table: Vec<&str> = rows.by_ref().collect();
+    assert!(
+        table.iter().any(|l| l.contains("`control.chiaPeers.add`")),
+        "the trusted-peer rows belong in the table"
+    );
+    let last = table.last().expect("the catalog table has rows");
+    assert!(
+        last.contains("`pairing.poll`"),
+        "the table stops early — the open bootstrap rows have fallen out of it. Last row: {last}"
+    );
+}
+
+/// **The add result reports the trust state that RESULTED, not the one that was requested.**
+///
+/// A constant `true` is a claim about custody-grade authority that nothing checks. The fixture
+/// varies ONE thing — whether the address was already held as banned — and the un-ban path is the
+/// case that actually occurs: an upsert clears the ban flag and leaves the trusted flag alone, so
+/// the peer ends up untrusted while the caller is told they configured a trusted node. An operator
+/// who believes that is silently depending on corroboration they were told they had bypassed.
+#[test]
+fn adding_a_banned_peer_reports_that_no_bypass_was_granted() {
+    let trusted = round_trip(&ChiaPeersAddParams {
+        ip: MOCK_TRUSTED_CHIA_PEER.into(),
+    })
+    .expect("add must route");
+    let unbanned = round_trip(&ChiaPeersAddParams {
+        ip: MOCK_BANNED_CHIA_PEER.into(),
+    })
+    .expect("add must route");
+
+    assert!(trusted.added && unbanned.added, "both calls succeed");
+    assert!(trusted.corroboration_bypassed);
+    assert!(
+        !unbanned.corroboration_bypassed,
+        "the entry did not end up trusted, so the result must not claim the bypass"
+    );
+    assert!(
+        !unbanned.notice.trim().is_empty(),
+        "the person still needs to be told what actually happened"
+    );
 }
