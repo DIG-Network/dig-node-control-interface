@@ -81,6 +81,7 @@ token, **M** = requires the MASTER token, **—** = open. `Route`: how the node 
 | `control.hostedStores.pin` | T | own | `{store:"storeId[:root]"}` | `{store_id, root:string\|null, pinned:true, fetch:{status,…}}` |
 | `control.hostedStores.unpin` | T | own | `{store}` | `{store_id, unpinned:bool, evicted_capsules:u64}` |
 | `control.hostedStores.status` | T | own | `{store}` | `{store_id, pinned, capsule_count, total_bytes, capsules}` |
+| `control.capsule.fetch` | T | own | `{store, root}` | `{store, root, status}` (started/already_cached/unavailable) |
 
 ### §21 whole-store sync
 

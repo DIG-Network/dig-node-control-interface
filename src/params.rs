@@ -130,6 +130,19 @@ pub struct HostedStoreStatusParams {
 }
 control_call!(HostedStoreStatusParams => ControlMethod::HostedStoresStatus, results::HostedStoreStatusResult);
 
+/// `control.capsule.fetch` params: WHICH capsule to pull, named by store id + root — the same
+/// two-field shape as [`ProfileGetBodyParams`], not the colon-joined `store` string
+/// [`PinParams`]/[`SyncTriggerParams`] use, because the caller always knows both parts already
+/// (there is no store-level-only fetch).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapsuleFetchParams {
+    /// The store id to fetch a capsule of.
+    pub store: String,
+    /// The capsule root to fetch.
+    pub root: String,
+}
+control_call!(CapsuleFetchParams => ControlMethod::CapsuleFetch, results::CapsuleFetchResult);
+
 /// `control.sync.trigger` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncTriggerParams {

@@ -91,6 +91,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.hostedStores.pin` | yes | owned | `{store:"storeId[:root]"}` | `{store_id, root, pinned, fetch}` |
 | `control.hostedStores.unpin` | yes | owned | `{store}` | `{store_id, unpinned, evicted_capsules}` |
 | `control.hostedStores.status` | yes | owned | `{store}` | `{store_id, pinned, capsule_count, total_bytes, capsules}` |
+| `control.capsule.fetch` | yes | owned | `{store, root}` | `{store, root, status}` (`"started"`\|`"already_cached"`\|`"unavailable"`) |
 | `control.sync.status` | yes | owned | — | `{available, method, pinned_total, pinned_synced, whole_store_trigger_supported}` |
 | `control.sync.trigger` | yes | owned | `{store:"storeId:root"}` | `{store_id, root, status, size_bytes, served_root}` |
 | `control.updater.status` | yes | owned | — | (proxied beacon status) |
