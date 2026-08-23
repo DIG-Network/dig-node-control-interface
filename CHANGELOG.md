@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.19.0] - 2026-08-23
+
+### Features
+- Declare control.capsule.fetch for operator-triggered P2P pulls (#23)
+
 ## [0.18.0] - 2026-08-19
 
 ### Features
