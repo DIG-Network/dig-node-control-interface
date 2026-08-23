@@ -95,6 +95,9 @@ pub enum ControlMethod {
     HostedStoresUnpin,
     /// `control.hostedStores.status` — per-store pinned flag + cached capsules.
     HostedStoresStatus,
+    /// `control.capsule.fetch` — start (or report already-cached) a P2P whole-capsule pull for
+    /// one store+root, over the recursive discover-then-dial path rather than the §21 HTTP sync.
+    CapsuleFetch,
 
     // ---- §21 sync (shell-owned) ----
     /// `control.sync.status` — whether authenticated whole-store sync is available + pin coverage.
@@ -215,6 +218,7 @@ impl ControlMethod {
             ControlMethod::HostedStoresPin => "control.hostedStores.pin",
             ControlMethod::HostedStoresUnpin => "control.hostedStores.unpin",
             ControlMethod::HostedStoresStatus => "control.hostedStores.status",
+            ControlMethod::CapsuleFetch => "control.capsule.fetch",
             ControlMethod::SyncStatus => "control.sync.status",
             ControlMethod::SyncTrigger => "control.sync.trigger",
             ControlMethod::UpdaterStatus => "control.updater.status",
@@ -435,7 +439,8 @@ impl ControlMethod {
             ControlMethod::HostedStoresList
             | ControlMethod::HostedStoresPin
             | ControlMethod::HostedStoresUnpin
-            | ControlMethod::HostedStoresStatus => Category::HostedStores,
+            | ControlMethod::HostedStoresStatus
+            | ControlMethod::CapsuleFetch => Category::HostedStores,
             ControlMethod::SyncStatus | ControlMethod::SyncTrigger => Category::Sync,
             ControlMethod::UpdaterStatus
             | ControlMethod::UpdaterSetChannel
@@ -490,6 +495,7 @@ impl ControlMethod {
             ControlMethod::HostedStoresPin => "Pin a store (storeId[:rootHash]); pre-fetches the capsule when a root is given and §21 sync is available.",
             ControlMethod::HostedStoresUnpin => "Unpin a store and evict its cached capsules.",
             ControlMethod::HostedStoresStatus => "Per-store status: pinned flag, cached capsules, total bytes.",
+            ControlMethod::CapsuleFetch => "Start a P2P whole-capsule pull for one store+root over the recursive discover-then-dial path (distinct from the §21 HTTP sync `control.sync.trigger` uses). Answers `already_cached` without dialling out when the capsule is already on disk.",
             ControlMethod::SyncStatus => "Whether authenticated §21 whole-store sync is available, plus pinned-store cache coverage.",
             ControlMethod::SyncTrigger => "Trigger a §21 sync for one capsule (storeId + root).",
             ControlMethod::UpdaterStatus => "The DIG auto-update beacon's current status (proxied from dig-updater).",
@@ -540,6 +546,7 @@ impl ControlMethod {
         ControlMethod::HostedStoresPin,
         ControlMethod::HostedStoresUnpin,
         ControlMethod::HostedStoresStatus,
+        ControlMethod::CapsuleFetch,
         ControlMethod::SyncStatus,
         ControlMethod::SyncTrigger,
         ControlMethod::UpdaterStatus,

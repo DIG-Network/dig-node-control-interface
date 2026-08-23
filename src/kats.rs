@@ -113,6 +113,13 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.hostedStores.pin","params":{"store":format!("{STORE}:{ROOT}")}}),
     );
     assert_request(
+        &CapsuleFetchParams {
+            store: STORE.into(),
+            root: ROOT.into(),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.capsule.fetch","params":{"store":STORE,"root":ROOT}}),
+    );
+    assert_request(
         &SyncTriggerParams {
             store: format!("{STORE}:{ROOT}"),
         },
@@ -259,6 +266,9 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::SyncStatusResult>(json!({
         "available": true, "method": "section-21-whole-store-sync",
         "pinned_total": 2, "pinned_synced": 1, "whole_store_trigger_supported": false
+    }));
+    assert_result_round_trips::<results::CapsuleFetchResult>(json!({
+        "store": STORE, "root": ROOT, "status": "started"
     }));
     assert_result_round_trips::<results::SyncTriggerResult>(json!({
         "store_id": STORE, "root": ROOT, "status": "synced",
@@ -1057,6 +1067,16 @@ impl ControlHandler for MockNode {
             capsules: vec![],
         })
     }
+    async fn capsule_fetch(
+        &self,
+        params: CapsuleFetchParams,
+    ) -> Result<results::CapsuleFetchResult, ControlError> {
+        Ok(results::CapsuleFetchResult {
+            store: params.store,
+            root: params.root,
+            status: "started".into(),
+        })
+    }
     async fn sync_status(&self) -> Result<results::SyncStatusResult, ControlError> {
         Ok(results::SyncStatusResult {
             available: true,
@@ -1545,6 +1565,27 @@ fn dispatcher_routes_every_taking_params_method_to_its_typed_handler() {
     })
     .unwrap();
     assert_eq!(sync.root, ROOT);
+    // Two DISTINCT stores through the same call site: a handler wired to the wrong arm (e.g.
+    // sync_trigger's) would either error on the unjoined `store`/`root` shape or echo the wrong
+    // pair, so this fails for the right reason rather than merely returning something.
+    let fetch_a = round_trip(&CapsuleFetchParams {
+        store: STORE.into(),
+        root: ROOT.into(),
+    })
+    .unwrap();
+    assert_eq!(
+        (fetch_a.store.as_str(), fetch_a.root.as_str()),
+        (STORE, ROOT)
+    );
+    let fetch_b = round_trip(&CapsuleFetchParams {
+        store: "otherstore".into(),
+        root: "otherroot".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        (fetch_b.store.as_str(), fetch_b.root.as_str()),
+        ("otherstore", "otherroot")
+    );
     let sub = round_trip(&SubscribeParams {
         store_id: STORE.into(),
         kind: SubscriptionKind::Profile,
@@ -1740,6 +1781,7 @@ fn minimal_params(m: ControlMethod) -> Value {
         | ControlMethod::HostedStoresUnpin
         | ControlMethod::HostedStoresStatus
         | ControlMethod::SyncTrigger => json!({"store": STORE}),
+        ControlMethod::CapsuleFetch => json!({"store": STORE, "root": ROOT}),
         ControlMethod::UpdaterSetChannel => json!({"channel": "stable"}),
         ControlMethod::UpdaterPause => json!({}),
         ControlMethod::PairingApprove => json!({"pairing_id": "x"}),

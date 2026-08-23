@@ -365,6 +365,25 @@ pub struct HostedStoreStatusResult {
     pub capsules: Vec<CapsuleEntry>,
 }
 
+/// `control.capsule.fetch` — the P2P pull acknowledgement.
+///
+/// This is a STARTED/ALREADY-CACHED acknowledgement, not a completion report: unlike
+/// `control.sync.trigger`'s §21 HTTP fetch (synchronous, single hop), a P2P pull recursively
+/// discovers a holder and may stream through several onion hops, so it can take arbitrarily
+/// long. A caller wanting to know when the bytes actually land polls `control.hostedStores.status`
+/// for the store, the same way `control.hostedStores.pin`'s pre-fetch is observed today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapsuleFetchResult {
+    /// The store id the fetch was requested for.
+    pub store: String,
+    /// The capsule root requested.
+    pub root: String,
+    /// The outcome: `"started"` (a P2P pull was launched), `"already_cached"` (the capsule was
+    /// already on disk and no pull was needed), or `"unavailable"` (recursive discovery found no
+    /// holder to pull from right now — the caller may retry later).
+    pub status: String,
+}
+
 /// `control.sync.status` — §21 sync availability + pin coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStatusResult {

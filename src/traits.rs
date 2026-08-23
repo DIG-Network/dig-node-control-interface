@@ -136,6 +136,11 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::HostedStoreStatusParams,
     ) -> Result<results::HostedStoreStatusResult, ControlError>;
+    /// `control.capsule.fetch`
+    async fn capsule_fetch(
+        &self,
+        params: params::CapsuleFetchParams,
+    ) -> Result<results::CapsuleFetchResult, ControlError>;
     /// `control.sync.status`
     async fn sync_status(&self) -> Result<results::SyncStatusResult, ControlError>;
     /// `control.sync.trigger`
@@ -484,6 +489,7 @@ pub trait ControlHandler: Sync {
             ControlMethod::HostedStoresStatus => {
                 encode(self.hosted_stores_status(decode(params)?).await?)
             }
+            ControlMethod::CapsuleFetch => encode(self.capsule_fetch(decode(params)?).await?),
             ControlMethod::SyncStatus => encode(self.sync_status().await?),
             ControlMethod::SyncTrigger => encode(self.sync_trigger(decode(params)?).await?),
             ControlMethod::UpdaterStatus => self.updater_status().await,
