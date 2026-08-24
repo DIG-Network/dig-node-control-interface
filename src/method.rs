@@ -189,6 +189,12 @@ pub enum ControlMethod {
     WalletUnwatch,
     /// `control.wallet.watched` — list the public keys currently enrolled.
     WalletWatched,
+    /// `control.wallet.reservations.held` — read which coins are committed to in-flight spends.
+    WalletReservationsHeld,
+    /// `control.wallet.reservations.reserve` — atomically hold coins, all of them or none.
+    WalletReservationsReserve,
+    /// `control.wallet.reservations.release` — free a hold now, ahead of its TTL.
+    WalletReservationsRelease,
 
     // ---- dig-profile bodies (delegated to the engine) ----
     /// `control.profile.putBody` — hand the node the profile body a CONFIRMED chain root commits to.
@@ -251,6 +257,9 @@ impl ControlMethod {
             ControlMethod::WalletWatch => "control.wallet.watch",
             ControlMethod::WalletUnwatch => "control.wallet.unwatch",
             ControlMethod::WalletWatched => "control.wallet.watched",
+            ControlMethod::WalletReservationsHeld => "control.wallet.reservations.held",
+            ControlMethod::WalletReservationsReserve => "control.wallet.reservations.reserve",
+            ControlMethod::WalletReservationsRelease => "control.wallet.reservations.release",
             ControlMethod::ProfilePutBody => "control.profile.putBody",
             ControlMethod::ProfileGetBody => "control.profile.getBody",
             ControlMethod::PairingRequest => "pairing.request",
@@ -420,6 +429,9 @@ impl ControlMethod {
             | ControlMethod::WalletWatch
             | ControlMethod::WalletUnwatch
             | ControlMethod::WalletWatched
+            | ControlMethod::WalletReservationsHeld
+            | ControlMethod::WalletReservationsReserve
+            | ControlMethod::WalletReservationsRelease
             | ControlMethod::ProfilePutBody
             | ControlMethod::ProfileGetBody => Routing::Delegated,
             ControlMethod::PairingRequest | ControlMethod::PairingPoll => Routing::OpenBootstrap,
@@ -473,7 +485,10 @@ impl ControlMethod {
             | ControlMethod::WalletBroadcast
             | ControlMethod::WalletWatch
             | ControlMethod::WalletUnwatch
-            | ControlMethod::WalletWatched => Category::Wallet,
+            | ControlMethod::WalletWatched
+            | ControlMethod::WalletReservationsHeld
+            | ControlMethod::WalletReservationsReserve
+            | ControlMethod::WalletReservationsRelease => Category::Wallet,
             ControlMethod::ProfilePutBody | ControlMethod::ProfileGetBody => Category::Profile,
         }
     }
@@ -527,6 +542,9 @@ impl ControlMethod {
             ControlMethod::ProfilePutBody => "Hand the node the dig-profile BODY that a chain root commits to. The node INDEPENDENTLY resolves that root on chain and REFUSES any body whose recomputed root is not the confirmed one -- the caller's `root` is a claim to be checked, never a fact to be trusted, and dig-app is a caller like any other. Bodies are capped at MAX_BODY_BYTES (4 MiB). TOKEN-GATED.",
             ControlMethod::ProfileGetBody => "READ-only: the dig-profile body this node holds at a given store id + root, or `body: null` when it holds none. `null` NEVER means the body could not be read, which is an error. TOKEN-GATED.",
             ControlMethod::WalletWatched => "READ-only: the public keys currently enrolled, so a client can reconcile what it asked for against what the node holds. TOKEN-GATED although it is a read -- the caller supplies nothing, so the answer is this node's OWN key set.",
+            ControlMethod::WalletReservationsHeld => "READ-only: every coin currently committed to an in-flight spend, each with the reservation holding it and the unix second that hold lapses, plus the node's own clock. `reserved: []` means NOTHING is held; a set that cannot be read is an error, never an empty list. Narrows what a caller may SELECT; never subtract these from a balance -- the coins are still the user's money. TOKEN-GATED although it is a read: the caller supplies nothing, so the answer is this node's OWN state.",
+            ControlMethod::WalletReservationsReserve => "Atomically hold coins against further selection: EVERY named coin or none. A coin already held refuses the whole call and reserves nothing, as WALLET_COINS_RESERVED -- a WAIT, never a shortfall. Reserving an empty list succeeds with a handle that releases nothing. The requested ttl_secs is clamped by the node, which returns the lifetime it actually applied. Bookkeeping only: it holds no key and authorizes nothing (§908). TOKEN-GATED.",
+            ControlMethod::WalletReservationsRelease => "Free a hold now rather than waiting out its TTL -- call it the moment a spend is known settled or known dead. A handle that names no live reservation is a SUCCESS with released: false, because a caller releasing on confirmation cannot know whether the TTL got there first. Every hold also lapses on its own, so an abandoned reservation is recoverable and never a permanent funds lockout. TOKEN-GATED.",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
         }
@@ -579,6 +597,9 @@ impl ControlMethod {
         ControlMethod::WalletWatch,
         ControlMethod::WalletUnwatch,
         ControlMethod::WalletWatched,
+        ControlMethod::WalletReservationsHeld,
+        ControlMethod::WalletReservationsReserve,
+        ControlMethod::WalletReservationsRelease,
         ControlMethod::ProfilePutBody,
         ControlMethod::ProfileGetBody,
         ControlMethod::PairingRequest,
@@ -642,8 +663,8 @@ mod tests {
         assert_eq!(actual_open, expected_open);
     }
 
-    /// **The gated wallet methods are the push, the arrival cursor, and the three enrolment
-    /// methods.** The fixture varies one thing -- which wallet method is asked -- against a category
+    /// **The gated wallet methods are the push, the arrival cursor, the three enrolment methods,
+    /// and the three reservation methods.** The fixture varies one thing -- which wallet method is asked -- against a category
     /// whose other members ARE open, so both nearest wrong implementations fail here: one that opens
     /// the whole category (the state this crate shipped in at `1190a18`) and one that gates it
     /// wholesale.
@@ -665,6 +686,9 @@ mod tests {
                 "control.wallet.watch",
                 "control.wallet.unwatch",
                 "control.wallet.watched",
+                "control.wallet.reservations.held",
+                "control.wallet.reservations.reserve",
+                "control.wallet.reservations.release",
             ]
         );
         assert!(!ControlMethod::WalletBroadcast.is_open_read());
@@ -921,6 +945,9 @@ mod tests {
             "control.wallet.watch",
             "control.wallet.unwatch",
             "control.wallet.watched",
+            "control.wallet.reservations.held",
+            "control.wallet.reservations.reserve",
+            "control.wallet.reservations.release",
             "control.profile.putBody",
             "control.profile.getBody",
             "control.peerStatus",

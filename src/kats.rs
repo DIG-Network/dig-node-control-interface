@@ -930,6 +930,37 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
 }
 
+/// The instant [`MockNode`] answers at, pinned rather than read from the wall clock.
+///
+/// A reservation fixture that passes a small literal expiry through an API measured in unix seconds
+/// tests only the already-lapsed path, because every such value is ~1.8 billion seconds in the past.
+/// Pinning NOW keeps the live path live.
+const MOCK_NOW_UNIX: u64 = 1_800_000_000;
+
+/// The longest hold [`MockNode`] will grant, mirroring dig-node's `RESERVATION_TTL_MS` (600 s).
+const MOCK_MAX_TTL_SECS: u64 = 600;
+
+/// The hold [`MockNode`] grants when a caller names no TTL, mirroring dig-account's
+/// `DEFAULT_RESERVATION_TTL_SECS` (300 s).
+const MOCK_DEFAULT_TTL_SECS: u64 = 300;
+
+/// Two DISTINCT coins, so an all-or-none acquisition can be told apart from a partial one.
+///
+/// A single-coin fixture cannot express the property at all: with one coin, "took none" and "took
+/// every coin that was free" produce identical observable state.
+const RESERVE_COIN_A: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+const RESERVE_COIN_B: &str = "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2";
+
+// The reservation table `MockNode` serves from: reservation_id -> (held coins, expiry).
+//
+// THREAD-LOCAL for the same reason the enrolment registry is: one test's hold must never satisfy
+// another test's conflict assertion for the wrong reason.
+thread_local! {
+    static RESERVATIONS: std::cell::RefCell<
+        std::collections::BTreeMap<String, (Vec<String>, u64)>,
+    > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 /// A mock node that serves canned typed results — exercises the [`ControlHandler`] dispatcher for
 /// every method group without a running node.
 struct MockNode;
@@ -1489,6 +1520,81 @@ impl ControlHandler for MockNode {
             public_keys: set.borrow().iter().cloned().collect(),
         }))
     }
+    async fn wallet_reservations_held(
+        &self,
+    ) -> Result<results::WalletReservationsHeldResult, ControlError> {
+        Ok(RESERVATIONS.with(|table| results::WalletReservationsHeldResult {
+            reserved: table
+                .borrow()
+                .iter()
+                .filter(|(_, (_, expires))| *expires > MOCK_NOW_UNIX)
+                .flat_map(|(id, (coins, expires))| {
+                    coins.iter().map(move |coin_id| results::ReservedCoin {
+                        coin_id: coin_id.clone(),
+                        reservation_id: id.clone(),
+                        expires_at_unix: *expires,
+                    })
+                })
+                .collect(),
+            as_of_unix: MOCK_NOW_UNIX,
+        }))
+    }
+    async fn wallet_reservations_reserve(
+        &self,
+        params: WalletReservationsReserveParams,
+    ) -> Result<results::WalletReservationsReserveResult, ControlError> {
+        let params = params.validated()?;
+        let ttl_secs = params
+            .ttl_secs
+            .unwrap_or(MOCK_DEFAULT_TTL_SECS)
+            .min(MOCK_MAX_TTL_SECS);
+        RESERVATIONS.with(|table| {
+            let mut table = table.borrow_mut();
+            // Every clash is found BEFORE anything is written, so a refusal leaves the table
+            // exactly as it was — the property the all-or-none KAT observes from outside.
+            let held: std::collections::BTreeSet<&String> = table
+                .values()
+                .filter(|(_, expires)| *expires > MOCK_NOW_UNIX)
+                .flat_map(|(coins, _)| coins.iter())
+                .collect();
+            if let Some(clash) = params.coin_ids.iter().find(|id| held.contains(id)) {
+                return Err(ControlError::of(
+                    ControlErrorCode::WalletCoinsReserved,
+                    format!("coin {clash} is already reserved by an in-flight spend"),
+                ));
+            }
+            let reservation_id = format!("mock-res-{}", table.len() + 1);
+            let expires_at_unix = MOCK_NOW_UNIX + ttl_secs;
+            table.insert(
+                reservation_id.clone(),
+                (params.coin_ids.clone(), expires_at_unix),
+            );
+            Ok(results::WalletReservationsReserveResult {
+                reservation_id,
+                coin_ids: params.coin_ids,
+                expires_at_unix,
+                ttl_secs,
+            })
+        })
+    }
+    async fn wallet_reservations_release(
+        &self,
+        params: WalletReservationsReleaseParams,
+    ) -> Result<results::WalletReservationsReleaseResult, ControlError> {
+        Ok(RESERVATIONS.with(|table| {
+            let freed = table.borrow_mut().remove(&params.reservation_id);
+            match freed {
+                Some((coin_ids, _)) => results::WalletReservationsReleaseResult {
+                    released: true,
+                    coin_ids,
+                },
+                None => results::WalletReservationsReleaseResult {
+                    released: false,
+                    coin_ids: Vec::new(),
+                },
+            }
+        }))
+    }
     async fn profile_put_body(
         &self,
         params: ProfilePutBodyParams,
@@ -1807,6 +1913,8 @@ fn minimal_params(m: ControlMethod) -> Value {
             json!({ "store_id": STORE, "root": ROOT, "body_b64": "" })
         }
         ControlMethod::ProfileGetBody => json!({ "store_id": STORE, "root": ROOT }),
+        ControlMethod::WalletReservationsReserve => json!({ "coin_ids": [] }),
+        ControlMethod::WalletReservationsRelease => json!({ "reservation_id": "mock-res-absent" }),
         _ => json!({}),
     }
 }

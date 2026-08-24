@@ -386,6 +386,56 @@ pub trait ControlHandler: Sync {
     /// custody keys: this method reports what was ENROLLED through it, and a caller reconciling
     /// against a superset would unwatch keys it never watched.
     async fn wallet_watched(&self) -> Result<results::WalletWatchedResult, ControlError>;
+    /// `control.wallet.reservations.held` (READ-only, TOKEN-GATED)
+    ///
+    /// Gated although it is a read: the caller supplies nothing, so the answer names this node's OWN
+    /// in-flight commitments.
+    ///
+    /// An implementation MUST read its own clock rather than accept one, MUST omit every reservation
+    /// that has already lapsed at that instant, and MUST report the clock it used as `as_of_unix`.
+    ///
+    /// An implementation that cannot read its reservation set MUST return
+    /// [`ControlErrorCode::WalletReservationsUnavailable`](crate::error::ControlErrorCode::WalletReservationsUnavailable)
+    /// and MUST NOT return an empty list. "Nothing is held" permits a caller to spend; "I cannot
+    /// tell" must stop it, and the two are indistinguishable once collapsed.
+    async fn wallet_reservations_held(
+        &self,
+    ) -> Result<results::WalletReservationsHeldResult, ControlError>;
+    /// `control.wallet.reservations.reserve` (TOKEN-GATED)
+    ///
+    /// Acquisition MUST be atomic across concurrent callers: take EVERY coin in `coin_ids` or take
+    /// none. On a clash an implementation MUST have written nothing and MUST answer
+    /// [`ControlErrorCode::WalletCoinsReserved`](crate::error::ControlErrorCode::WalletCoinsReserved)
+    /// — never a shortfall code, because the user has the money and is waiting on a settlement, and
+    /// never a partial success, because a caller believing it holds inputs it does not is the state
+    /// all-or-none exists to make unreachable.
+    ///
+    /// An empty `coin_ids` MUST succeed, returning a handle that releases nothing.
+    ///
+    /// The hold MUST expire on its own. An implementation clamps the requested `ttl_secs` to its own
+    /// maximum, applies its default when none is given, and MUST report the lifetime it actually
+    /// applied — a caller told nothing would release on a schedule the node does not keep.
+    ///
+    /// An implementation MUST NOT require, accept or store key material here (§908). A reservation
+    /// is bookkeeping: it narrows what a selector will choose and authorizes nothing.
+    async fn wallet_reservations_reserve(
+        &self,
+        params: params::WalletReservationsReserveParams,
+    ) -> Result<results::WalletReservationsReserveResult, ControlError>;
+    /// `control.wallet.reservations.release` (TOKEN-GATED)
+    ///
+    /// Releasing a handle that names no live reservation — lapsed, or already released — MUST be a
+    /// SUCCESS reporting `released: false`, never an error. A caller releasing on confirmation
+    /// cannot know whether the TTL got there first, and an error there teaches callers to discard
+    /// the result, which is how the release path stops being called at all.
+    ///
+    /// An implementation MUST free every coin the handle holds, or none of them, for the same reason
+    /// acquisition is all-or-none: a half-freed reservation leaves coins held by a handle the caller
+    /// has thrown away, and only the TTL would ever recover them.
+    async fn wallet_reservations_release(
+        &self,
+        params: params::WalletReservationsReleaseParams,
+    ) -> Result<results::WalletReservationsReleaseResult, ControlError>;
     /// `control.profile.putBody` (TOKEN-GATED)
     ///
     /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
@@ -543,6 +593,15 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_unwatch(params.validated()?).await?)
             }
             ControlMethod::WalletWatched => encode(self.wallet_watched().await?),
+            ControlMethod::WalletReservationsHeld => {
+                encode(self.wallet_reservations_held().await?)
+            }
+            ControlMethod::WalletReservationsReserve => {
+                encode(self.wallet_reservations_reserve(decode(params)?).await?)
+            }
+            ControlMethod::WalletReservationsRelease => {
+                encode(self.wallet_reservations_release(decode(params)?).await?)
+            }
             ControlMethod::ProfilePutBody => encode(self.profile_put_body(decode(params)?).await?),
             ControlMethod::ProfileGetBody => encode(self.profile_get_body(decode(params)?).await?),
             ControlMethod::PairingRequest => encode(self.pairing_request(decode(params)?).await?),

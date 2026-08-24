@@ -1651,6 +1651,95 @@ pub struct WalletWatchedResult {
     pub public_keys: Vec<String>,
 }
 
+/// One coin held by a live reservation, and when that hold lapses.
+///
+/// The expiry travels WITH the coin rather than being summarised once, because a client's honest
+/// sentence is per-coin: "this coin is committed until 14:32". A single soonest-expiry figure would
+/// be right about the set and wrong about every coin in it but one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservedCoin {
+    /// The held coin id, lowercase 64-hex and unprefixed.
+    pub coin_id: String,
+    /// The reservation holding it — the handle
+    /// [`release`](crate::params::WalletReservationsReleaseParams) takes. OPAQUE; never parsed.
+    pub reservation_id: String,
+    /// Unix seconds after which this hold no longer applies, whether or not anyone releases it.
+    ///
+    /// Always present. A hold with no expiry is a permanent funds lockout, so the contract has no
+    /// way to express one.
+    pub expires_at_unix: u64,
+}
+
+/// `control.wallet.reservations.held` — every coin currently committed to an in-flight spend.
+///
+/// # An empty list means EMPTY, and an error means UNKNOWN
+///
+/// `reserved: []` is a positive statement that nothing is held, and a caller may select freely on
+/// it. A node that cannot read its reservation set answers
+/// [`WalletReservationsUnavailable`](crate::error::ControlErrorCode::WalletReservationsUnavailable)
+/// and NEVER an empty list — the two demand opposite actions, and collapsing them restores exactly
+/// the cross-process double-select this method exists to prevent.
+///
+/// # This narrows SELECTION, never BALANCE
+///
+/// A reserved coin is still the user's money and still counts toward what they hold. Subtracting
+/// these from a balance would report a shortfall the user does not have.
+///
+/// # No count field
+///
+/// The list is the answer and its length is the count. A separate number could disagree with the
+/// rows printed beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletReservationsHeldResult {
+    /// The held coins, each with its holding reservation and expiry.
+    pub reserved: Vec<ReservedCoin>,
+    /// The node's OWN clock, in unix seconds, at the moment it answered.
+    ///
+    /// Reported so a client can measure skew against the `expires_at_unix` values it just received.
+    /// The caller never supplies a time — see
+    /// [`WalletReservationsHeldParams`](crate::params::WalletReservationsHeldParams).
+    pub as_of_unix: u64,
+}
+
+/// `control.wallet.reservations.reserve` — the handle for a hold that was taken in full.
+///
+/// Only ever returned when EVERY requested coin was taken. A conflict on any one of them is the
+/// error [`WalletCoinsReserved`](crate::error::ControlErrorCode::WalletCoinsReserved) and reserves
+/// nothing, so this type has deliberately no "partially reserved" shape to represent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletReservationsReserveResult {
+    /// The handle to release with. OPAQUE — store it and send it back; never parse or derive one.
+    pub reservation_id: String,
+    /// The coins now held, lowercase 64-hex, echoed back so a client can compare what it asked for
+    /// against what it got without re-normalizing either side.
+    pub coin_ids: Vec<String>,
+    /// Unix seconds after which this hold lapses on its own.
+    pub expires_at_unix: u64,
+    /// The lifetime the node ACTUALLY applied, in seconds — which may be shorter than the
+    /// `ttl_secs` requested.
+    ///
+    /// Returned rather than assumed, because a caller that asked for an hour and silently got ten
+    /// minutes would release far too late and believe its coins were still held long after they
+    /// were selectable again.
+    pub ttl_secs: u64,
+}
+
+/// `control.wallet.reservations.release` — what a release actually freed.
+///
+/// # `released: false` is a SUCCESS
+///
+/// It means the handle named no live reservation: it lapsed on its TTL first, or was released
+/// already. Both are the outcome the caller wanted, and reporting them as errors would push callers
+/// toward ignoring the result — which is how the release path quietly stops being used and every
+/// hold starts costing its full TTL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletReservationsReleaseResult {
+    /// Whether a live reservation was found and freed by THIS call.
+    pub released: bool,
+    /// The coins freed by this call — empty when `released` is false.
+    pub coin_ids: Vec<String>,
+}
+
 /// `pairing.request` — the pairing handshake bootstrap (OPEN, no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequestResult {
