@@ -593,9 +593,7 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_unwatch(params.validated()?).await?)
             }
             ControlMethod::WalletWatched => encode(self.wallet_watched().await?),
-            ControlMethod::WalletReservationsHeld => {
-                encode(self.wallet_reservations_held().await?)
-            }
+            ControlMethod::WalletReservationsHeld => encode(self.wallet_reservations_held().await?),
             ControlMethod::WalletReservationsReserve => {
                 encode(self.wallet_reservations_reserve(decode(params)?).await?)
             }

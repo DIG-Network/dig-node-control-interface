@@ -124,6 +124,9 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.watch` | yes | delegated | `{public_keys:[string]}` (each lowercase 96-hex, `0x` accepted) | `{added:u32, watched:u32}` |
 | `control.wallet.unwatch` | yes | delegated | `{public_keys:[string]}` | `{removed:u32, watched:u32}` |
 | `control.wallet.watched` | yes | delegated | — | `{public_keys:[string]}` |
+| `control.wallet.reservations.held` | yes | delegated | — | `{reserved:[ReservedCoin], as_of_unix:u64}` |
+| `control.wallet.reservations.reserve` | yes | delegated | `{coin_ids:[string], ttl_secs?:u64}` | `{reservation_id, coin_ids, expires_at_unix, ttl_secs}` |
+| `control.wallet.reservations.release` | yes | delegated | `{reservation_id:string}` | `{released:bool, coin_ids:[string]}` |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -707,6 +710,65 @@ wallet whose keys live outside the node can still be synced and read.
 - **Privacy.** Enrolling makes this node query its peers for those addresses, so its peers can
   associate them with this machine. That is already true of the node's own custody keys; it becomes
   true of the enrolling client's keys too, and a client SHOULD say so where a person can see it.
+
+### 4.2a Coin reservations (`control.wallet.reservations.held` / `.reserve` / `.release`)
+
+A reservation records that a coin is already committed to a spend that has been built but has not
+settled. It is BOOKKEEPING: it holds no key, signs nothing, authorizes nothing (§4.3), and only
+narrows what a coin selector is willing to choose.
+
+**The window it closes.** Between building a spend and that spend confirming, the chain still reports
+its inputs as UNSPENT — the bundle is in a mempool, not a block. A second build in that window sees
+the same coins, applies the same selection rule, and picks the same coin. The second bundle can never
+be included, and it fails AFTER the money moved.
+
+**Why the method exists rather than a per-process table.** A wallet key can be in use by more than
+one process at once — dig-app holding the key, and a dig-node serving the same wallet. Two
+independent reservation tables re-create exactly the double-select each of them fixes locally. These
+methods let a client back its own reservation seam with the NODE's table, so both processes narrow
+against ONE set.
+
+**Authority.** Where a node is reachable, the NODE's set is authoritative and a client MUST defer to
+it. A purely local set is a fallback for the no-node case only, and a client using one MUST NOT treat
+it as covering another process.
+
+- **All-or-none acquisition.** `reserve` MUST take every coin in `coin_ids` or none. Reading the held
+  set, selecting, then reserving is check-then-act, and two callers racing it both take the same
+  coin; atomic acquisition is what closes that. On a clash a node MUST have written NOTHING and MUST
+  answer `-32044 WALLET_COINS_RESERVED`.
+- **A conflict is a WAIT, never a shortfall.** `WALLET_COINS_RESERVED` is deliberately distinct from
+  any insufficient-funds code. The user HAS the money; it is briefly committed and returns when that
+  spend settles or its hold lapses. Reporting a shortfall sends a person to an exchange to solve a
+  five-minute wait.
+- **Reservation narrows SELECTION, never BALANCE.** A reserved coin is still the user's money and
+  still counts toward what they hold. A client MUST NOT subtract `reserved` from a displayed balance.
+- **Every hold expires.** `reserve` MUST apply a finite lifetime whether or not anyone releases, so
+  an abandoned or crashed build cannot strand funds. A node clamps the requested `ttl_secs` to its own
+  maximum, applies its default when none is given, and MUST return the lifetime it ACTUALLY applied —
+  a caller told nothing would release on a schedule the node does not keep. The contract has no way
+  to express a hold that never expires.
+- **Explicit release, because the TTL alone is not enough.** `release` frees a hold the moment its
+  spend is known settled or known dead, rather than holding a person's coins for the rest of a window
+  over a question the chain has already answered. Releasing a handle that names no live reservation
+  MUST be a SUCCESS reporting `released:false` — a caller releasing on confirmation cannot know
+  whether the TTL got there first, and an error there teaches callers to discard the result. Release
+  MUST free every coin the handle holds or none of them.
+- **An empty `coin_ids` MUST succeed**, yielding a handle that releases nothing. An empty reservation
+  can never conflict, so refusing it would make a legitimate no-op selection look malformed.
+- **Fail direction: REFUSE.** A node that cannot read its reservation set MUST answer
+  `-32045 WALLET_RESERVATIONS_UNAVAILABLE` and MUST NOT answer an empty list. `reserved: []` is a
+  positive statement that nothing is held and permits a caller to spend; "I cannot tell" must stop
+  one. Collapsing the two restores the double-select these methods exist to prevent.
+- **The caller does not supply the time.** `held` takes no parameters. A caller-supplied `now` would
+  be a lapse oracle — a far-future value makes every live hold read as expired. The node reads its
+  own clock and reports it as `as_of_unix` so a client can SEE skew rather than impose it.
+- **`reservation_id` is OPAQUE.** A client stores it and sends it back, and MUST NOT parse, derive or
+  construct one. A handle a caller can guess lets it release a reservation it does not own, which is
+  the double-select reached through the front door.
+- **No key material (§4.3).** A coin id is a public chain fact. There is no seed, key, signature or
+  bundle field on any of these methods and there never may be.
+- All three are TOKEN-GATED, including `held`: the caller supplies nothing, so the answer names this
+  node's OWN in-flight commitments — the same reasoning that gates `control.wallet.watched`.
 
 ### 4.2b dig-profile bodies (`control.profile.putBody` / `.getBody`)
 
