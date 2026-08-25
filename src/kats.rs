@@ -930,6 +930,37 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
 }
 
+/// The instant [`MockNode`] answers at, pinned rather than read from the wall clock.
+///
+/// A reservation fixture that passes a small literal expiry through an API measured in unix seconds
+/// tests only the already-lapsed path, because every such value is ~1.8 billion seconds in the past.
+/// Pinning NOW keeps the live path live.
+const MOCK_NOW_UNIX: u64 = 1_800_000_000;
+
+/// The longest hold [`MockNode`] will grant, mirroring dig-node's `RESERVATION_TTL_MS` (600 s).
+const MOCK_MAX_TTL_SECS: u64 = 600;
+
+/// The hold [`MockNode`] grants when a caller names no TTL, mirroring dig-account's
+/// `DEFAULT_RESERVATION_TTL_SECS` (300 s).
+const MOCK_DEFAULT_TTL_SECS: u64 = 300;
+
+/// Two DISTINCT coins, so an all-or-none acquisition can be told apart from a partial one.
+///
+/// A single-coin fixture cannot express the property at all: with one coin, "took none" and "took
+/// every coin that was free" produce identical observable state.
+const RESERVE_COIN_A: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+const RESERVE_COIN_B: &str = "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2";
+
+// The reservation table `MockNode` serves from: reservation_id -> (held coins, expiry).
+//
+// THREAD-LOCAL for the same reason the enrolment registry is: one test's hold must never satisfy
+// another test's conflict assertion for the wrong reason.
+thread_local! {
+    static RESERVATIONS: std::cell::RefCell<
+        std::collections::BTreeMap<String, (Vec<String>, u64)>,
+    > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 /// A mock node that serves canned typed results — exercises the [`ControlHandler`] dispatcher for
 /// every method group without a running node.
 struct MockNode;
@@ -1489,6 +1520,83 @@ impl ControlHandler for MockNode {
             public_keys: set.borrow().iter().cloned().collect(),
         }))
     }
+    async fn wallet_reservations_held(
+        &self,
+    ) -> Result<results::WalletReservationsHeldResult, ControlError> {
+        Ok(
+            RESERVATIONS.with(|table| results::WalletReservationsHeldResult {
+                reserved: table
+                    .borrow()
+                    .iter()
+                    .filter(|(_, (_, expires))| *expires > MOCK_NOW_UNIX)
+                    .flat_map(|(id, (coins, expires))| {
+                        coins.iter().map(move |coin_id| results::ReservedCoin {
+                            coin_id: coin_id.clone(),
+                            reservation_id: id.clone(),
+                            expires_at_unix: *expires,
+                        })
+                    })
+                    .collect(),
+                as_of_unix: MOCK_NOW_UNIX,
+            }),
+        )
+    }
+    async fn wallet_reservations_reserve(
+        &self,
+        params: WalletReservationsReserveParams,
+    ) -> Result<results::WalletReservationsReserveResult, ControlError> {
+        let params = params.validated()?;
+        let ttl_secs = params
+            .ttl_secs
+            .unwrap_or(MOCK_DEFAULT_TTL_SECS)
+            .min(MOCK_MAX_TTL_SECS);
+        RESERVATIONS.with(|table| {
+            let mut table = table.borrow_mut();
+            // Every clash is found BEFORE anything is written, so a refusal leaves the table
+            // exactly as it was — the property the all-or-none KAT observes from outside.
+            let held: std::collections::BTreeSet<&String> = table
+                .values()
+                .filter(|(_, expires)| *expires > MOCK_NOW_UNIX)
+                .flat_map(|(coins, _)| coins.iter())
+                .collect();
+            if let Some(clash) = params.coin_ids.iter().find(|id| held.contains(id)) {
+                return Err(ControlError::of(
+                    ControlErrorCode::WalletCoinsReserved,
+                    format!("coin {clash} is already reserved by an in-flight spend"),
+                ));
+            }
+            let reservation_id = format!("mock-res-{}", table.len() + 1);
+            let expires_at_unix = MOCK_NOW_UNIX + ttl_secs;
+            table.insert(
+                reservation_id.clone(),
+                (params.coin_ids.clone(), expires_at_unix),
+            );
+            Ok(results::WalletReservationsReserveResult {
+                reservation_id,
+                coin_ids: params.coin_ids,
+                expires_at_unix,
+                ttl_secs,
+            })
+        })
+    }
+    async fn wallet_reservations_release(
+        &self,
+        params: WalletReservationsReleaseParams,
+    ) -> Result<results::WalletReservationsReleaseResult, ControlError> {
+        Ok(RESERVATIONS.with(|table| {
+            let freed = table.borrow_mut().remove(&params.reservation_id);
+            match freed {
+                Some((coin_ids, _)) => results::WalletReservationsReleaseResult {
+                    released: true,
+                    coin_ids,
+                },
+                None => results::WalletReservationsReleaseResult {
+                    released: false,
+                    coin_ids: Vec::new(),
+                },
+            }
+        }))
+    }
     async fn profile_put_body(
         &self,
         params: ProfilePutBodyParams,
@@ -1772,6 +1880,308 @@ fn a_legacy_peer_entry_reads_as_unknown_not_as_version_zero() {
 
 /// The smallest valid params object for a method, so the coverage sweep above never trips
 /// `INVALID_PARAMS` for a param-taking method.
+/// **A conflict on ANY coin reserves NONE of them.**
+///
+/// The nearest wrong implementation is not "reserves nothing" -- it is a writer that takes each free
+/// coin as it goes and errors on reaching the clash, leaving the caller's other coins held by a
+/// reservation whose handle it never received. That failure is INVISIBLE to an assertion about the
+/// error, which both implementations return identically, so the load-bearing assertion here is the
+/// SECOND one: the free coin must still be selectable afterwards.
+///
+/// The fixture needs two distinct coins for that reason -- with one coin, "took none" and "took
+/// every free coin" produce the same observable state -- and orders the FREE coin FIRST, so a
+/// write-as-you-go implementation has already written it by the time it sees the clash.
+#[test]
+fn a_conflicting_reserve_leaves_the_other_coins_free() {
+    let node = MockNode;
+    // B alone is held, so A is an honest control: a fixture where everything is already reserved
+    // could not tell a partial writer from an atomic one.
+    let first = block_on(
+        node.wallet_reservations_reserve(WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_B.into()],
+            ttl_secs: None,
+        }),
+    )
+    .expect("the first hold has nothing to clash with");
+
+    let clash = block_on(
+        node.wallet_reservations_reserve(WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_A.into(), RESERVE_COIN_B.into()],
+            ttl_secs: None,
+        }),
+    )
+    .expect_err("a coin already held must refuse the whole call");
+    assert_eq!(clash.data.code, "WALLET_COINS_RESERVED");
+    assert_eq!(clash.code, -32044);
+
+    let held = block_on(node.wallet_reservations_held()).unwrap();
+    let held_coins: Vec<&str> = held.reserved.iter().map(|r| r.coin_id.as_str()).collect();
+    assert_eq!(
+        held_coins,
+        vec![RESERVE_COIN_B],
+        "the refused call must have written nothing: coin A was taken by a partial reservation"
+    );
+    assert_eq!(held.reserved[0].reservation_id, first.reservation_id);
+    assert_eq!(held.as_of_unix, MOCK_NOW_UNIX);
+}
+
+/// **A conflict is reported as a WAIT, and never as a shortfall.**
+///
+/// Pinned as a distinct code rather than a message, because a message is not contract. Asserting
+/// only that the call errored would pass for an implementation that answered with an
+/// insufficient-funds code -- which is the money-lie: it sends a person to an exchange to solve a
+/// five-minute wait.
+#[test]
+fn a_conflict_code_is_not_any_other_wallet_code() {
+    assert_eq!(
+        ControlErrorCode::WalletCoinsReserved.name(),
+        "WALLET_COINS_RESERVED"
+    );
+    assert_eq!(ControlErrorCode::WalletCoinsReserved.origin(), "node");
+    for &other in ControlErrorCode::ALL {
+        if other != ControlErrorCode::WalletCoinsReserved {
+            assert_ne!(other.code(), ControlErrorCode::WalletCoinsReserved.code());
+            assert_ne!(other.name(), ControlErrorCode::WalletCoinsReserved.name());
+        }
+    }
+}
+
+/// **Release frees the hold, and releasing a handle that names nothing is a SUCCESS.**
+///
+/// Two properties in one sequence because the second is only meaningful after the first: an
+/// idempotence assertion against a handle that was never live cannot tell "release is idempotent"
+/// from "release never does anything". Releasing a REAL hold and then releasing it AGAIN makes both
+/// visible.
+#[test]
+fn release_frees_the_hold_and_a_second_release_is_not_an_error() {
+    let node = MockNode;
+    let handle = block_on(
+        node.wallet_reservations_reserve(WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_A.into()],
+            ttl_secs: None,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(node.wallet_reservations_held())
+            .unwrap()
+            .reserved
+            .len(),
+        1
+    );
+
+    let first = block_on(
+        node.wallet_reservations_release(WalletReservationsReleaseParams {
+            reservation_id: handle.reservation_id.clone(),
+        }),
+    )
+    .unwrap();
+    assert!(first.released);
+    assert_eq!(first.coin_ids, vec![RESERVE_COIN_A.to_string()]);
+    assert!(
+        block_on(node.wallet_reservations_held())
+            .unwrap()
+            .reserved
+            .is_empty(),
+        "the coin must be selectable again once its hold is released"
+    );
+
+    let again = block_on(
+        node.wallet_reservations_release(WalletReservationsReleaseParams {
+            reservation_id: handle.reservation_id,
+        }),
+    )
+    .expect("releasing an already-released handle is a success, not an error");
+    assert!(!again.released);
+    assert!(again.coin_ids.is_empty());
+}
+
+/// **The applied TTL is reported, and it is pinned from BOTH sides of the node's maximum.**
+///
+/// A test only of the over-the-cap case cannot tell a clamp from an implementation that ignores the
+/// request and always returns its maximum; a test only under the cap cannot see a missing clamp at
+/// all. Both directions are needed, so both are here, and the expiry is checked against the reported
+/// clock rather than assumed.
+#[test]
+fn a_requested_ttl_is_clamped_above_the_cap_and_honoured_below_it() {
+    let node = MockNode;
+    let over = block_on(
+        node.wallet_reservations_reserve(WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_A.into()],
+            ttl_secs: Some(MOCK_MAX_TTL_SECS + 1),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        over.ttl_secs, MOCK_MAX_TTL_SECS,
+        "a hold longer than the cap must be clamped"
+    );
+    assert_eq!(over.expires_at_unix, MOCK_NOW_UNIX + MOCK_MAX_TTL_SECS);
+
+    let under_secs = MOCK_MAX_TTL_SECS - 1;
+    let under = block_on(
+        node.wallet_reservations_reserve(WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_B.into()],
+            ttl_secs: Some(under_secs),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        under.ttl_secs, under_secs,
+        "a hold within the cap must be honoured as asked"
+    );
+    assert_eq!(under.expires_at_unix, MOCK_NOW_UNIX + under_secs);
+}
+
+/// **Reserving nothing succeeds, and holds nothing.**
+///
+/// Asserting only that the call succeeded would pass for an implementation that stored an empty row
+/// -- a reservation nothing can ever conflict with and only the TTL ever clears. So the handle is
+/// released too, and must report freeing no coins.
+#[test]
+fn reserving_an_empty_list_yields_a_handle_that_holds_nothing() {
+    let node = MockNode;
+    let empty = block_on(
+        node.wallet_reservations_reserve(WalletReservationsReserveParams {
+            coin_ids: vec![],
+            ttl_secs: None,
+        }),
+    )
+    .expect("an empty selection is a legitimate no-op, not a malformed request");
+    assert!(empty.coin_ids.is_empty());
+    assert!(
+        block_on(node.wallet_reservations_held())
+            .unwrap()
+            .reserved
+            .is_empty(),
+        "an empty reservation must hold no coins"
+    );
+    let freed = block_on(
+        node.wallet_reservations_release(WalletReservationsReleaseParams {
+            reservation_id: empty.reservation_id,
+        }),
+    )
+    .unwrap();
+    assert!(freed.coin_ids.is_empty());
+}
+
+/// **The request wire form, ENCODE direction.**
+///
+/// `held` carries no `now`, and that absence is the contract: a caller-supplied time would be a
+/// lapse oracle. Pinned as an exact envelope so adding one is a failing test rather than a silent
+/// widening.
+#[test]
+fn golden_reservation_request_vectors() {
+    assert_request(
+        &WalletReservationsHeldParams {},
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.reservations.held","params":{}}),
+    );
+    assert_request(
+        &WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_A.into(), RESERVE_COIN_B.into()],
+            ttl_secs: Some(300),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.reservations.reserve",
+               "params":{"coin_ids":[RESERVE_COIN_A, RESERVE_COIN_B],"ttl_secs":300}}),
+    );
+    // An unnamed TTL is ABSENT from the wire, not `null`: a node reading `ttl_secs: null` as a
+    // literal zero would grant a hold that lapses before the spend it guards.
+    assert_request(
+        &WalletReservationsReserveParams {
+            coin_ids: vec![RESERVE_COIN_A.into()],
+            ttl_secs: None,
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.reservations.reserve",
+               "params":{"coin_ids":[RESERVE_COIN_A]}}),
+    );
+    assert_request(
+        &WalletReservationsReleaseParams {
+            reservation_id: "res-7".into(),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.reservations.release",
+               "params":{"reservation_id":"res-7"}}),
+    );
+}
+
+/// **The request wire form, DECODE direction — the half an encode vector cannot see.**
+///
+/// `WalletReservationsReserveParams` has a hand-written `Deserialize`, so serializing a value this
+/// crate built proves nothing about the bytes a FOREIGN client sends. These are literal wire bytes,
+/// decoded: the `0x` spelling a block explorer prints is normalized away, an omitted `ttl_secs`
+/// decodes as absent rather than failing, and a malformed id refuses the WHOLE request rather than
+/// the well-formed subset.
+#[test]
+fn reservation_requests_decode_from_foreign_wire_bytes() {
+    let prefixed: WalletReservationsReserveParams =
+        serde_json::from_value(json!({"coin_ids":[format!("0x{RESERVE_COIN_A}"), RESERVE_COIN_B]}))
+            .expect("a 0x-prefixed coin id is accepted on input");
+    assert_eq!(
+        prefixed.coin_ids,
+        vec![RESERVE_COIN_A.to_string(), RESERVE_COIN_B.to_string()],
+        "the prefix must be normalized away, never echoed"
+    );
+    assert_eq!(
+        prefixed.ttl_secs, None,
+        "an omitted ttl_secs decodes as absent"
+    );
+
+    // ONE bad id among good ones -- the fixture a subset-accepting implementation passes and an
+    // all-or-nothing one fails. A fixture of only bad ids could not tell them apart.
+    let mixed = serde_json::from_value::<WalletReservationsReserveParams>(
+        json!({"coin_ids":[RESERVE_COIN_A, "not-a-coin-id"]}),
+    );
+    assert!(
+        mixed.is_err(),
+        "one malformed id must refuse the whole request"
+    );
+
+    // Uppercase is a DIFFERENT spelling of the same coin, and accepting it would let two spellings
+    // of one id sit in the table as two coins.
+    assert!(serde_json::from_value::<WalletReservationsReserveParams>(
+        json!({"coin_ids":[RESERVE_COIN_A.to_ascii_uppercase()]})
+    )
+    .is_err());
+
+    let release: WalletReservationsReleaseParams =
+        serde_json::from_value(json!({"reservation_id":"res-7"})).unwrap();
+    assert_eq!(release.reservation_id, "res-7");
+}
+
+/// **The result wire form, both directions.**
+///
+/// Each golden vector decodes into its typed result and re-encodes byte-identically, so a renamed,
+/// dropped or reordered field fails here. The `held` vector carries TWO coins under DIFFERENT
+/// reservations with DIFFERENT expiries: a one-row fixture could not see an implementation that
+/// summarised one expiry across the whole set, which is the shape this result deliberately rejects.
+#[test]
+fn golden_reservation_result_vectors() {
+    assert_result_round_trips::<results::WalletReservationsHeldResult>(json!({
+        "reserved": [
+            {"coin_id": RESERVE_COIN_A, "reservation_id": "res-1", "expires_at_unix": 1_800_000_300u64},
+            {"coin_id": RESERVE_COIN_B, "reservation_id": "res-2", "expires_at_unix": 1_800_000_600u64}
+        ],
+        "as_of_unix": 1_800_000_000u64
+    }));
+    assert_result_round_trips::<results::WalletReservationsHeldResult>(json!({
+        "reserved": [],
+        "as_of_unix": 1_800_000_000u64
+    }));
+    assert_result_round_trips::<results::WalletReservationsReserveResult>(json!({
+        "reservation_id": "res-1",
+        "coin_ids": [RESERVE_COIN_A],
+        "expires_at_unix": 1_800_000_300u64,
+        "ttl_secs": 300u64
+    }));
+    assert_result_round_trips::<results::WalletReservationsReleaseResult>(json!({
+        "released": true,
+        "coin_ids": [RESERVE_COIN_A]
+    }));
+    assert_result_round_trips::<results::WalletReservationsReleaseResult>(json!({
+        "released": false,
+        "coin_ids": []
+    }));
+}
+
 fn minimal_params(m: ControlMethod) -> Value {
     match m {
         ControlMethod::ConfigSetUpstream => json!({"upstream": ""}),
@@ -1807,6 +2217,8 @@ fn minimal_params(m: ControlMethod) -> Value {
             json!({ "store_id": STORE, "root": ROOT, "body_b64": "" })
         }
         ControlMethod::ProfileGetBody => json!({ "store_id": STORE, "root": ROOT }),
+        ControlMethod::WalletReservationsReserve => json!({ "coin_ids": [] }),
+        ControlMethod::WalletReservationsRelease => json!({ "reservation_id": "mock-res-absent" }),
         _ => json!({}),
     }
 }

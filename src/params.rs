@@ -1126,6 +1126,146 @@ const PUBLIC_KEYS_ERROR: &str =
 public_keys_params!(WalletWatchParams, RawWalletWatch, PUBLIC_KEYS_ERROR);
 public_keys_params!(WalletUnwatchParams, RawWalletUnwatch, PUBLIC_KEYS_ERROR);
 
+/// Every id in a reservation's `coin_ids` takes the same wire form the single-coin reads accept,
+/// so a client can feed a coin straight from `control.wallet.coins` into a reservation.
+const COIN_IDS_ERROR: &str =
+    "coin_ids must each be lowercase 64-hex (a 32-byte coin id), optionally 0x-prefixed";
+
+/// `control.wallet.reservations.held` params — none.
+///
+/// # Why the caller does not supply the time
+///
+/// dig-account's `CoinReservationStore::held(now_unix)` takes the current time from its caller,
+/// because in-process both sides share one clock and one trust domain. Across the control boundary
+/// they share neither, and a caller-supplied `now` would be a lapse oracle: a far-future value makes
+/// every live reservation read as expired, and the caller then selects coins another process is
+/// about to spend. The node reads its OWN clock and reports it back as
+/// [`as_of_unix`](results::WalletReservationsHeldResult::as_of_unix), so a client can SEE skew
+/// rather than impose it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletReservationsHeldParams {}
+control_call!(WalletReservationsHeldParams => ControlMethod::WalletReservationsHeld, results::WalletReservationsHeldResult);
+
+/// `control.wallet.reservations.reserve` params: take EVERY named coin, or take none.
+///
+/// The wire form of `dig_account::wallet::reservation::CoinReservationStore::reserve_all`, so a
+/// client backing that seam with the node forwards its arguments rather than translating them.
+///
+/// # All-or-none is the whole contract
+///
+/// Reading the held set, selecting, then reserving is check-then-act: two processes both read an
+/// empty set and both take the same coin. Atomic acquisition is what closes that window, so a
+/// conflict on ANY coin refuses the WHOLE call and reserves nothing — see
+/// [`ControlErrorCode::WalletCoinsReserved`]. A caller that loses re-reads
+/// [`WalletReservationsHeldParams`] and re-selects from what remains.
+///
+/// # An empty list is a success, not an error
+///
+/// It yields a handle that releases nothing, which is what the caller asked for. This matches
+/// dig-account exactly: an empty reservation can never conflict, so refusing it would make a
+/// legitimate no-op selection look like a malformed request.
+///
+/// # No key material (§908)
+///
+/// A coin id is a public chain fact. There is no seed, key, signature or bundle field here and
+/// there never may be: a reservation is BOOKKEEPING — it narrows what a selector will choose and
+/// authorizes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalletReservationsReserveParams {
+    /// The coin ids to hold: lowercase 64-hex, unprefixed. A `0x` prefix is TOLERATED on input and
+    /// normalized away by [`Self::validated`]; it is never emitted.
+    pub coin_ids: Vec<String>,
+    /// How long the hold should live, in seconds; `None` asks for the node's default.
+    ///
+    /// A REQUEST, never a command. The node clamps this to its own maximum and returns the value it
+    /// actually applied as
+    /// [`ttl_secs`](results::WalletReservationsReserveResult::ttl_secs) — an unclamped caller-chosen
+    /// lifetime is a lockout weapon, since one call could hold a wallet's coins away from its owner
+    /// for as long as it liked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+}
+control_call!(WalletReservationsReserveParams => ControlMethod::WalletReservationsReserve, results::WalletReservationsReserveResult);
+
+/// `control.wallet.reservations.release` params: free one reservation now, ahead of its TTL.
+///
+/// # The release path is why a reservation is safe at all
+///
+/// A hold with no way out is a wallet that locks itself out of its own funds, which is worse than
+/// the double-select it prevents. Two mechanisms keep that impossible and BOTH are required: the
+/// TTL bounds every hold whether or not anyone releases it, and this method lets a caller that
+/// KNOWS the answer — the spend settled, or was definitively rejected — stop holding the user's
+/// coins over a question the chain has already resolved.
+///
+/// # Releasing an unknown or lapsed id is a SUCCESS
+///
+/// A caller releasing on confirmation cannot know whether the TTL got there first, and making that
+/// race an error would teach callers to ignore the result — which is how a release stops being
+/// called at all. See [`WalletReservationsReleaseResult`](results::WalletReservationsReleaseResult).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletReservationsReleaseParams {
+    /// The handle returned by
+    /// [`reserve`](results::WalletReservationsReserveResult::reservation_id).
+    ///
+    /// OPAQUE: a client stores it and sends it back, and MUST NOT parse, derive or construct one.
+    /// The node mints it, and how it is spelled is free to differ between a hold taken before a
+    /// broadcast and one recorded for a bundle already in flight.
+    pub reservation_id: String,
+}
+control_call!(WalletReservationsReleaseParams => ControlMethod::WalletReservationsRelease, results::WalletReservationsReleaseResult);
+
+impl<'de> Deserialize<'de> for WalletReservationsReserveParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawReserve {
+            coin_ids: Vec<String>,
+            #[serde(default)]
+            ttl_secs: Option<u64>,
+        }
+
+        let raw = RawReserve::deserialize(deserializer)?;
+        let coin_ids = raw
+            .coin_ids
+            .iter()
+            .map(|id| {
+                normalize_coin_id(id)
+                    .map(str::to_owned)
+                    .ok_or_else(|| serde::de::Error::custom(COIN_IDS_ERROR))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            coin_ids,
+            ttl_secs: raw.ttl_secs,
+        })
+    }
+}
+
+impl WalletReservationsReserveParams {
+    /// Normalize and check every coin id, or reject the request as `-32602 INVALID_PARAMS`.
+    ///
+    /// The WHOLE request is refused when any id is malformed, never the well-formed subset. A
+    /// partial reservation would leave the caller believing it holds inputs it does not — the exact
+    /// state all-or-none acquisition exists to make unreachable.
+    pub fn validated(self) -> Result<Self, ControlError> {
+        let coin_ids = self
+            .coin_ids
+            .iter()
+            .map(|id| {
+                normalize_coin_id(id).map(str::to_owned).ok_or_else(|| {
+                    ControlError::of(ControlErrorCode::InvalidParams, COIN_IDS_ERROR)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            coin_ids,
+            ttl_secs: self.ttl_secs,
+        })
+    }
+}
+
 /// `pairing.request` params (OPEN — no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestParams {

@@ -18,6 +18,8 @@
 //! | `-32030` | [`Unauthorized`](ControlErrorCode::Unauthorized) | shell | called without a valid control token |
 //! | `-32031` | [`NotSupported`](ControlErrorCode::NotSupported) | shell | control op unsupported on this build |
 //! | `-32032` | [`ControlError`](ControlErrorCode::ControlError) | shell | control op failed at runtime |
+//! | `-32044` | [`WalletCoinsReserved`](ControlErrorCode::WalletCoinsReserved) | node | coins are held by an in-flight spend |
+//! | `-32045` | [`WalletReservationsUnavailable`](ControlErrorCode::WalletReservationsUnavailable) | node | the reservation set could not be read |
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +58,21 @@ pub enum ControlErrorCode {
     /// `-32043` — a wallet chain read was refused because the global fallback rate bound is spent.
     /// The caller should back off and retry; the answer is unknown, not empty.
     WalletRateLimited,
+    /// `-32044` — one or more named coins are already committed to a live in-flight spend, so
+    /// NOTHING was reserved by the failed call.
+    ///
+    /// Deliberately distinct from any shortfall code. The user has the money; it is briefly
+    /// committed elsewhere and comes back when that spend settles or its reservation lapses.
+    /// Reporting a shortfall here sends someone to an exchange to solve a wait, which is the
+    /// money-lie this taxonomy exists to prevent.
+    WalletCoinsReserved,
+    /// `-32045` — the node's coin-reservation set could not be read or written, so what is
+    /// in flight is UNKNOWN.
+    ///
+    /// Never collapsed into an empty answer. "Nothing is reserved" and "I cannot tell you what is
+    /// reserved" demand opposite actions from a caller: the first permits a spend, the second must
+    /// refuse one. A guard that fails open is not a guard.
+    WalletReservationsUnavailable,
 }
 
 impl ControlErrorCode {
@@ -74,6 +91,8 @@ impl ControlErrorCode {
             ControlErrorCode::WalletNotSynced => -32041,
             ControlErrorCode::WalletReadFailed => -32042,
             ControlErrorCode::WalletRateLimited => -32043,
+            ControlErrorCode::WalletCoinsReserved => -32044,
+            ControlErrorCode::WalletReservationsUnavailable => -32045,
         }
     }
 
@@ -92,6 +111,8 @@ impl ControlErrorCode {
             ControlErrorCode::WalletNotSynced => "WALLET_NOT_SYNCED",
             ControlErrorCode::WalletReadFailed => "WALLET_READ_FAILED",
             ControlErrorCode::WalletRateLimited => "WALLET_RATE_LIMITED",
+            ControlErrorCode::WalletCoinsReserved => "WALLET_COINS_RESERVED",
+            ControlErrorCode::WalletReservationsUnavailable => "WALLET_RESERVATIONS_UNAVAILABLE",
         }
     }
 
@@ -104,7 +125,9 @@ impl ControlErrorCode {
             | ControlErrorCode::WalletNoChainSource
             | ControlErrorCode::WalletNotSynced
             | ControlErrorCode::WalletReadFailed
-            | ControlErrorCode::WalletRateLimited => "node",
+            | ControlErrorCode::WalletRateLimited
+            | ControlErrorCode::WalletCoinsReserved
+            | ControlErrorCode::WalletReservationsUnavailable => "node",
             _ => "shell",
         }
     }
@@ -138,6 +161,12 @@ impl ControlErrorCode {
             ControlErrorCode::WalletRateLimited => {
                 "A wallet chain read was refused: the open fallback rate bound is exhausted."
             }
+            ControlErrorCode::WalletCoinsReserved => {
+                "Coins named by this call are committed to a live in-flight spend; nothing was reserved. This is a wait, NOT a shortfall."
+            }
+            ControlErrorCode::WalletReservationsUnavailable => {
+                "The node's coin-reservation set could not be read, so coin selection cannot be trusted."
+            }
         }
     }
 
@@ -163,6 +192,8 @@ impl ControlErrorCode {
         ControlErrorCode::WalletNotSynced,
         ControlErrorCode::WalletReadFailed,
         ControlErrorCode::WalletRateLimited,
+        ControlErrorCode::WalletCoinsReserved,
+        ControlErrorCode::WalletReservationsUnavailable,
     ];
 }
 
