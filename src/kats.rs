@@ -1912,7 +1912,7 @@ fn a_conflicting_reserve_leaves_the_other_coins_free() {
     )
     .expect_err("a coin already held must refuse the whole call");
     assert_eq!(clash.data.code, "WALLET_COINS_RESERVED");
-    assert_eq!(clash.code, -32044);
+    assert_eq!(clash.code, -32046);
 
     let held = block_on(node.wallet_reservations_held()).unwrap();
     let held_coins: Vec<&str> = held.reserved.iter().map(|r| r.coin_id.as_str()).collect();
@@ -1944,6 +1944,76 @@ fn a_conflict_code_is_not_any_other_wallet_code() {
             assert_ne!(other.name(), ControlErrorCode::WalletCoinsReserved.name());
         }
     }
+}
+
+/// **Every catalogued numeric code is unique across the WHOLE catalogue.**
+///
+/// The narrow per-variant assertions above only compare ONE code against the rest, so a collision
+/// between two codes neither of which is the one under test is invisible to them. This asserts the
+/// property the catalogue actually needs: `from_code` is a function, i.e. a wire number resolves to
+/// at most one disposition.
+///
+/// This exists because the property FAILED in practice across the repo boundary. `-32044` was
+/// minted here for a transient wait while dig-node had already shipped it for a permanent custody
+/// refusal, and a client conflating the two either retries forever on a refusal or abandons a wait.
+/// Uniqueness inside this crate is the half of that guard which is expressible here; the other half
+/// is the `-3204x` range-ownership rule stated in the module docs, which only dig-node can honour.
+#[test]
+fn every_catalogued_code_is_numerically_unique() {
+    for (i, &a) in ControlErrorCode::ALL.iter().enumerate() {
+        for &b in &ControlErrorCode::ALL[i + 1..] {
+            assert_ne!(
+                a.code(),
+                b.code(),
+                "{} and {} both claim {}",
+                a.name(),
+                b.name(),
+                a.code()
+            );
+            assert_ne!(
+                a.name(),
+                b.name(),
+                "two variants share the symbol {}",
+                a.name()
+            );
+        }
+        assert_eq!(
+            ControlErrorCode::from_code(a.code()),
+            Some(a),
+            "{} must resolve back to itself",
+            a.name()
+        );
+    }
+}
+
+/// **The two `-3204x` dispositions that collided are opposites, and stay on distinct numbers.**
+///
+/// Asserting only that the numbers differ would pass for a catalogue that had quietly given both
+/// variants the SAME meaning. Pinning each number together with its disposition is what makes a
+/// future re-collapse visible: `WALLET_NODE_SPEND_DISABLED` is terminal, `WALLET_COINS_RESERVED` is
+/// a retry, and no client may be asked to tell them apart from one integer.
+#[test]
+fn a_terminal_custody_refusal_and_a_transient_wait_never_share_a_code() {
+    assert_eq!(ControlErrorCode::WalletNodeSpendDisabled.code(), -32044);
+    assert_eq!(
+        ControlErrorCode::WalletNodeSpendDisabled.name(),
+        "WALLET_NODE_SPEND_DISABLED"
+    );
+    assert_eq!(ControlErrorCode::WalletCoinsReserved.code(), -32046);
+    assert_eq!(
+        ControlErrorCode::WalletReservationsUnavailable.code(),
+        -32047
+    );
+    assert_ne!(
+        ControlErrorCode::WalletNodeSpendDisabled.code(),
+        ControlErrorCode::WalletCoinsReserved.code()
+    );
+    assert!(
+        ControlErrorCode::WalletNodeSpendDisabled
+            .description()
+            .contains("Retrying cannot help"),
+        "the terminal code must say so: a caller reads the disposition, not the number"
+    );
 }
 
 /// **Release frees the hold, and releasing a handle that names nothing is a SUCCESS.**

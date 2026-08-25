@@ -18,8 +18,19 @@
 //! | `-32030` | [`Unauthorized`](ControlErrorCode::Unauthorized) | shell | called without a valid control token |
 //! | `-32031` | [`NotSupported`](ControlErrorCode::NotSupported) | shell | control op unsupported on this build |
 //! | `-32032` | [`ControlError`](ControlErrorCode::ControlError) | shell | control op failed at runtime |
-//! | `-32044` | [`WalletCoinsReserved`](ControlErrorCode::WalletCoinsReserved) | node | coins are held by an in-flight spend |
-//! | `-32045` | [`WalletReservationsUnavailable`](ControlErrorCode::WalletReservationsUnavailable) | node | the reservation set could not be read |
+//! | `-32040` | [`WalletNoChainSource`](ControlErrorCode::WalletNoChainSource) | node | no live chain source could answer |
+//! | `-32041` | [`WalletNotSynced`](ControlErrorCode::WalletNotSynced) | node | the local replica is still syncing |
+//! | `-32042` | [`WalletReadFailed`](ControlErrorCode::WalletReadFailed) | node | the read failed at the DB / chain layer |
+//! | `-32043` | [`WalletRateLimited`](ControlErrorCode::WalletRateLimited) | node | the open fallback rate bound is exhausted |
+//! | `-32044` | [`WalletNodeSpendDisabled`](ControlErrorCode::WalletNodeSpendDisabled) | node | the bundle spends the NODE's own coins and live broadcast is off |
+//! | `-32046` | [`WalletCoinsReserved`](ControlErrorCode::WalletCoinsReserved) | node | coins are held by an in-flight spend |
+//! | `-32047` | [`WalletReservationsUnavailable`](ControlErrorCode::WalletReservationsUnavailable) | node | the reservation set could not be read |
+//!
+//! The `-3204x` block is OWNED BY THIS CRATE. A node or client MUST NOT mint a code in it that is
+//! not declared here: a privately-minted code is invisible to allocation, and two implementations
+//! then disagree about what one number means. `-32044` is the worked example — it was minted in
+//! dig-node for a permanent custody refusal and, independently, here for a transient wait, so a
+//! client conflating them either retries forever on a refusal or gives up on a wait.
 
 use serde::{Deserialize, Serialize};
 
@@ -58,7 +69,19 @@ pub enum ControlErrorCode {
     /// `-32043` — a wallet chain read was refused because the global fallback rate bound is spent.
     /// The caller should back off and retry; the answer is unknown, not empty.
     WalletRateLimited,
-    /// `-32044` — one or more named coins are already committed to a live in-flight spend, so
+    /// `-32044` — `control.wallet.broadcast` refused: the bundle requires a signature from one of
+    /// the NODE's OWN custodied keys while `DIG_WALLET_ENABLE_LIVE_BROADCAST` is off (dig-node
+    /// SPEC §18.12).
+    ///
+    /// The node relays bundles somebody else signed on every install; sending its own money is a
+    /// separate, default-OFF custody decision, and a caller could otherwise sign through the node
+    /// and hand the bundle straight back. **Retrying cannot help**: the remedy is a bundle that
+    /// does not spend the node's coins, or the flag.
+    ///
+    /// The exact opposite disposition to [`WalletCoinsReserved`], which is a wait. Keeping the two
+    /// on distinct numbers is the whole point of this code being catalogued here.
+    WalletNodeSpendDisabled,
+    /// `-32046` — one or more named coins are already committed to a live in-flight spend, so
     /// NOTHING was reserved by the failed call.
     ///
     /// Deliberately distinct from any shortfall code. The user has the money; it is briefly
@@ -66,7 +89,7 @@ pub enum ControlErrorCode {
     /// Reporting a shortfall here sends someone to an exchange to solve a wait, which is the
     /// money-lie this taxonomy exists to prevent.
     WalletCoinsReserved,
-    /// `-32045` — the node's coin-reservation set could not be read or written, so what is
+    /// `-32047` — the node's coin-reservation set could not be read or written, so what is
     /// in flight is UNKNOWN.
     ///
     /// Never collapsed into an empty answer. "Nothing is reserved" and "I cannot tell you what is
@@ -91,8 +114,9 @@ impl ControlErrorCode {
             ControlErrorCode::WalletNotSynced => -32041,
             ControlErrorCode::WalletReadFailed => -32042,
             ControlErrorCode::WalletRateLimited => -32043,
-            ControlErrorCode::WalletCoinsReserved => -32044,
-            ControlErrorCode::WalletReservationsUnavailable => -32045,
+            ControlErrorCode::WalletNodeSpendDisabled => -32044,
+            ControlErrorCode::WalletCoinsReserved => -32046,
+            ControlErrorCode::WalletReservationsUnavailable => -32047,
         }
     }
 
@@ -111,6 +135,7 @@ impl ControlErrorCode {
             ControlErrorCode::WalletNotSynced => "WALLET_NOT_SYNCED",
             ControlErrorCode::WalletReadFailed => "WALLET_READ_FAILED",
             ControlErrorCode::WalletRateLimited => "WALLET_RATE_LIMITED",
+            ControlErrorCode::WalletNodeSpendDisabled => "WALLET_NODE_SPEND_DISABLED",
             ControlErrorCode::WalletCoinsReserved => "WALLET_COINS_RESERVED",
             ControlErrorCode::WalletReservationsUnavailable => "WALLET_RESERVATIONS_UNAVAILABLE",
         }
@@ -126,6 +151,7 @@ impl ControlErrorCode {
             | ControlErrorCode::WalletNotSynced
             | ControlErrorCode::WalletReadFailed
             | ControlErrorCode::WalletRateLimited
+            | ControlErrorCode::WalletNodeSpendDisabled
             | ControlErrorCode::WalletCoinsReserved
             | ControlErrorCode::WalletReservationsUnavailable => "node",
             _ => "shell",
@@ -161,6 +187,9 @@ impl ControlErrorCode {
             ControlErrorCode::WalletRateLimited => {
                 "A wallet chain read was refused: the open fallback rate bound is exhausted."
             }
+            ControlErrorCode::WalletNodeSpendDisabled => {
+                "control.wallet.broadcast refused: the bundle spends the NODE's own custodied coins while live broadcast is off. Retrying cannot help."
+            }
             ControlErrorCode::WalletCoinsReserved => {
                 "Coins named by this call are committed to a live in-flight spend; nothing was reserved. This is a wait, NOT a shortfall."
             }
@@ -192,6 +221,7 @@ impl ControlErrorCode {
         ControlErrorCode::WalletNotSynced,
         ControlErrorCode::WalletReadFailed,
         ControlErrorCode::WalletRateLimited,
+        ControlErrorCode::WalletNodeSpendDisabled,
         ControlErrorCode::WalletCoinsReserved,
         ControlErrorCode::WalletReservationsUnavailable,
     ];

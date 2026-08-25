@@ -735,7 +735,7 @@ it as covering another process.
 - **All-or-none acquisition.** `reserve` MUST take every coin in `coin_ids` or none. Reading the held
   set, selecting, then reserving is check-then-act, and two callers racing it both take the same
   coin; atomic acquisition is what closes that. On a clash a node MUST have written NOTHING and MUST
-  answer `-32044 WALLET_COINS_RESERVED`.
+  answer `-32046 WALLET_COINS_RESERVED`.
 - **A conflict is a WAIT, never a shortfall.** `WALLET_COINS_RESERVED` is deliberately distinct from
   any insufficient-funds code. The user HAS the money; it is briefly committed and returns when that
   spend settles or its hold lapses. Reporting a shortfall sends a person to an exchange to solve a
@@ -756,7 +756,7 @@ it as covering another process.
 - **An empty `coin_ids` MUST succeed**, yielding a handle that releases nothing. An empty reservation
   can never conflict, so refusing it would make a legitimate no-op selection look malformed.
 - **Fail direction: REFUSE.** A node that cannot read its reservation set MUST answer
-  `-32045 WALLET_RESERVATIONS_UNAVAILABLE` and MUST NOT answer an empty list. `reserved: []` is a
+  `-32047 WALLET_RESERVATIONS_UNAVAILABLE` and MUST NOT answer an empty list. `reserved: []` is a
   positive statement that nothing is held and permits a caller to spend; "I cannot tell" must stop
   one. Collapsing the two restores the double-select these methods exist to prevent.
 - **The caller does not supply the time.** `held` takes no parameters. A caller-supplied `now` would
@@ -838,11 +838,20 @@ where the error was minted.
 | `-32041` | `WALLET_NOT_SYNCED` | node | a wallet chain read of the wallet's own address is still syncing, with no fallback |
 | `-32042` | `WALLET_READ_FAILED` | node | a wallet chain read failed at the DB / chain-source layer |
 | `-32043` | `WALLET_RATE_LIMITED` | node | a wallet chain read was refused: the open fallback rate bound is spent |
+| `-32044` | `WALLET_NODE_SPEND_DISABLED` | node | `control.wallet.broadcast` refused: the bundle requires a signature from one of the NODE's OWN custodied keys while `DIG_WALLET_ENABLE_LIVE_BROADCAST` is off. The node relays bundles somebody else signed on every install; sending its own money is a separate, default-OFF custody decision, and a caller could otherwise sign through the node and hand the bundle straight back. **Retrying cannot help**: the remedy is a bundle that does not spend the node's coins, or the flag. |
+| `-32046` | `WALLET_COINS_RESERVED` | node | coins named by the call are committed to a live in-flight spend; nothing was reserved. A WAIT, never a shortfall |
+| `-32047` | `WALLET_RESERVATIONS_UNAVAILABLE` | node | the node's coin-reservation set could not be read, so what is in flight is UNKNOWN |
 
-The `-3204x` band is the wallet's. All four wallet codes mean the answer is UNKNOWN. A client MUST
-NOT degrade any of them into an empty or zero result, and MUST NOT report a mint, a spend or a
-balance as having failed on their strength alone — they say the node could not look, not that the
-chain said no.
+The `-3204x` band is the wallet's, and **this document owns it**. A node or client MUST NOT mint a
+`-3204x` code that is not declared in the table above: a privately-minted code cannot be seen at
+allocation time, and two implementations then disagree about what one number means.
+
+The codes in the band do NOT share one disposition, so a client MUST branch on the symbol rather
+than on the band. `-32040`..`-32043` and `-32047` say the answer is UNKNOWN — the node could not
+look, not that the chain said no — so a client MUST NOT degrade them into an empty or zero result,
+and MUST NOT report a mint, a spend or a balance as failed on their strength alone. `-32046` is a
+transient WAIT and a client SHOULD retry. `-32044` is TERMINAL: retrying cannot help, and a client
+that treats it as a wait retries forever against a decision that will not change.
 
 The `-32020..-32022` band is RESERVED for onion routing (dig-rpc-protocol); the control-plane errors
 use `-32030..-32032`.
