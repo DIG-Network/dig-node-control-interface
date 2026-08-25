@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.21.0] - 2026-08-25
+
+### Features
+- **wallet:** Move the reservation codes off -32044, which dig-node already owns (#28)
+
 ## [0.20.0] - 2026-08-25
 
 ### Features
