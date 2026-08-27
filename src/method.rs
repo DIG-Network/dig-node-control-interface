@@ -54,6 +54,9 @@ pub enum Category {
     /// Wallet chain transport: the read-only chain views (balance, coins, one coin by id, peak,
     /// sync status) plus the push of an already-signed spend bundle.
     Wallet,
+    /// The automated-spend AUDIT record: what this node signed WITHOUT per-transaction approval.
+    /// Read-only; nothing in this category initiates, signs or alters a spend.
+    Spends,
     /// dig-profile BODIES: handing the node the bytes a confirmed on-chain root commits to, and
     /// reading one back. The chain root itself is never written here -- dig-app signs and pushes
     /// that (§908); this category moves only the bytes an already-confirmed root commits to.
@@ -196,6 +199,10 @@ pub enum ControlMethod {
     /// `control.wallet.reservations.release` — free a hold now, ahead of its TTL.
     WalletReservationsRelease,
 
+    // ---- Automated-spend audit record (shell-owned) ----
+    /// `control.spends.list` — read the record of spends this node made WITHOUT asking.
+    SpendsList,
+
     // ---- dig-profile bodies (delegated to the engine) ----
     /// `control.profile.putBody` — hand the node the profile body a CONFIRMED chain root commits to.
     ProfilePutBody,
@@ -260,6 +267,7 @@ impl ControlMethod {
             ControlMethod::WalletReservationsHeld => "control.wallet.reservations.held",
             ControlMethod::WalletReservationsReserve => "control.wallet.reservations.reserve",
             ControlMethod::WalletReservationsRelease => "control.wallet.reservations.release",
+            ControlMethod::SpendsList => "control.spends.list",
             ControlMethod::ProfilePutBody => "control.profile.putBody",
             ControlMethod::ProfileGetBody => "control.profile.getBody",
             ControlMethod::PairingRequest => "pairing.request",
@@ -489,6 +497,7 @@ impl ControlMethod {
             | ControlMethod::WalletReservationsHeld
             | ControlMethod::WalletReservationsReserve
             | ControlMethod::WalletReservationsRelease => Category::Wallet,
+            ControlMethod::SpendsList => Category::Spends,
             ControlMethod::ProfilePutBody | ControlMethod::ProfileGetBody => Category::Profile,
         }
     }
@@ -539,6 +548,7 @@ impl ControlMethod {
             ControlMethod::WalletBalance => "READ-only: the confirmed spendable balance for an address + asset (plus pending, sync freshness, and the peak height it reflects).",
             ControlMethod::WalletWatch => "Enrol PUBLIC keys (48-byte G1, lowercase 96-hex) for the node's chain replica to follow, so their addresses are synced and readable. IDEMPOTENT: re-enrolling a key already enrolled succeeds and changes nothing. Keys, never puzzle hashes -- the node derives the addresses itself, so one derivation serves every client. TOKEN-GATED.",
             ControlMethod::WalletUnwatch => "Deregister enrolled public keys, so the node stops following their addresses. IDEMPOTENT: a key that was never enrolled is not an error. TOKEN-GATED.",
+            ControlMethod::SpendsList => "READ-only: the record of spends this node made WITHOUT per-transaction approval -- what moved, when, on whose standing authority, and whether the chain confirmed it. It NEVER initiates, signs, cancels or alters a spend, and there is no verb here that edits an entry. A failed spend is reported WITH the stage it died at, because only a signing failure means the money definitely did not move; a broadcast or confirmation failure is an UNKNOWN outcome, as is `unresolved`. A page is bounded and says so via `complete`; `unreadable_lines` reports entries the node could not parse, so an audit trail that lost rows can never read as a tidy shorter one. TOKEN-GATED although it is a read: the caller supplies no identifier, so the answer is this node's OWN state.",
             ControlMethod::ProfilePutBody => "Hand the node the dig-profile BODY that a chain root commits to. The node INDEPENDENTLY resolves that root on chain and REFUSES any body whose recomputed root is not the confirmed one -- the caller's `root` is a claim to be checked, never a fact to be trusted, and dig-app is a caller like any other. Bodies are capped at MAX_BODY_BYTES (4 MiB). TOKEN-GATED.",
             ControlMethod::ProfileGetBody => "READ-only: the dig-profile body this node holds at a given store id + root, or `body: null` when it holds none. `null` NEVER means the body could not be read, which is an error. TOKEN-GATED.",
             ControlMethod::WalletWatched => "READ-only: the public keys currently enrolled, so a client can reconcile what it asked for against what the node holds. TOKEN-GATED although it is a read -- the caller supplies nothing, so the answer is this node's OWN key set.",
@@ -600,6 +610,7 @@ impl ControlMethod {
         ControlMethod::WalletReservationsHeld,
         ControlMethod::WalletReservationsReserve,
         ControlMethod::WalletReservationsRelease,
+        ControlMethod::SpendsList,
         ControlMethod::ProfilePutBody,
         ControlMethod::ProfileGetBody,
         ControlMethod::PairingRequest,

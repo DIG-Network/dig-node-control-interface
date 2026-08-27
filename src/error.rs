@@ -25,6 +25,7 @@
 //! | `-32044` | [`WalletNodeSpendDisabled`](ControlErrorCode::WalletNodeSpendDisabled) | node | the bundle spends the NODE's own coins and live broadcast is off |
 //! | `-32046` | [`WalletCoinsReserved`](ControlErrorCode::WalletCoinsReserved) | node | coins are held by an in-flight spend |
 //! | `-32047` | [`WalletReservationsUnavailable`](ControlErrorCode::WalletReservationsUnavailable) | node | the reservation set could not be read |
+//! | `-32048` | [`SpendAuditUnreadable`](ControlErrorCode::SpendAuditUnreadable) | shell | the automated-spend audit record could not be read |
 //!
 //! The `-3204x` block is OWNED BY THIS CRATE. A node or client MUST NOT mint a code in it that is
 //! not declared here: a privately-minted code is invisible to allocation, and two implementations
@@ -96,6 +97,19 @@ pub enum ControlErrorCode {
     /// reserved" demand opposite actions from a caller: the first permits a spend, the second must
     /// refuse one. A guard that fails open is not a guard.
     WalletReservationsUnavailable,
+    /// `-32048` — the automated-spend audit record could not be read at all, so what this node
+    /// spent unattended is UNKNOWN.
+    ///
+    /// Never collapsed into an empty page. "This node has moved no money unattended" and "I cannot
+    /// tell you what this node moved" are opposite answers, and the first is the one a person stops
+    /// investigating on. A partial read is a different thing again and is NOT an error: entries the
+    /// node could parse are returned, and the ones it could not are counted in
+    /// [`SpendsListResult::unreadable_lines`](crate::results::SpendsListResult::unreadable_lines).
+    /// This code is for the case where nothing at all could be read.
+    ///
+    /// An audit record that has never been written is likewise NOT an error — a node that has never
+    /// spent automatically is the ordinary case, and it answers with an empty page.
+    SpendAuditUnreadable,
 }
 
 impl ControlErrorCode {
@@ -117,6 +131,7 @@ impl ControlErrorCode {
             ControlErrorCode::WalletNodeSpendDisabled => -32044,
             ControlErrorCode::WalletCoinsReserved => -32046,
             ControlErrorCode::WalletReservationsUnavailable => -32047,
+            ControlErrorCode::SpendAuditUnreadable => -32048,
         }
     }
 
@@ -138,6 +153,7 @@ impl ControlErrorCode {
             ControlErrorCode::WalletNodeSpendDisabled => "WALLET_NODE_SPEND_DISABLED",
             ControlErrorCode::WalletCoinsReserved => "WALLET_COINS_RESERVED",
             ControlErrorCode::WalletReservationsUnavailable => "WALLET_RESERVATIONS_UNAVAILABLE",
+            ControlErrorCode::SpendAuditUnreadable => "SPEND_AUDIT_UNREADABLE",
         }
     }
 
@@ -196,6 +212,9 @@ impl ControlErrorCode {
             ControlErrorCode::WalletReservationsUnavailable => {
                 "The node's coin-reservation set could not be read, so coin selection cannot be trusted."
             }
+            ControlErrorCode::SpendAuditUnreadable => {
+                "The automated-spend audit record could not be read, so what this node spent unattended is unknown. This is NOT an empty record."
+            }
         }
     }
 
@@ -224,6 +243,7 @@ impl ControlErrorCode {
         ControlErrorCode::WalletNodeSpendDisabled,
         ControlErrorCode::WalletCoinsReserved,
         ControlErrorCode::WalletReservationsUnavailable,
+        ControlErrorCode::SpendAuditUnreadable,
     ];
 }
 

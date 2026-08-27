@@ -1852,6 +1852,312 @@ pub struct ProfileGetBodyResult {
     pub body_bytes: u64,
 }
 
+/// Which asset an automated spend moved.
+///
+/// Externally tagged on `asset` so a CAT carries its asset id in the same object rather than in a
+/// sibling field that could go missing: `{"asset":"xch"}`, `{"asset":"dig"}`,
+/// `{"asset":"cat","asset_id":"…"}`. An amount is never readable without its asset, so the two
+/// travel together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "asset", rename_all = "snake_case")]
+pub enum SpendAsset {
+    /// Chia itself.
+    Xch,
+    /// The $DIG CAT.
+    Dig,
+    /// Any other CAT, identified by its asset id.
+    Cat {
+        /// The CAT's asset id, lowercase 64-hex.
+        asset_id: String,
+    },
+}
+
+/// ON WHOSE AUTHORITY the node signed without asking.
+///
+/// Two fields rather than one sentence, because a person auditing an unapproved spend asks two
+/// separate questions: WHO holds the standing permission, and WHICH standing permission was used. A
+/// prose sentence answers neither in a form a filter — or a revocation — can act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendAuthority {
+    /// The principal whose funds moved and whose consent was relied on: an account id, a profile id,
+    /// or `"node"` for the node's own operating wallet.
+    pub principal: String,
+    /// The standing grant relied on, in a form the operator can go and revoke — a setting name, a
+    /// policy id, a pairing token id.
+    pub grant: String,
+}
+
+/// Where an attempt died.
+///
+/// Coarse and stable on purpose: the point is which STEP failed, because that is what tells a person
+/// whether their money is at risk. **This distinction is load-bearing and MUST NOT be flattened into
+/// a bare "failed".** A client that collapses it is structurally unable to tell someone the truth
+/// about their own money.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendFailureStage {
+    /// The spend could not be built or signed. No signed bundle ever existed, so nothing could reach
+    /// a mempool and nothing moved.
+    Signing,
+    /// A signed bundle was rejected by the mempool, **as far as this node saw**. The bundle may
+    /// still have reached the network by another route, or been accepted after the rejection this
+    /// node observed.
+    Broadcast,
+    /// The bundle went out and the chain then reported it could not succeed.
+    Confirmation,
+}
+
+impl SpendFailureStage {
+    /// Could the money have moved anyway, despite the attempt failing at this stage?
+    ///
+    /// [`Signing`](Self::Signing) is the only stage that answers NO, and it answers structurally: no
+    /// signed bundle existed, so there was nothing that could reach a mempool.
+    /// [`Broadcast`](Self::Broadcast) and [`Confirmation`](Self::Confirmation) both happen AFTER a
+    /// valid signed bundle exists, and neither observation proves absence — a rejection this node
+    /// saw does not bind a network it does not fully observe.
+    ///
+    /// This is the ONE place the distinction is decided. Every consumer asks the stage rather than
+    /// re-listing the variants, so the "it did not happen" claim cannot be re-attached to a stage
+    /// that never earned it. Written as an exhaustive `match` so adding a stage is a compile error
+    /// here, forcing whoever adds it to choose a side.
+    pub fn money_may_have_moved(self) -> bool {
+        match self {
+            SpendFailureStage::Signing => false,
+            SpendFailureStage::Broadcast | SpendFailureStage::Confirmation => true,
+        }
+    }
+
+    /// The stable lowercase wire token.
+    pub const fn token(self) -> &'static str {
+        match self {
+            SpendFailureStage::Signing => "signing",
+            SpendFailureStage::Broadcast => "broadcast",
+            SpendFailureStage::Confirmation => "confirmation",
+        }
+    }
+}
+
+/// Where one automated spend got to.
+///
+/// Internally tagged on `state`, so a row is `{"state":"confirmed","height":…,"coin_id":"…"}`.
+///
+/// # Two shape rules, each from a measured money-lie
+///
+/// 1. **[`Confirmed`](Self::Confirmed) carries its evidence inside the variant.** There is no
+///    optional height field to fill in optimistically, so a row cannot hold a confirmation height
+///    without a confirmation.
+/// 2. **[`Unresolved`](Self::Unresolved) is NOT a kind of failure.** "The node signed and does not
+///    know how it ended" is not "it did not happen": money may well have moved, and saying `failed`
+///    about a spend that landed is the same class of lie as claiming an unconfirmed success. A
+///    client that maps it onto `failed` to keep a two-state UI has chosen the wrong UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SpendOutcome {
+    /// Recorded, not yet handed to the network. Written before the producer may sign.
+    Pending,
+    /// A signed bundle was accepted by the mempool. NOT a claim that it will confirm.
+    Submitted,
+    /// The chain shows the coin this spend created.
+    Confirmed {
+        /// The height the created coin was confirmed at.
+        height: u32,
+        /// The coin the spend CREATED — the reference a person can paste into an explorer.
+        coin_id: String,
+    },
+    /// The attempt ended in a failure this node observed.
+    ///
+    /// **This is not uniformly a claim that the money stayed put.** Only
+    /// [`SpendFailureStage::Signing`] carries that claim; at `Broadcast` and `Confirmation` a signed
+    /// bundle already existed and the outcome is genuinely UNKNOWN. Ask
+    /// [`SpendFailureStage::money_may_have_moved`] before rendering any `failed` row as settled.
+    Failed {
+        /// Which step failed — and, through [`SpendFailureStage::money_may_have_moved`], whether
+        /// this row claims the money is untouched or merely records where the attempt died.
+        stage: SpendFailureStage,
+        /// One line a person can act on. "Insufficient funds" is the difference between a broken
+        /// node and a wallet that needs topping up.
+        reason: String,
+    },
+    /// The node signed and does not know how it ended — a timeout, a restart mid-flight, or a
+    /// producer that dropped the spend.
+    Unresolved {
+        /// Why the outcome is unknown.
+        reason: String,
+    },
+}
+
+impl SpendOutcome {
+    /// The stable lowercase token, matching the `state` tag and the
+    /// [`status`](crate::params::SpendsListParams::status) filter.
+    pub const fn token(&self) -> &'static str {
+        match self {
+            SpendOutcome::Pending => "pending",
+            SpendOutcome::Submitted => "submitted",
+            SpendOutcome::Confirmed { .. } => "confirmed",
+            SpendOutcome::Failed { .. } => "failed",
+            SpendOutcome::Unresolved { .. } => "unresolved",
+        }
+    }
+
+    /// Is what happened to the money still UNKNOWN?
+    ///
+    /// True for [`Unresolved`](Self::Unresolved), and true for a [`Failed`](Self::Failed) row whose
+    /// stage [may have moved money](SpendFailureStage::money_may_have_moved). Those two are the rows
+    /// a person still has to chase, and a UI grouping them with settled failures hides exactly the
+    /// spends worth looking at.
+    ///
+    /// `Pending` and `Submitted` are NOT unknown outcomes — they are outcomes that have not happened
+    /// yet, and the node expects to learn them. Conflating "in flight" with "lost track of" would
+    /// raise an alarm about every spend in progress.
+    pub fn outcome_is_unknown(&self) -> bool {
+        match self {
+            SpendOutcome::Unresolved { .. } => true,
+            SpendOutcome::Failed { stage, .. } => stage.money_may_have_moved(),
+            SpendOutcome::Pending | SpendOutcome::Submitted | SpendOutcome::Confirmed { .. } => {
+                false
+            }
+        }
+    }
+}
+
+/// A chain reference, paired with whether this node actually OBSERVED it.
+///
+/// The [`confirmed`](Self::confirmed) flag is not decoration. Before confirmation the node knows the
+/// coin id it INTENDS to create, and rendering that bare id beside a confirmed one presents an
+/// intention as a fact. The two travel together so a client can render "expected" differently from
+/// "on chain" without re-deriving the distinction — which is the derivation it would get wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendChainReference {
+    /// The coin id to look up.
+    pub coin_id: String,
+    /// `true` when this node observed the coin on chain; `false` when it is only the intended result.
+    pub confirmed: bool,
+}
+
+/// One spend this node made WITHOUT per-transaction approval.
+///
+/// # Amounts are decimal STRINGS
+///
+/// `amount_mojos` and `fee_mojos` carry the full `u64` range, which a JSON number does not survive
+/// through an f64 parser — and a silently rounded figure about somebody's money is exactly the lie
+/// this record exists to prevent. Every money field in this crate is a string for that reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomatedSpend {
+    /// The audit id — stable for the life of the spend, and the value
+    /// [`after_id`](crate::params::SpendsListParams::after_id) resumes from.
+    pub id: String,
+    /// The revision of the record this row reflects. The audit trail is append-only and each entry
+    /// is a snapshot; this row is the highest revision the node holds for this spend.
+    pub revision: u32,
+    /// What the spend was for, as the producer's stable token (`"mirror-coin"`, …).
+    pub kind: String,
+    /// One human sentence: why this happened without asking.
+    pub purpose: String,
+    /// Whose standing consent was relied on, and which grant.
+    pub authority: SpendAuthority,
+    /// Which asset moved.
+    pub asset: SpendAsset,
+    /// How much, in the asset's base units, as a decimal string.
+    pub amount_mojos: String,
+    /// The network fee in mojos of XCH, as a decimal string.
+    pub fee_mojos: String,
+    /// The store this spend serves, when it serves one.
+    pub store_id: Option<String>,
+    /// When the node decided to spend, unix ms. The field the ordering and the time filters use.
+    pub initiated_ms: u64,
+    /// When this revision was written, unix ms.
+    pub updated_ms: u64,
+    /// Where the spend got to.
+    pub status: SpendOutcome,
+    /// The coins this spend CONSUMED, once known.
+    ///
+    /// Never the confirmation evidence. The legacy implementation waited for a funding coin to be
+    /// spent and called that confirmation, which a competing spend of the same coin satisfies
+    /// identically while the intended coin never exists — so a client MUST NOT infer success from
+    /// anything here. [`chain_reference`](Self::chain_reference) is the only reference that carries
+    /// an observed/expected flag.
+    pub funding_coin_ids: Vec<String>,
+    /// The chain reference to show, or `null` when the node knows no coin id yet — which is honest:
+    /// there is nothing to look up.
+    ///
+    /// The key MUST be present. `null` is meaningful, so an ABSENT key must not decode into it: a
+    /// truncated or mis-routed payload would otherwise decode as a confident "there is nothing to
+    /// look up".
+    #[serde(deserialize_with = "required_option")]
+    pub chain_reference: Option<SpendChainReference>,
+}
+
+/// `control.spends.list` — one page of the automated-spend audit record.
+///
+/// # Why this method is the only sanctioned reader
+///
+/// The record is a node-private file (dig-node SPEC §23). Every other view — dig-app's Activity tab
+/// included — reads it THROUGH the node, and this is that route. A second process parsing the file
+/// would be a second implementation of a growing append-only format, which is how two views of "what
+/// did the node spend" start disagreeing, on the one subject where disagreeing is least affordable.
+///
+/// # A page, and it says so
+///
+/// [`spends`](Self::spends) is bounded by
+/// [`SPENDS_LIST_MAX_LIMIT`](crate::params::SPENDS_LIST_MAX_LIMIT). Whether it is the whole matching
+/// set is stated by [`complete`](Self::complete) and never left to be inferred from the page's
+/// length: a node may return a short page for its own reasons, and a matching set that is an exact
+/// multiple of the page size makes the last full page indistinguishable from a truncated one.
+/// Without an explicit flag a caller cannot tell "there are no more spends" from "we stopped telling
+/// you" — and on an audit record those read the same and mean opposite things.
+///
+/// # The order is part of the contract
+///
+/// A node MUST return rows by DESCENDING [`initiated_ms`](AutomatedSpend::initiated_ms), breaking
+/// ties by ASCENDING [`id`](AutomatedSpend::id), and MUST keep that order stable across the pages of
+/// one walk. [`after_id`](crate::params::SpendsListParams::after_id) means *strictly after this row
+/// in that order*. The tiebreak is required rather than incidental: automated spends are issued by a
+/// cycle and several can share a millisecond, so a time-only order names no position and a walk
+/// would repeat some rows and skip others.
+///
+/// # An empty page is an ANSWER, never a fallback
+///
+/// `spends: []` with `complete: true` means this node has moved no money unattended that matches the
+/// filters. It is NEVER what a caller gets when the record could not be read: that is
+/// [`SpendAuditUnreadable`](crate::error::ControlErrorCode::SpendAuditUnreadable). "Nothing to
+/// report" and "I could not look" are different answers, and the first is the one a person stops
+/// investigating on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendsListResult {
+    /// One page of matching spends, newest-initiated first, possibly empty.
+    pub spends: Vec<AutomatedSpend>,
+    /// Is this page the WHOLE matching set?
+    ///
+    /// `true` means every matching spend the node holds is in [`spends`](Self::spends). `false`
+    /// means the answer was TRUNCATED and more exist — resume from [`cursor`](Self::cursor).
+    ///
+    /// Required on the wire, and stated positively so the reading a caller falls into when the field
+    /// is absent or defaulted is the SAFE one. A boolean spelled `truncated` would default to
+    /// `false`, i.e. to "this is everything", which is the claim that ends a walk early; `complete`
+    /// defaults to "there may be more", which costs at worst one redundant request.
+    pub complete: bool,
+    /// The id of the last row in this page — **the value to resume from** — or `null` for an empty
+    /// page.
+    ///
+    /// It is the id the caller was HANDED, never a marker for where the record "got to". Pass it as
+    /// [`after_id`](crate::params::SpendsListParams::after_id).
+    ///
+    /// The key MUST be present; `null` is meaningful and an absent key must not decode into it.
+    #[serde(deserialize_with = "required_option")]
+    pub cursor: Option<String>,
+    /// How many entries in the record the node could NOT parse.
+    ///
+    /// Part of the answer rather than a log line, and a client MUST surface a non-zero value. An
+    /// audit trail that lost entries to corruption and reads as a shorter, tidy list is
+    /// indistinguishable from one where those spends never happened — which is the same lie as a
+    /// missing entry, told more convincingly.
+    ///
+    /// It counts unreadable entries across the WHOLE record, not just this page: a corrupt entry has
+    /// no parsed timestamp and no parsed id, so it cannot be attributed to a page or excluded by a
+    /// filter. A caller therefore MUST NOT read it as "this many rows are missing from this page".
+    pub unreadable_lines: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

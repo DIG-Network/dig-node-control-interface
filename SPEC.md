@@ -127,6 +127,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.reservations.held` | yes | delegated | — | `{reserved:[ReservedCoin], as_of_unix:u64}` |
 | `control.wallet.reservations.reserve` | yes | delegated | `{coin_ids:[string], ttl_secs?:u64}` | `{reservation_id, coin_ids, expires_at_unix, ttl_secs}` |
 | `control.wallet.reservations.release` | yes | delegated | `{reservation_id:string}` | `{released:bool, coin_ids:[string]}` |
+| `control.spends.list` | yes | owned | `{since_ms?:u64, until_ms?:u64, store_id?:string, kind?:string, status?:string, after_id?:string, limit?:u32}` | `{spends:[AutomatedSpend], complete:bool, cursor:string\|null, unreadable_lines:u32}` |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -664,6 +665,33 @@ a struct over them.
   Rendering is specified here, beside the parsing, because they are two halves of one format. A node
   MUST NOT hand-roll its own `product/version` string.
 
+- **`AutomatedSpend`** — one spend the node made WITHOUT per-transaction approval:
+  `{id:string, revision:u32, kind:string, purpose:string, authority:{principal:string,
+  grant:string}, asset:Asset, amount_mojos:string, fee_mojos:string, store_id:string|null,
+  initiated_ms:u64, updated_ms:u64, status:SpendOutcome, funding_coin_ids:[string],
+  chain_reference:{coin_id:string, confirmed:bool}|null}`.
+
+  `amount_mojos` and `fee_mojos` are decimal STRINGS — they carry the full `u64` range, which a JSON
+  number does not survive through an f64 parser. `chain_reference` MUST be PRESENT as `null` when
+  the node knows no coin id yet (never omitted), and its `confirmed` flag says whether the node
+  OBSERVED that coin: a client MUST render an unobserved id as an intention, never as a fact.
+  `funding_coin_ids` names the coins CONSUMED and is never confirmation evidence — a competing spend
+  of the same funding coin consumes it identically while the intended coin never exists.
+
+- **`SpendOutcome`** — internally tagged on `state`. Exactly five forms are valid:
+
+  | JSON | Meaning |
+  |---|---|
+  | `{"state":"pending"}` | recorded, not yet handed to the network |
+  | `{"state":"submitted"}` | accepted by the mempool; NOT a claim that it will confirm |
+  | `{"state":"confirmed","height":u32,"coin_id":string}` | the chain shows the coin this spend created |
+  | `{"state":"failed","stage":"signing"\|"broadcast"\|"confirmation","reason":string}` | the attempt ended in an observed failure |
+  | `{"state":"unresolved","reason":string}` | the node signed and does not know how it ended |
+
+  The height and coin id live INSIDE the `confirmed` form, so a record cannot hold a confirmation
+  height without a confirmation. `failed` MUST carry its `stage`, and `unresolved` MUST NOT be
+  reported as `failed` — see §4.2d.
+
 - **`StatusResult.version`** already reports THIS node's own build; there is no separate method for
   it, and `control.peerStatus` covers both the point lookup ("what is that peer running") and the
   census (a group-by over the returned array).
@@ -809,6 +837,66 @@ additionally follows the profile ROOT and syncs its body from peers.
   from a node build that predates the field, treating the absent `kind` as `"capsule"`.
 - An UNRECOGNISED `kind` token is `-32602 INVALID_PARAMS`; absence is not.
 
+### 4.2d The automated-spend audit record (`control.spends.list`)
+
+`control.spends.list` is the ONE sanctioned way to read the spends a node made without
+per-transaction approval. The record itself is node-private (dig-node SPEC §23): it is a file the
+node owns, and every other view — dig-app's Activity tab included — reads it through this method. A
+second process parsing that file would be a second implementation of a growing append-only format,
+which is how two views of "what did the node spend" begin to disagree.
+
+**The method is read-only, and the catalog offers no companion that is not.** A conforming node MUST
+NOT let this call initiate, sign, retry, cancel or amend a spend, and MUST NOT expose a control
+method that edits or deletes an entry. The record replaces authorization with accountability, and a
+record that can be edited accounts for nothing.
+
+**A failure MUST carry the stage it died at.** Only `stage: "signing"` means the money definitely did
+not move: no signed bundle ever existed, so nothing could reach a mempool. `"broadcast"` and
+`"confirmation"` both happen after a valid signed bundle exists, and neither observation proves
+absence — a rejection this node saw does not bind a network it does not fully observe. A node MUST
+NOT emit a bare `failed` without a stage, and a client MUST NOT render a `broadcast` or
+`confirmation` failure as settled. Collapsing the distinction makes every surface structurally
+unable to tell a person the truth about their own money.
+
+**`unresolved` is a state, not a kind of failure.** It means the node signed and does not know how it
+ended — a timeout, a restart mid-flight, a producer that dropped the spend. A node MUST NOT report it
+as `failed`, and a client MUST NOT fold it into a failure bucket: saying "it did not happen" about a
+spend that landed is the same class of lie as claiming an unconfirmed success.
+
+**Money amounts are decimal STRINGS.** `amount_mojos` and `fee_mojos` carry the full `u64` range,
+which a JSON number does not survive through an f64 parser.
+
+**A page states its own completeness.** `spends` is bounded by 500 rows (default 50). `complete` MUST
+be `false` whenever a matching row was withheld, and MUST NOT be inferred by a client from
+`spends.len() < limit` — a node may return a short page for its own reasons, and a matching set that
+is an exact multiple of the page size makes the last full page indistinguishable from a truncated
+one. Without the flag a caller cannot tell "there are no more spends" from "we stopped telling you",
+and on an audit record those read the same and mean opposite things. A `limit` of `0`, or above 500,
+MUST be refused as `INVALID_PARAMS` rather than clamped: a silently shrunk page hands back a cursor
+for a position the caller did not ask about.
+
+**The order is part of the contract.** Rows are returned by DESCENDING `initiated_ms`, ties broken by
+ASCENDING `id`, and the order MUST stay stable across the pages of one walk. `after_id` means
+strictly after that row in that order. The tiebreak is required rather than incidental: automated
+spends are issued by a cycle and several can share a millisecond, so a time-only order names no
+position and a walk would repeat some rows and skip others.
+
+**Unreadable entries are part of the answer.** `unreadable_lines` counts entries the node could not
+parse, across the whole record rather than the page — a corrupt entry has no parsed timestamp and no
+parsed id, so it can be attributed to neither. A client MUST surface a non-zero value: an audit trail
+that lost rows and reads as a tidy shorter one is the same lie as a missing entry, told more
+convincingly.
+
+**An empty page is an answer; an unreadable record is an error.** `spends: []` with `complete: true`
+means this node moved no money unattended matching the filters, and a record that was never written
+answers exactly that way — a node that has never spent automatically is the ordinary case. A record
+that could not be read AT ALL is `-32048 SPEND_AUDIT_UNREADABLE`, never an empty page: "nothing to
+report" and "I could not look" are different answers, and the first is the one a person stops
+investigating on.
+
+**The read is token-gated although it is a read.** The caller supplies no identifier, so the answer
+is this node's OWN spending history — the same rule that keeps `control.wallet.arrivals` gated.
+
 ### 4.3 The custody boundary (§908)
 
 The node holds no user key and produces no signature. `control.wallet.broadcast` carries signed bytes
@@ -841,15 +929,19 @@ where the error was minted.
 | `-32044` | `WALLET_NODE_SPEND_DISABLED` | node | `control.wallet.broadcast` refused: the bundle requires a signature from one of the NODE's OWN custodied keys while `DIG_WALLET_ENABLE_LIVE_BROADCAST` is off. The node relays bundles somebody else signed on every install; sending its own money is a separate, default-OFF custody decision, and a caller could otherwise sign through the node and hand the bundle straight back. **Retrying cannot help**: the remedy is a bundle that does not spend the node's coins, or the flag. |
 | `-32046` | `WALLET_COINS_RESERVED` | node | coins named by the call are committed to a live in-flight spend; nothing was reserved. A WAIT, never a shortfall |
 | `-32047` | `WALLET_RESERVATIONS_UNAVAILABLE` | node | the node's coin-reservation set could not be read, so what is in flight is UNKNOWN |
+| `-32048` | `SPEND_AUDIT_UNREADABLE` | shell | the automated-spend audit record could not be read at all, so what this node spent unattended is UNKNOWN. Never an empty page. A record that was never written is NOT this: it is an empty page |
 
-The `-3204x` band is the wallet's, and **this document owns it**. A node or client MUST NOT mint a
+The `-3204x` band began as the wallet's and now also carries the audit record's `-32048`; **this
+document owns the whole band**. A node or client MUST NOT mint a
 `-3204x` code that is not declared in the table above: a privately-minted code cannot be seen at
 allocation time, and two implementations then disagree about what one number means.
 
 The codes in the band do NOT share one disposition, so a client MUST branch on the symbol rather
 than on the band. `-32040`..`-32043` and `-32047` say the answer is UNKNOWN — the node could not
 look, not that the chain said no — so a client MUST NOT degrade them into an empty or zero result,
-and MUST NOT report a mint, a spend or a balance as failed on their strength alone. `-32046` is a
+and MUST NOT report a mint, a spend or a balance as failed on their strength alone. `-32048` says
+the same about the audit record: it could not be read, which a client MUST NOT render as "this node
+has spent nothing". `-32046` is a
 transient WAIT and a client SHOULD retry. `-32044` is TERMINAL: retrying cannot help, and a client
 that treats it as a wait retries forever against a decision that will not change.
 
