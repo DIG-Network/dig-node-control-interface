@@ -4329,3 +4329,82 @@ fn an_absent_cursor_or_chain_reference_key_is_a_decode_error() {
     }))
     .is_err());
 }
+
+/// **Every catalogued error code is declared as a ROW of an error-code TABLE, with its own symbol.**
+///
+/// `SPEC.md`'s error section is normative and states that a node or client MUST NOT mint a `-3204x`
+/// code "that is not declared in the table above". That sentence makes TABLE MEMBERSHIP — not mere
+/// presence in the file — the thing a reimplementer is entitled to rely on, and Markdown terminates
+/// a table at the first blank line. A code whose row is separated from the table by one stray
+/// newline therefore renders as an ordinary paragraph of pipe-delimited text, and the document then
+/// forbids the very code this crate mints. That is exactly how `-32048` landed: the sibling guard
+/// above covers method names and phase tokens, error codes had no equivalent, and 160 tests passed
+/// over a split contract.
+///
+/// So this is a STRUCTURAL check, deliberately, on two axes a weaker one would miss:
+///
+/// * A `text.contains("-32048")` assertion passes against that exact defect — the number is in the
+///   file, just not in a table. The row is therefore located inside a parsed table BLOCK (a run of
+///   pipe lines carrying a `|---|` separator), never anywhere in the prose.
+/// * A check on the number alone would accept a code mapped to the WRONG symbol. The row's first
+///   TWO cells are pinned together, so a transposed or renamed symbol fails here.
+///
+/// `README.md` is held to a weaker bar ON PURPOSE: its table is an abbreviated agent-facing subset
+/// that has never carried the `-3204x` band. Requiring exhaustiveness there would be a different
+/// change. What IS required is that any code it does list is listed CORRECTLY — a wrong symbol in
+/// the short table misleads exactly the reader it is written for.
+#[test]
+fn every_catalogued_error_code_is_a_row_of_an_error_code_table() {
+    /// The maximal runs of consecutive pipe-prefixed lines that carry a `|---|` separator, i.e. the
+    /// blocks Markdown actually renders as tables. A blank line ends a block, which is the whole
+    /// point of parsing rather than scanning.
+    fn table_rows(text: &str) -> Vec<&str> {
+        fn flush<'a>(block: &mut Vec<&'a str>, rows: &mut Vec<&'a str>) {
+            let is_table = block
+                .iter()
+                .any(|l| l.trim_start_matches('|').trim_start().starts_with("---"));
+            if is_table {
+                rows.extend(block.iter().copied());
+            }
+            block.clear();
+        }
+
+        let mut rows: Vec<&str> = Vec::new();
+        let mut block: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with('|') {
+                block.push(line.trim());
+            } else {
+                flush(&mut block, &mut rows);
+            }
+        }
+        flush(&mut block, &mut rows);
+        rows
+    }
+
+    let spec_rows = table_rows(include_str!("../SPEC.md"));
+    let readme_rows = table_rows(include_str!("../README.md"));
+
+    for &code in ControlErrorCode::ALL {
+        // The row as it must appear, both cells at once: the number cannot be declared beside some
+        // other symbol, and the symbol cannot be declared beside some other number.
+        let row = format!("| `{}` | `{}` |", code.code(), code.name());
+
+        assert!(
+            spec_rows.iter().any(|l| l.starts_with(&row)),
+            "SPEC.md has no error-code TABLE ROW starting `{row}` -- either the code is undeclared, \
+             it carries the wrong symbol, or a blank line has split its row out of the table (which \
+             renders it as a paragraph, and SPEC.md's own MUST then forbids the code)"
+        );
+
+        // README lists a subset; whatever it lists must agree with the catalog.
+        let number_cell = format!("| `{}` |", code.code());
+        if let Some(listed) = readme_rows.iter().find(|l| l.starts_with(&number_cell)) {
+            assert!(
+                listed.starts_with(&row),
+                "README.md declares `{}` with the wrong symbol: {listed}",
+                code.code()
+            );
+        }
+    }
+}

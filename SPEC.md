@@ -929,7 +929,6 @@ where the error was minted.
 | `-32044` | `WALLET_NODE_SPEND_DISABLED` | node | `control.wallet.broadcast` refused: the bundle requires a signature from one of the NODE's OWN custodied keys while `DIG_WALLET_ENABLE_LIVE_BROADCAST` is off. The node relays bundles somebody else signed on every install; sending its own money is a separate, default-OFF custody decision, and a caller could otherwise sign through the node and hand the bundle straight back. **Retrying cannot help**: the remedy is a bundle that does not spend the node's coins, or the flag. |
 | `-32046` | `WALLET_COINS_RESERVED` | node | coins named by the call are committed to a live in-flight spend; nothing was reserved. A WAIT, never a shortfall |
 | `-32047` | `WALLET_RESERVATIONS_UNAVAILABLE` | node | the node's coin-reservation set could not be read, so what is in flight is UNKNOWN |
-
 | `-32048` | `SPEND_AUDIT_UNREADABLE` | shell | the automated-spend audit record could not be read at all, so what this node spent unattended is UNKNOWN. Never an empty page. A record that was never written is NOT this: it is an empty page |
 
 The `-3204x` band began as the wallet's and now also carries the audit record's `-32048`; **this
