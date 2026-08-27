@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.22.0] - 2026-08-27
+
+### Features
+- **spends:** Declare control.spends.list, the sanctioned reader for the spend audit record (#31)
+
 ## [0.21.0] - 2026-08-25
 
 ### Features
