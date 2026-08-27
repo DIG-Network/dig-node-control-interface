@@ -1347,6 +1347,168 @@ pub struct ProfileGetBodyParams {
 }
 control_call!(ProfileGetBodyParams => ControlMethod::ProfileGetBody, results::ProfileGetBodyResult);
 
+/// The page size `control.spends.list` uses when the caller names none.
+///
+/// Stated on the contract rather than chosen by each side, so a node and a client cannot resolve the
+/// same omitted field to two different numbers — a disagreement that shows up as a page boundary in
+/// the wrong place, which is where a paged walk loses rows.
+pub const SPENDS_LIST_DEFAULT_LIMIT: u32 = 50;
+
+/// The largest page `control.spends.list` will serve.
+///
+/// The audit record grows without limit — it is append-only and every automated cycle adds to it —
+/// so an unbounded read is unbounded work and an unbounded response. The bound is declared here from
+/// the start rather than added later, because a method that ships unbounded teaches every client to
+/// expect the whole record in one call, and bounding it afterwards is then a breaking change.
+///
+/// **This bound is the only thing bounding the call.** dig-node's control plane has no request rate
+/// limiting of any kind (dig_ecosystem#2577), so a future reader weighing a larger cap should assume
+/// no limiter exists behind it, because none does.
+pub const SPENDS_LIST_MAX_LIMIT: u32 = 500;
+
+/// The one refusal message for an out-of-range `control.spends.list` page size.
+const SPENDS_LIST_LIMIT_ERROR: &str = "limit must be between 1 and 500 spends per page";
+
+/// `control.spends.list` params: WHICH automated spends to read, and how much of the record at once.
+///
+/// # A read, and only a read
+///
+/// Nothing here initiates, signs, cancels or amends a spend, and the catalog offers no method that
+/// does. The record exists to make automatic signing accountable, and a surface able to edit it
+/// would be a surface able to edit the evidence.
+///
+/// # Every filter is an AND; an unset filter constrains nothing
+///
+/// Omitting a field means "do not narrow on this", never "match nothing". A client that sends no
+/// field at all asks for the newest page of the whole record.
+///
+/// # Paged, and the page boundary is the caller's
+///
+/// Rows come newest-initiated first (the full ordering rule is on
+/// [`SpendsListResult`](results::SpendsListResult)) and a caller resumes from
+/// [`after_id`](Self::after_id) — the id of the last row it was actually HANDED. An out-of-range
+/// [`limit`](Self::limit) is REFUSED rather than clamped, matching
+/// [`WalletCoinsByParentParams`] and for the same reason: a silently shrunk page hands back a cursor
+/// for a position the caller did not ask about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SpendsListParams {
+    /// Only spends INITIATED at or after this unix-ms instant. Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
+    /// Only spends INITIATED strictly before this unix-ms instant. Exclusive.
+    ///
+    /// Half-open with [`since_ms`](Self::since_ms) so consecutive windows tile the record exactly:
+    /// one window's `until_ms` is the next window's `since_ms`, and no spend is counted twice or
+    /// dropped between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
+    /// Only spends serving this store id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<String>,
+    /// Only this kind of spend — the stable token the producer stamped (`"mirror-coin"`, …).
+    ///
+    /// An open string rather than an enum, because a new producer must be able to appear in the
+    /// record without a release of this crate. An unrecognised kind matches nothing rather than
+    /// erroring, which is the same answer a caller gets for a real kind that has no rows yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Only this outcome, by its [`SpendOutcome::token`](results::SpendOutcome::token) —
+    /// `pending` / `submitted` / `confirmed` / `failed` / `unresolved`.
+    ///
+    /// **`failed` does NOT mean "the money stayed put"**, so a client filtering on it must still
+    /// read each row's stage — see [`SpendOutcome::Failed`](results::SpendOutcome::Failed). A UI
+    /// that offers a "failed" filter and renders its rows as untouched money asserts something the
+    /// node does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Resume STRICTLY AFTER this audit id, in the read's documented order. `None` starts at the
+    /// newest matching row.
+    ///
+    /// This is the value the previous page handed back as
+    /// [`cursor`](results::SpendsListResult::cursor) — never an id the caller kept for another
+    /// reason, and never a timestamp. Resuming by time would drop every spend sharing the boundary
+    /// millisecond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_id: Option<String>,
+    /// The page size. `None` asks for [`SPENDS_LIST_DEFAULT_LIMIT`].
+    ///
+    /// A zero, or a value above [`SPENDS_LIST_MAX_LIMIT`], is REFUSED as `INVALID_PARAMS` rather
+    /// than clamped — see [`Self::validated`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+impl SpendsListParams {
+    /// The page size this request asks for, resolving `None` to [`SPENDS_LIST_DEFAULT_LIMIT`].
+    ///
+    /// Stated once here so the node and the client cannot resolve the same omitted field to two
+    /// different numbers.
+    pub fn effective_limit(&self) -> u32 {
+        self.limit.unwrap_or(SPENDS_LIST_DEFAULT_LIMIT)
+    }
+
+    /// Check the page bound, or reject as `-32602 INVALID_PARAMS`.
+    ///
+    /// `limit: 0` is refused because a page that can hold nothing makes no progress: a caller
+    /// looping until [`complete`](results::SpendsListResult::complete) would loop forever. A limit
+    /// above the cap is refused rather than clamped so the caller's model of the page and the node's
+    /// stay identical.
+    ///
+    /// The time window is deliberately NOT validated. `since_ms > until_ms` is a well-formed request
+    /// for an empty window, and an empty window has an honest answer — no rows — which is a
+    /// different thing from a malformed request.
+    pub fn validated(self) -> Result<Self, ControlError> {
+        if let Some(limit) = self.limit {
+            if limit == 0 || limit > SPENDS_LIST_MAX_LIMIT {
+                return Err(ControlError::of(
+                    ControlErrorCode::InvalidParams,
+                    SPENDS_LIST_LIMIT_ERROR,
+                ));
+            }
+        }
+        Ok(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for SpendsListParams {
+    /// Validates on the way in, so a node cannot forget to call [`Self::validated`].
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            since_ms: Option<u64>,
+            #[serde(default)]
+            until_ms: Option<u64>,
+            #[serde(default)]
+            store_id: Option<String>,
+            #[serde(default)]
+            kind: Option<String>,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            after_id: Option<String>,
+            #[serde(default)]
+            limit: Option<u32>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        SpendsListParams {
+            since_ms: raw.since_ms,
+            until_ms: raw.until_ms,
+            store_id: raw.store_id,
+            kind: raw.kind,
+            status: raw.status,
+            after_id: raw.after_id,
+            limit: raw.limit,
+        }
+        .validated()
+        .map_err(serde::de::Error::custom)
+    }
+}
+control_call!(SpendsListParams => ControlMethod::SpendsList, results::SpendsListResult);
+
 #[cfg(test)]
 mod tests {
     use super::*;

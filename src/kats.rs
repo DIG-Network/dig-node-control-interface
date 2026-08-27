@@ -1597,6 +1597,12 @@ impl ControlHandler for MockNode {
             }
         }))
     }
+    async fn spends_list(
+        &self,
+        params: SpendsListParams,
+    ) -> Result<results::SpendsListResult, ControlError> {
+        Ok(audit_page(&params))
+    }
     async fn profile_put_body(
         &self,
         params: ProfilePutBodyParams,
@@ -3910,4 +3916,416 @@ fn adding_a_banned_peer_reports_that_no_bypass_was_granted() {
         !unbanned.notice.trim().is_empty(),
         "the person still needs to be told what actually happened"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// control.spends.list — the automated-spend audit record
+// ---------------------------------------------------------------------------------------------
+
+/// The audit fixture, newest-initiated FIRST — the order the contract fixes.
+///
+/// Four spends, chosen so the three wrong implementations this method invites are each visible:
+///
+/// * a **confirmed** spend is the honest control. Without one, a fixture of nothing-but-failures
+///   cannot tell "failures are listed" from "everything is listed", and cannot tell a client that
+///   renders every row as unsettled from one that reads the status at all.
+/// * the two **failures differ in exactly one field** — the stage — so an implementation that
+///   flattens the stage into a bare "failed" produces two identical rows here and fails. A fixture
+///   carrying only one failure could not see that collapse at all.
+/// * **unresolved** sits beside them so a `status: "failed"` filter that swept unknown outcomes into
+///   the failure bucket returns three rows instead of two.
+///
+/// Four rows paged two at a time is also what kills the completeness-by-length reading: BOTH pages
+/// carry exactly two rows, and only `complete` tells them apart.
+///
+/// `initiated_ms` values are a pinned constant, never a wall clock — a fixture whose timestamps
+/// drift with the run cannot pin an order.
+const AUDIT_BASE_MS: u64 = 1_700_000_000_000;
+
+/// Entries in the fixture's record that could not be parsed. NON-ZERO on purpose: a zero here would
+/// pass identically for an implementation that never reports corruption at all.
+const AUDIT_UNREADABLE: u32 = 2;
+
+/// The SAME reason on both failing spends.
+///
+/// Deliberate: the two failure rows must differ in EXACTLY ONE field, the stage. Giving them
+/// different reasons was the first version of this fixture, and it made the test pass against an
+/// implementation that dropped the stage from the wire entirely — the rows still compared unequal,
+/// on the reason. A shared reason removes that second signal, so only the stage can tell them apart.
+const AUDIT_FAILURE_REASON: &str = "no chain source could be reached";
+
+fn audit_fixture() -> Vec<results::AutomatedSpend> {
+    fn spend(
+        id: &str,
+        initiated_ms: u64,
+        status: results::SpendOutcome,
+        chain: Option<results::SpendChainReference>,
+    ) -> results::AutomatedSpend {
+        results::AutomatedSpend {
+            id: id.into(),
+            revision: 2,
+            kind: "mirror-coin".into(),
+            purpose: "renew the mirror advertising this store".into(),
+            authority: results::SpendAuthority {
+                principal: "node".into(),
+                grant: "auto_mirror_renewal".into(),
+            },
+            asset: results::SpendAsset::Xch,
+            // Above 2^53, so a client parsing amounts as JSON numbers loses the value. That is the
+            // whole reason the field is a string, and a fixture under the boundary could not see it.
+            amount_mojos: "9007199254740993".into(),
+            fee_mojos: "1000".into(),
+            store_id: Some(STORE.into()),
+            initiated_ms,
+            updated_ms: initiated_ms + 10,
+            status,
+            funding_coin_ids: vec![SPENT_COIN.into()],
+            chain_reference: chain,
+        }
+    }
+
+    vec![
+        spend(
+            "sp_confirmed",
+            AUDIT_BASE_MS + 400,
+            results::SpendOutcome::Confirmed {
+                height: 9_172_077,
+                coin_id: CHILD_COINS[0].into(),
+            },
+            Some(results::SpendChainReference {
+                coin_id: CHILD_COINS[0].into(),
+                confirmed: true,
+            }),
+        ),
+        spend(
+            "sp_broadcast",
+            AUDIT_BASE_MS + 300,
+            results::SpendOutcome::Failed {
+                stage: results::SpendFailureStage::Broadcast,
+                reason: AUDIT_FAILURE_REASON.into(),
+            },
+            // An INTENDED coin, not an observed one: the node signed, so a coin id exists to check
+            // even though nothing confirms it.
+            Some(results::SpendChainReference {
+                coin_id: CHILD_COINS[1].into(),
+                confirmed: false,
+            }),
+        ),
+        spend(
+            "sp_signing",
+            AUDIT_BASE_MS + 200,
+            results::SpendOutcome::Failed {
+                stage: results::SpendFailureStage::Signing,
+                reason: AUDIT_FAILURE_REASON.into(),
+            },
+            None,
+        ),
+        spend(
+            "sp_unresolved",
+            AUDIT_BASE_MS + 100,
+            results::SpendOutcome::Unresolved {
+                reason: "the node restarted while the spend was in flight".into(),
+            },
+            Some(results::SpendChainReference {
+                coin_id: CHILD_COINS[2].into(),
+                confirmed: false,
+            }),
+        ),
+    ]
+}
+
+/// Read the fixture the way a conforming node must: filter, then cursor, then page, then state
+/// completeness from what was WITHHELD rather than from the page's length.
+fn audit_page(params: &SpendsListParams) -> results::SpendsListResult {
+    let mut rows = audit_fixture();
+    if let Some(status) = params.status.as_deref() {
+        rows.retain(|r| r.status.token() == status);
+    }
+    if let Some(kind) = params.kind.as_deref() {
+        rows.retain(|r| r.kind == kind);
+    }
+    if let Some(since) = params.since_ms {
+        rows.retain(|r| r.initiated_ms >= since);
+    }
+    if let Some(until) = params.until_ms {
+        rows.retain(|r| r.initiated_ms < until);
+    }
+    if let Some(after) = params.after_id.as_deref() {
+        match rows.iter().position(|r| r.id == after) {
+            Some(i) => rows.drain(..=i).for_each(drop),
+            None => rows.clear(),
+        }
+    }
+    let limit = params.effective_limit() as usize;
+    let complete = rows.len() <= limit;
+    rows.truncate(limit);
+    results::SpendsListResult {
+        cursor: rows.last().map(|r| r.id.clone()),
+        spends: rows,
+        complete,
+        unreadable_lines: AUDIT_UNREADABLE,
+    }
+}
+
+/// **A broadcast failure and a signing failure MUST stay distinguishable on the wire.**
+///
+/// Both carry the token `failed`, so a client keying only on the token treats them identically —
+/// and they mean opposite things about a person's money. The fixture varies exactly ONE field
+/// between the two rows and keeps a confirmed spend beside them as an honest control, so the
+/// nearest wrong implementation (flattening `Failed` to a bare token, which is the collapse dig-node
+/// has had to undo twice) produces two rows that compare EQUAL here.
+#[test]
+fn a_broadcast_failure_is_not_the_same_answer_as_a_signing_failure() {
+    let node = MockNode;
+    let page = block_on(node.spends_list(SpendsListParams::default())).unwrap();
+
+    let broadcast = page.spends.iter().find(|s| s.id == "sp_broadcast").unwrap();
+    let signing = page.spends.iter().find(|s| s.id == "sp_signing").unwrap();
+    let confirmed = page.spends.iter().find(|s| s.id == "sp_confirmed").unwrap();
+
+    // The control: the read does distinguish outcomes at all.
+    assert_eq!(confirmed.status.token(), "confirmed");
+
+    // Same token — which is exactly why the token alone must never be the whole answer.
+    assert_eq!(broadcast.status.token(), "failed");
+    assert_eq!(signing.status.token(), "failed");
+
+    // …and yet the two rows must not be equal, on the wire or in the type.
+    assert_ne!(
+        serde_json::to_value(&broadcast.status).unwrap(),
+        serde_json::to_value(&signing.status).unwrap(),
+        "a flattened `failed` makes these two identical, which is the money-lie this shape exists \
+         to prevent"
+    );
+
+    // The load-bearing consequence: only the signing failure claims the money stayed put.
+    assert!(broadcast.status.outcome_is_unknown());
+    assert!(!signing.status.outcome_is_unknown());
+    assert!(!confirmed.status.outcome_is_unknown());
+}
+
+/// **`unresolved` is a first-class state, never a flavour of `failed`.**
+///
+/// The `status: "failed"` filter is the placement-sensitive probe: an implementation that folds
+/// unknown outcomes into the failure bucket — anywhere between the record and the wire — returns
+/// three rows here instead of two, whichever layer it does it at.
+#[test]
+fn an_unresolved_spend_is_not_returned_as_a_failure() {
+    let node = MockNode;
+    let failed = block_on(node.spends_list(SpendsListParams {
+        status: Some("failed".into()),
+        ..SpendsListParams::default()
+    }))
+    .unwrap();
+    let ids: Vec<&str> = failed.spends.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec!["sp_broadcast", "sp_signing"]);
+
+    let unresolved = block_on(node.spends_list(SpendsListParams {
+        status: Some("unresolved".into()),
+        ..SpendsListParams::default()
+    }))
+    .unwrap();
+    assert_eq!(unresolved.spends.len(), 1);
+    assert!(unresolved.spends[0].status.outcome_is_unknown());
+    assert!(matches!(
+        unresolved.spends[0].status,
+        results::SpendOutcome::Unresolved { .. }
+    ));
+}
+
+/// **Truncation is STATED, never inferred from the page's length.**
+///
+/// Four rows paged two at a time: both pages carry exactly two rows, so `complete` is the only thing
+/// that tells the middle of the walk from its end. A client inferring completeness from
+/// `spends.len() < limit` stops after the first page and presents half the audit record as the whole
+/// of it — "no more spends" and "we stopped telling you" rendered identically.
+#[test]
+fn a_truncated_spend_page_and_a_final_one_are_told_apart_only_by_complete() {
+    let node = MockNode;
+
+    let first = block_on(node.spends_list(SpendsListParams {
+        limit: Some(2),
+        ..SpendsListParams::default()
+    }))
+    .unwrap();
+    assert_eq!(first.spends.len(), 2);
+    assert!(
+        !first.complete,
+        "more rows were withheld, and it must say so"
+    );
+    assert_eq!(first.cursor.as_deref(), Some("sp_broadcast"));
+
+    let second = block_on(node.spends_list(SpendsListParams {
+        limit: Some(2),
+        after_id: first.cursor.clone(),
+        ..SpendsListParams::default()
+    }))
+    .unwrap();
+    assert_eq!(second.spends.len(), first.spends.len());
+    assert!(second.complete, "the walk is finished and must say so");
+    assert_eq!(second.cursor.as_deref(), Some("sp_unresolved"));
+
+    // The pages tile the record exactly: no row repeated, none skipped.
+    let walked: Vec<&str> = first
+        .spends
+        .iter()
+        .chain(second.spends.iter())
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(
+        walked,
+        vec![
+            "sp_confirmed",
+            "sp_broadcast",
+            "sp_signing",
+            "sp_unresolved"
+        ]
+    );
+}
+
+/// **Entries the node could not parse are part of the ANSWER.**
+///
+/// A trail that lost rows to corruption and reads as a tidy shorter one is the same lie as a missing
+/// entry. The count rides on every page, including a page that was itself truncated, so a client can
+/// never present a partial record as complete.
+#[test]
+fn unreadable_entries_are_reported_on_every_page() {
+    let node = MockNode;
+    let whole = block_on(node.spends_list(SpendsListParams::default())).unwrap();
+    assert_eq!(whole.unreadable_lines, AUDIT_UNREADABLE);
+
+    let page = block_on(node.spends_list(SpendsListParams {
+        limit: Some(1),
+        ..SpendsListParams::default()
+    }))
+    .unwrap();
+    assert_eq!(page.unreadable_lines, AUDIT_UNREADABLE);
+}
+
+/// **An out-of-range page size is REFUSED, not clamped**, and the bound is pinned from BOTH sides.
+///
+/// At-bound must pass and one over must fail; a bound tested only from below confirms only itself.
+/// Clamping would hand back a cursor for a position the caller never asked about, which is how a
+/// paged walk loses rows.
+#[test]
+fn the_page_bound_is_refused_from_above_and_accepted_at_the_bound() {
+    let at_bound = SpendsListParams {
+        limit: Some(SPENDS_LIST_MAX_LIMIT),
+        ..SpendsListParams::default()
+    };
+    assert!(at_bound.validated().is_ok(), "the cap itself must be legal");
+
+    for bad in [0, SPENDS_LIST_MAX_LIMIT + 1] {
+        let err = SpendsListParams {
+            limit: Some(bad),
+            ..SpendsListParams::default()
+        }
+        .validated()
+        .expect_err("an out-of-range page size must be refused");
+        assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+    }
+
+    // And the refusal is enforced on the way IN, so a node cannot forget to validate.
+    let over = serde_json::to_value(SPENDS_LIST_MAX_LIMIT + 1).unwrap();
+    assert!(serde_json::from_value::<SpendsListParams>(json!({"limit": over})).is_err());
+    assert!(serde_json::from_value::<SpendsListParams>(json!({"limit": 0})).is_err());
+    // An omitted limit is not a refusal — it is the contract's own default.
+    let defaulted: SpendsListParams = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(defaulted.effective_limit(), SPENDS_LIST_DEFAULT_LIMIT);
+}
+
+/// **`control.spends.list` is TOKEN-GATED and is not on the open surface.**
+///
+/// The caller names no identifier, so the answer is this node's OWN spending history — the same rule
+/// that keeps `control.wallet.arrivals` gated. Asserted against the open-surface predicate rather
+/// than by reading the summary, so widening the open set by analogy trips here.
+#[test]
+fn the_audit_read_is_gated_because_the_caller_names_nothing() {
+    assert!(ControlMethod::SpendsList.requires_auth());
+    assert!(!ControlMethod::SpendsList.is_open_read());
+    assert!(!ControlMethod::SpendsList.requires_master_token());
+    assert_eq!(ControlMethod::SpendsList.name(), "control.spends.list");
+}
+
+/// The golden wire vectors: the request envelope, and a response that decodes and re-encodes
+/// byte-for-byte.
+///
+/// The result vector carries `cursor: null` on purpose — the key is REQUIRED even when empty, so a
+/// truncated payload cannot decode into a confident "there was nothing to resume from".
+#[test]
+fn spends_list_wire_vectors_are_pinned() {
+    assert_request(
+        &SpendsListParams {
+            status: Some("failed".into()),
+            limit: Some(2),
+            ..SpendsListParams::default()
+        },
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "control.spends.list",
+            "params": {"status": "failed", "limit": 2},
+        }),
+    );
+
+    assert_result_round_trips::<results::SpendsListResult>(json!({
+        "spends": [],
+        "complete": true,
+        "cursor": null,
+        "unreadable_lines": 0,
+    }));
+
+    assert_result_round_trips::<results::SpendsListResult>(json!({
+        "spends": [{
+            "id": "sp_broadcast",
+            "revision": 2,
+            "kind": "mirror-coin",
+            "purpose": "renew the mirror advertising this store",
+            "authority": {"principal": "node", "grant": "auto_mirror_renewal"},
+            "asset": {"asset": "xch"},
+            "amount_mojos": "9007199254740993",
+            "fee_mojos": "1000",
+            "store_id": STORE,
+            "initiated_ms": AUDIT_BASE_MS + 300,
+            "updated_ms": AUDIT_BASE_MS + 310,
+            "status": {"state": "failed", "stage": "broadcast", "reason": "mempool rejected the bundle"},
+            "funding_coin_ids": [SPENT_COIN],
+            "chain_reference": {"coin_id": CHILD_COINS[1], "confirmed": false},
+        }],
+        "complete": false,
+        "cursor": "sp_broadcast",
+        "unreadable_lines": 2,
+    }));
+}
+
+/// **A missing `cursor` key must NOT decode as "nothing to resume from".**
+///
+/// `null` is meaningful here, so serde's default treatment of `Option` would let a truncated or
+/// mis-routed payload decode into a confident end-of-walk. Same rule on a row's `chain_reference`,
+/// where the absent key would read as "this spend has no coin to look up".
+#[test]
+fn an_absent_cursor_or_chain_reference_key_is_a_decode_error() {
+    assert!(serde_json::from_value::<results::SpendsListResult>(json!({
+        "spends": [],
+        "complete": true,
+        "unreadable_lines": 0,
+    }))
+    .is_err());
+
+    assert!(serde_json::from_value::<results::AutomatedSpend>(json!({
+        "id": "sp_signing",
+        "revision": 1,
+        "kind": "mirror-coin",
+        "purpose": "p",
+        "authority": {"principal": "node", "grant": "g"},
+        "asset": {"asset": "dig"},
+        "amount_mojos": "1",
+        "fee_mojos": "0",
+        "store_id": null,
+        "initiated_ms": AUDIT_BASE_MS,
+        "updated_ms": AUDIT_BASE_MS,
+        "status": {"state": "failed", "stage": "signing", "reason": "insufficient funds"},
+        "funding_coin_ids": [],
+    }))
+    .is_err());
 }

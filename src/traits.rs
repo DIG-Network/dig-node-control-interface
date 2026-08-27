@@ -436,6 +436,37 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::WalletReservationsReleaseParams,
     ) -> Result<results::WalletReservationsReleaseResult, ControlError>;
+    /// `control.spends.list` (READ-only, TOKEN-GATED)
+    ///
+    /// One page of the automated-spend audit record — the spends this node made WITHOUT
+    /// per-transaction approval. Gated although it is a read: the caller names no identifier, so the
+    /// answer is this node's OWN spending history.
+    ///
+    /// An implementation MUST NOT let this call initiate, sign, retry, cancel or amend a spend, and
+    /// MUST NOT expose any control method that edits or deletes an entry. The record replaces
+    /// authorization with accountability, and an editable record accounts for nothing.
+    ///
+    /// Four obligations, each of which a plausible implementation gets wrong:
+    ///
+    /// - **Report the failure STAGE, never a bare "failed."** Only
+    ///   [`SpendFailureStage::Signing`](results::SpendFailureStage::Signing) means the money
+    ///   definitely did not move; a broadcast or confirmation failure is an unknown outcome. An
+    ///   implementation that flattens the stage makes every client structurally unable to tell a
+    ///   person the truth about their money.
+    /// - **Keep [`Unresolved`](results::SpendOutcome::Unresolved) distinct from `Failed`.** It means
+    ///   the node signed and does not know how it ended.
+    /// - **State completeness explicitly.** `complete` MUST be `false` whenever a matching row was
+    ///   withheld, and `cursor` MUST be the id of the last row actually returned.
+    /// - **Report unreadable entries.** `unreadable_lines` MUST count entries the node could not
+    ///   parse; a trail that lost rows must never read as a tidy shorter one. A record that could not
+    ///   be read AT ALL is
+    ///   [`SpendAuditUnreadable`](crate::error::ControlErrorCode::SpendAuditUnreadable), never an
+    ///   empty page — while a record that was never written IS an empty page, because a node that has
+    ///   never spent automatically is the ordinary case.
+    async fn spends_list(
+        &self,
+        params: params::SpendsListParams,
+    ) -> Result<results::SpendsListResult, ControlError>;
     /// `control.profile.putBody` (TOKEN-GATED)
     ///
     /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
@@ -599,6 +630,11 @@ pub trait ControlHandler: Sync {
             }
             ControlMethod::WalletReservationsRelease => {
                 encode(self.wallet_reservations_release(decode(params)?).await?)
+            }
+            // Re-validated here idempotently; deserialization already enforced the same rule.
+            ControlMethod::SpendsList => {
+                let params: params::SpendsListParams = decode(params)?;
+                encode(self.spends_list(params.validated()?).await?)
             }
             ControlMethod::ProfilePutBody => encode(self.profile_put_body(decode(params)?).await?),
             ControlMethod::ProfileGetBody => encode(self.profile_get_body(decode(params)?).await?),
