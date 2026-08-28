@@ -4638,3 +4638,57 @@ fn a_known_requirement_must_declare_its_protocol_version() {
         "a requirement without its protocol version must be REFUSED, not defaulted"
     );
 }
+
+/// **`.set` stores what it was given, and `.get` reads back the SAME number.**
+///
+/// `SPEC.md` §4.2e states as a MUST that `control.collateral.margin.set` returns the margin actually
+/// in force and that, for an accepted request, it equals the requested one. That MUST is exactly the
+/// one a clamping implementation breaks silently, so it is asserted here rather than left as prose.
+///
+/// The route is deliberately `.set` through the DISPATCHER and then `.get` through the dispatcher —
+/// two separate calls — because a single call asserting `result.margin_bp == params.margin_bp` is
+/// satisfied by a handler that echoes its input and stores nothing. Reading it back through the
+/// other method is what distinguishes persistence from an echo.
+///
+/// The value is `1` bp rather than a preset: a preset is a value an implementation might special-case
+/// or round to, and 1 bp is the smallest legal margin, so it also fails against anything that
+/// quantises to whole percent.
+#[test]
+fn setting_the_margin_persists_it_and_getting_it_back_agrees() {
+    let set = round_trip(&CollateralMarginSetParams { margin_bp: 1 })
+        .expect("setting a legal margin must succeed");
+    assert_eq!(set.margin_bp, 1);
+
+    let got = round_trip(&CollateralMarginGetParams {})
+        .expect("reading the margin back must succeed");
+    assert_eq!(
+        got.margin_bp, 1,
+        "the margin read back must be the one set, not the default and not an echo"
+    );
+}
+
+/// **The margin bound published in `SPEC.md` is the bound the code enforces.**
+///
+/// `SPEC.md` §4.2e names the ceiling as a NUMBER in normative prose, and a reimplementer is entitled
+/// to build against that number. Prose has no compiler, so changing
+/// [`MAX_SAFETY_MARGIN_BP`] without changing the sentence would ship a document that is false about
+/// the code in the same repository — the failure mode the sibling method-name and error-code guards
+/// exist to prevent, applied to the one figure here that is a money-path bound.
+///
+/// The same check covers the default, for the same reason: `SPEC.md` promises `100`, and a node that
+/// reported `0` for a config predating the field would be telling an operator they declined a
+/// cushion they never declined.
+#[test]
+fn the_published_margin_bounds_match_the_declared_constants() {
+    let spec = include_str!("../SPEC.md");
+    for (label, value) in [
+        ("ceiling", MAX_SAFETY_MARGIN_BP),
+        ("default", DEFAULT_SAFETY_MARGIN_BP),
+    ] {
+        assert!(
+            spec.contains(&value.to_string()),
+            "SPEC.md never states the margin {label} ({value}), so its normative prose and the \
+             constant can drift apart unnoticed"
+        );
+    }
+}
