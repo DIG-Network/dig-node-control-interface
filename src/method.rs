@@ -29,6 +29,11 @@ pub enum Routing {
 }
 
 /// The functional area a control method belongs to — for grouping in UIs and docs.
+///
+/// `#[non_exhaustive]` so adding a category in a minor release is additive; downstream matches must
+/// carry a `_ => …` arm. A new method often arrives with a new area, so this enum grows on the same
+/// cadence as [`ControlMethod`] and needs the same guarantee.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
     /// Node status snapshot.
@@ -61,6 +66,10 @@ pub enum Category {
     /// reading one back. The chain root itself is never written here -- dig-app signs and pushes
     /// that (§908); this category moves only the bytes an already-confirmed root commits to.
     Profile,
+    /// Mirror-collateral: this epoch's derived per-store requirement, and the node's LOCAL safety
+    /// margin over it. The requirement is consensus-derived and read-only here; the margin is an
+    /// operator preference this node owns and MUST NOT let into any census or signal.
+    Collateral,
 }
 
 /// A dig-node CONTROL method.
@@ -203,6 +212,14 @@ pub enum ControlMethod {
     /// `control.spends.list` — read the record of spends this node made WITHOUT asking.
     SpendsList,
 
+    // ---- Mirror collateral (shell-owned) ----
+    /// `control.collateral.requirement` -- this epoch's per-store collateral requirement.
+    CollateralRequirement,
+    /// `control.collateral.margin.get` -- read the node's local safety margin, in basis points.
+    CollateralMarginGet,
+    /// `control.collateral.margin.set` -- set the node's local safety margin, in basis points.
+    CollateralMarginSet,
+
     // ---- dig-profile bodies (delegated to the engine) ----
     /// `control.profile.putBody` — hand the node the profile body a CONFIRMED chain root commits to.
     ProfilePutBody,
@@ -268,6 +285,9 @@ impl ControlMethod {
             ControlMethod::WalletReservationsReserve => "control.wallet.reservations.reserve",
             ControlMethod::WalletReservationsRelease => "control.wallet.reservations.release",
             ControlMethod::SpendsList => "control.spends.list",
+            ControlMethod::CollateralRequirement => "control.collateral.requirement",
+            ControlMethod::CollateralMarginGet => "control.collateral.margin.get",
+            ControlMethod::CollateralMarginSet => "control.collateral.margin.set",
             ControlMethod::ProfilePutBody => "control.profile.putBody",
             ControlMethod::ProfileGetBody => "control.profile.getBody",
             ControlMethod::PairingRequest => "pairing.request",
@@ -498,6 +518,9 @@ impl ControlMethod {
             | ControlMethod::WalletReservationsReserve
             | ControlMethod::WalletReservationsRelease => Category::Wallet,
             ControlMethod::SpendsList => Category::Spends,
+            ControlMethod::CollateralRequirement
+            | ControlMethod::CollateralMarginGet
+            | ControlMethod::CollateralMarginSet => Category::Collateral,
             ControlMethod::ProfilePutBody | ControlMethod::ProfileGetBody => Category::Profile,
         }
     }
@@ -549,6 +572,9 @@ impl ControlMethod {
             ControlMethod::WalletWatch => "Enrol PUBLIC keys (48-byte G1, lowercase 96-hex) for the node's chain replica to follow, so their addresses are synced and readable. IDEMPOTENT: re-enrolling a key already enrolled succeeds and changes nothing. Keys, never puzzle hashes -- the node derives the addresses itself, so one derivation serves every client. TOKEN-GATED.",
             ControlMethod::WalletUnwatch => "Deregister enrolled public keys, so the node stops following their addresses. IDEMPOTENT: a key that was never enrolled is not an error. TOKEN-GATED.",
             ControlMethod::SpendsList => "READ-only: the record of spends this node made WITHOUT per-transaction approval -- what moved, when, on whose standing authority, and whether the chain confirmed it. It NEVER initiates, signs, cancels or alters a spend, and there is no verb here that edits an entry. A failed spend is reported WITH the stage it died at, because only a signing failure means the money definitely did not move; a broadcast or confirmation failure is an UNKNOWN outcome, as is `unresolved`. A page is bounded and says so via `complete`; `unreadable_lines` reports entries the node could not parse, so an audit trail that lost rows can never read as a tidy shorter one. TOKEN-GATED although it is a read: the caller supplies no identifier, so the answer is this node's OWN state.",
+            ControlMethod::CollateralRequirement => "READ-only: this epoch's per-store mirror-collateral requirement in DIG base units, the collateral protocol version that computed it, and the census inputs behind it (advertised stores, collateralised owners, controller multiplier, small-network handicap) so a client can show WHY the figure moved rather than only that it did. A node that has not censused the epoch, or that is inside the census finality depth, answers `unknown` WITH the reason -- never a zero, which would read as a free requirement. `stores` counts qualifying (owner, store, root) advertisements and `owners` counts distinct owner puzzle hashes: neither is a node count. It NEVER returns the local safety margin, which is not a consensus value.",
+            ControlMethod::CollateralMarginGet => "Read the node's LOCAL safety margin in BASIS POINTS over the epoch requirement (`100` is +1%). The margin is an operator preference that changes only how much THIS node chooses to lock; it is never a census input and no value derived from it reaches another node. Basis points are the unit the collateral crate's own presets and rounding use, and are never converted.",
+            ControlMethod::CollateralMarginSet => "Set the node's LOCAL safety margin in BASIS POINTS (`100` is +1%), returning the margin now in force. Bounded at 10000 bp (+100%): the margin multiplies what the node locks on every store, so an unbounded value would commit the operator to an arbitrary posting. A margin above the bound is REFUSED as -32602 INVALID_PARAMS rather than clamped, so the applied value can never differ silently from the requested one. A margin gives room if the requirement rises; it does NOT guarantee a store is counted, because the requirement is re-derived every epoch and can rise by more than any margin.",
             ControlMethod::ProfilePutBody => "Hand the node the dig-profile BODY that a chain root commits to. The node INDEPENDENTLY resolves that root on chain and REFUSES any body whose recomputed root is not the confirmed one -- the caller's `root` is a claim to be checked, never a fact to be trusted, and dig-app is a caller like any other. Bodies are capped at MAX_BODY_BYTES (4 MiB). TOKEN-GATED.",
             ControlMethod::ProfileGetBody => "READ-only: the dig-profile body this node holds at a given store id + root, or `body: null` when it holds none. `null` NEVER means the body could not be read, which is an error. TOKEN-GATED.",
             ControlMethod::WalletWatched => "READ-only: the public keys currently enrolled, so a client can reconcile what it asked for against what the node holds. TOKEN-GATED although it is a read -- the caller supplies nothing, so the answer is this node's OWN key set.",
@@ -611,6 +637,9 @@ impl ControlMethod {
         ControlMethod::WalletReservationsReserve,
         ControlMethod::WalletReservationsRelease,
         ControlMethod::SpendsList,
+        ControlMethod::CollateralRequirement,
+        ControlMethod::CollateralMarginGet,
+        ControlMethod::CollateralMarginSet,
         ControlMethod::ProfilePutBody,
         ControlMethod::ProfileGetBody,
         ControlMethod::PairingRequest,

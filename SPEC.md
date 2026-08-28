@@ -128,6 +128,9 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.reservations.reserve` | yes | delegated | `{coin_ids:[string], ttl_secs?:u64}` | `{reservation_id, coin_ids, expires_at_unix, ttl_secs}` |
 | `control.wallet.reservations.release` | yes | delegated | `{reservation_id:string}` | `{released:bool, coin_ids:[string]}` |
 | `control.spends.list` | yes | owned | `{since_ms?:u64, until_ms?:u64, store_id?:string, kind?:string, status?:string, after_id?:string, limit?:u32}` | `{spends:[AutomatedSpend], complete:bool, cursor:string\|null, unreadable_lines:u32}` |
+| `control.collateral.requirement` | yes | owned | — | `CollateralRequirementResult` (`{state:"known", epoch, protocol_version, required_per_store_dig_base_units, stores, owners, multiplier_micros, handicap_dig_base_units}` \| `{state:"unknown", reason}`) |
+| `control.collateral.margin.get` | yes | owned | — | `{margin_bp:u64}` |
+| `control.collateral.margin.set` | yes | owned | `{margin_bp:u64}` | `{margin_bp:u64}` |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -897,6 +900,78 @@ investigating on.
 **The read is token-gated although it is a read.** The caller supplies no identifier, so the answer
 is this node's OWN spending history — the same rule that keeps `control.wallet.arrivals` gated.
 
+### 4.2e Mirror collateral: the epoch requirement and the local safety margin
+
+Two different kinds of value live in this category and MUST NOT be conflated. The **requirement** is
+consensus-derived: every node derives the same per-store figure for an epoch from the same census, and
+a mirror advertisement is counted in that epoch only if it posts at least that figure. The **safety
+margin** is a LOCAL operator preference that changes only how much THIS node chooses to lock over the
+requirement.
+
+**The margin MUST NOT be a consensus input.** No value derived from the margin MUST reach a census, a
+controller signal, or any value another node derives. `control.collateral.requirement` MUST return the
+PRE-margin requirement; a node that returned the margined amount would present its own preference as
+the network's price.
+
+**The margin is an unsigned integer count of BASIS POINTS (`100` is +1%), and MUST NOT be converted.**
+It is the unit `dig_mirror_collateral::apply_safety_margin` takes and the unit dig-app `SPEC.md` §3.7b
+fixes for `AgentConfig.collateral.margin_bp`; the `dign` CLI persists the same integer under the same
+key. A percentage or a float is not an alternative spelling of it — `1` bp (0.01%) is a legal margin
+that any conversion to whole percent erases.
+
+**The node is the authoritative home for the margin.** The flywheel is headless, so an install with no
+GUI MUST be able to set this; `control.collateral.margin.set` is how a graphical client reaches the
+same stored value rather than keeping one of its own.
+
+**A margin above `MAX_SAFETY_MARGIN_BP` (10000 bp, +100%) MUST be refused as `-32602 INVALID_PARAMS`,
+never clamped.** The bound exists because `.set` is a money-path mutation reachable with an ordinary
+paired token, and the margin arithmetic saturates rather than failing, so an unbounded value produces a
+silently enormous posting instead of an error. Refusal rather than clamping is required because the
+caller is stating an intent now: applying a different number than the one requested would leave the
+caller's stored intent and the node's behaviour disagreeing about money. `control.collateral.margin.set`
+MUST return the margin actually in force, and for an accepted request that value MUST equal the
+requested one.
+
+**A node whose configuration predates the field MUST report `DEFAULT_SAFETY_MARGIN_BP` (100 bp, +1%),
+never `0`.** A zero margin is a deliberate choice to post the requirement exactly; reporting it for a
+configuration that never expressed one tells an operator they declined a cushion they never declined.
+The default errs high because the failure is asymmetric — under-posting likely costs that epoch's
+rewards, while over-posting costs only the opportunity cost of the locked $DIG.
+
+**An unknown requirement MUST be stated as unknown, with its reason.** A node that has not censused the
+epoch, or that sits inside `CENSUS_FINALITY_DEPTH_BLOCKS` of the chain tip, MUST return
+`{state:"unknown", reason}` and MUST NOT return `0`, an error a client would render as "no collateral
+required", or a previous epoch's figure presented as this epoch's. The four reasons —
+`not_censused`, `behind_finality_depth`, `record_unreadable`, `no_chain_source` — name DIFFERENT missing
+facts with different remedies, and MUST NOT be collapsed into one. `known` and `unknown` are variants of
+one tagged union precisely so that no representable value carries a figure the node was not given; this
+is what dig-app `SPEC.md` §3.7b requires when it forbids any path that renders an absent requirement as
+a zero cost.
+
+**A `known` requirement MUST declare the collateral protocol version that COMPUTED the epoch** — not
+the newest version the node's build implements. The two differ exactly when a node upgraded
+mid-schedule, which is the one case where a client needs to tell a rule change from a disagreement. A
+requirement without its version MUST be rejected by a reader rather than defaulted.
+
+**The census inputs travel with the figure.** `stores` counts qualifying `(owner, store, root)`
+advertisements — one owner publishing two roots for one store id contributes two — and `owners` counts
+distinct owner puzzle hashes. Neither is a node count or an operator count, and a surface displaying
+`owners` MUST say "collateralised owners". `multiplier_micros` is in millionths and
+`handicap_dig_base_units` is in DIG base units.
+
+**These methods are TOKEN-GATED although two of them are reads.** The requirement's figure is derivable
+from chain by anyone, but its `unknown` branch names this node's OWN census position and the caller
+supplies no identifier, so the answer is a fact about this node rather than a relayed public one. They
+are NOT open reads (§4.2), and they are NOT master-token methods (§2.1): setting a margin grants the
+caller no authority that outlives the token, and the operator can revoke and reset it.
+
+**The count of stores THIS node holds is not served here.** A client assembling a recommended-$DIG
+buffer reads the held-store count from `control.hostedStores.list`; duplicating it in the requirement
+response would create a second source of truth for a figure that feeds a money calculation.
+
+**Nothing on this contract claims a margin guarantees inclusion.** The requirement is re-derived every
+epoch and can rise by more than any margin chosen.
+
 ### 4.3 The custody boundary (§908)
 
 The node holds no user key and produces no signature. `control.wallet.broadcast` carries signed bytes
@@ -973,4 +1048,3 @@ The catalog types are plain serde structs with no non-wasm dependencies, so a br
 (T5's `wasm-bindgen` binding) serializes them to identical JSON. The `serde_json::Value`-typed proxied
 results and the `#[serde(untagged)]` `RequestId` are the only shapes needing a JS-side check; T5 adds a
 Rust↔wasm/JS byte-identical KAT over the vectors in §6.
-

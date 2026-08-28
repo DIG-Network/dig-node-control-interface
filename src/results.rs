@@ -2807,3 +2807,114 @@ mod tests {
         );
     }
 }
+
+/// Why a node cannot state this epoch's collateral requirement.
+///
+/// Each variant names a DIFFERENT missing fact, because the remedies differ: a node that has not
+/// censused the epoch needs to run the census, whereas a node inside the finality depth needs only
+/// to wait for the chain to settle. Collapsing them into one "unavailable" would hand every client
+/// the same unactionable sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollateralUnknownReason {
+    /// This node has not censused the epoch, so it holds no record to answer from.
+    NotCensused,
+    /// The epoch's census inputs are not yet final — the node is inside
+    /// `CENSUS_FINALITY_DEPTH_BLOCKS` of the chain tip and any figure it derived could still move.
+    BehindFinalityDepth,
+    /// The node holds a record for the epoch but could not read it.
+    RecordUnreadable,
+    /// The node cannot see the chain at all, so it cannot know whether a record should exist.
+    NoChainSource,
+}
+
+impl CollateralUnknownReason {
+    /// Every reason, for exhaustive rendering and for the wire-token uniqueness KAT.
+    pub const ALL: &'static [CollateralUnknownReason] = &[
+        CollateralUnknownReason::NotCensused,
+        CollateralUnknownReason::BehindFinalityDepth,
+        CollateralUnknownReason::RecordUnreadable,
+        CollateralUnknownReason::NoChainSource,
+    ];
+
+    /// The stable snake_case wire token, matching the `reason` field.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            CollateralUnknownReason::NotCensused => "not_censused",
+            CollateralUnknownReason::BehindFinalityDepth => "behind_finality_depth",
+            CollateralUnknownReason::RecordUnreadable => "record_unreadable",
+            CollateralUnknownReason::NoChainSource => "no_chain_source",
+        }
+    }
+}
+
+/// `control.collateral.requirement` — this epoch's per-store collateral requirement, or a named
+/// reason the node cannot state it.
+///
+/// **UNKNOWN is a first-class answer, not an error.** A node that has not censused the epoch, or
+/// that is inside the census finality depth, is not broken; it simply does not know yet. Making
+/// that a tagged variant rather than an optional number means there is no representable state in
+/// which a client holds a figure it has not been given — which is what dig-app `SPEC.md` §3.7b
+/// requires when it forbids any path that renders an absent requirement as a zero cost.
+///
+/// **The census inputs travel with the figure on purpose.** A client that can show only the number
+/// can say the price moved; a client holding `stores`, `owners`, `multiplier_micros` and
+/// `handicap_dig_base_units` can say WHY it moved. The per-epoch record already holds all four, so
+/// carrying them costs the node nothing and is the difference between a figure an operator can
+/// weigh and one they can only accept.
+///
+/// **The margin is deliberately absent here.** The requirement is a consensus-derived value every
+/// node derives identically; the margin is a local operator preference that MUST NOT be a consensus
+/// input. Returning them from one method would invite exactly the conflation dig-app `SPEC.md`
+/// §3.7b forbids — read the margin from
+/// [`CollateralMarginResult`](crate::results::CollateralMarginResult) instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CollateralRequirementResult {
+    /// The node holds a final record for the epoch and states its requirement.
+    Known {
+        /// The epoch this requirement governs, one-based.
+        epoch: u64,
+        /// The collateral protocol version that COMPUTED this epoch.
+        ///
+        /// Travels with the figure because the model is versioned and upgradable: a client that
+        /// knows only the number cannot tell a disagreement from a rule change.
+        protocol_version: u16,
+        /// The per-store requirement, in DIG base units, BEFORE any local safety margin.
+        required_per_store_dig_base_units: u64,
+        /// Qualifying `(owner, store, root)` advertisements counted in the census.
+        ///
+        /// An advertisement count, never a node count: one owner publishing two roots for one store
+        /// id contributes two.
+        stores: u64,
+        /// Distinct owner puzzle hashes across those advertisements.
+        ///
+        /// Not a node count and not an operator count. A surface displaying it MUST say
+        /// "collateralised owners".
+        owners: u64,
+        /// The controller multiplier for the epoch, in millionths (`MULT_SCALE` = 1_000_000).
+        multiplier_micros: u64,
+        /// The small-network handicap applied for the epoch, in DIG base units.
+        handicap_dig_base_units: u64,
+    },
+    /// The node cannot state the requirement, and names which fact is missing.
+    Unknown {
+        /// Which fact the node is missing.
+        reason: CollateralUnknownReason,
+    },
+}
+
+/// `control.collateral.margin.get` / `.set` — the node's LOCAL safety margin.
+///
+/// `.set` returns the margin now in force, so a caller never has to re-read to learn what was
+/// applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollateralMarginResult {
+    /// The margin in BASIS POINTS over the requirement (`100` is +1%).
+    ///
+    /// The unit is basis points and is never converted, because it is the unit
+    /// `dig_mirror_collateral::apply_safety_margin` takes and the one dig-app `SPEC.md` §3.7b
+    /// normatively fixes. A conversion performed independently by two surfaces is a money-path
+    /// drift bug.
+    pub margin_bp: u64,
+}
