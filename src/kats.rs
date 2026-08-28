@@ -4697,7 +4697,11 @@ fn the_published_margin_bounds_match_the_declared_constants() {
     let spec = include_str!("../SPEC.md");
     for (label, name, value) in [
         ("ceiling", "MAX_SAFETY_MARGIN_BP", MAX_SAFETY_MARGIN_BP),
-        ("default", "DEFAULT_SAFETY_MARGIN_BP", DEFAULT_SAFETY_MARGIN_BP),
+        (
+            "default",
+            "DEFAULT_SAFETY_MARGIN_BP",
+            DEFAULT_SAFETY_MARGIN_BP,
+        ),
     ] {
         let published = published_bp_figures(spec, name);
         assert!(
