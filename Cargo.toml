@@ -13,13 +13,17 @@
 # is designed, matching the sibling dig-<x>-protocol crates' bootstrap order.
 [package]
 name = "dig-node-control-interface"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2021"
 rust-version = "1.75.0"
 license = "Apache-2.0 OR MIT"
 description = "Canonical client <-> dig-node CONTROL interface contract: the method catalog for controlling/querying a running dig-node (config, status, peers, subscriptions, cache, wallet), transport-agnostic. SSOT so client and node can't drift."
 repository = "https://github.com/DIG-Network/dig-node-control-interface"
 readme = "README.md"
+# Agent-instruction files are development context, never part of the published contract. A crates.io
+# version is immutable, so a file shipped once is shipped forever -- 0.23.0 carries AGENTS.md and
+# CLAUDE.md permanently. Ordinary crate tooling (.github, cliff.toml, commitlint) stays in the tarball.
+exclude = [".claude", "AGENTS.md", "CLAUDE.md"]
 keywords = ["dig", "control", "rpc", "node", "jsonrpc"]
 categories = ["network-programming", "authentication"]
 

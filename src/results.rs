@@ -2904,6 +2904,212 @@ pub enum CollateralRequirementResult {
     },
 }
 
+/// The node's funding position against its own recommended $DIG buffer.
+///
+/// **The state is carried, never re-derived by each client.** Every field needed to compute it does
+/// travel in [`CollateralBufferResult::Known`], so a client COULD compare numbers itself — and two
+/// clients that did would pick their own thresholds and disagree. The one that disagreed about a
+/// funding warning is the one an operator would act on, so which state this node is in is the
+/// node's answer, not a rendering decision.
+///
+/// **Whether a state is worth interrupting somebody over is the CLIENT's decision; this enum states
+/// only what is true.** [`is_shortfall`](CollateralFundingState::is_shortfall) names the two states
+/// in which some epoch is not covered. [`BelowRecommendedBuffer`](Self::BelowRecommendedBuffer) is
+/// deliberately not one of them: a healthy node sits there much of the time, and a client that
+/// raised a recurring alert for it would teach an operator to dismiss the two that matter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollateralFundingState {
+    /// Cannot cover the CURRENT epoch: stores this node serves are already going uncollateralised.
+    ShortNow,
+    /// Covers the current epoch but could not cover the NEXT one if the requirement rose to the
+    /// escalation ceiling. The rise is a bound, not a prediction — see
+    /// `escalation_ceiling_micros` — so this state says the node has no room for the worst case,
+    /// not that the worst case is coming.
+    DangerouslyLow,
+    /// Covers several epochs at the ceiling but holds less than the recommended buffer: funded, with
+    /// no cushion. A READOUT, never a notification.
+    BelowRecommendedBuffer,
+    /// Holds at least the recommended buffer over the stated horizon.
+    Funded,
+}
+
+impl CollateralFundingState {
+    /// Every state, for exhaustive rendering and for the wire-token uniqueness KAT.
+    pub const ALL: &'static [CollateralFundingState] = &[
+        CollateralFundingState::ShortNow,
+        CollateralFundingState::DangerouslyLow,
+        CollateralFundingState::BelowRecommendedBuffer,
+        CollateralFundingState::Funded,
+    ];
+
+    /// The stable snake_case wire token, matching the `funding_state` field.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            CollateralFundingState::ShortNow => "short_now",
+            CollateralFundingState::DangerouslyLow => "dangerously_low",
+            CollateralFundingState::BelowRecommendedBuffer => "below_recommended_buffer",
+            CollateralFundingState::Funded => "funded",
+        }
+    }
+
+    /// Is some epoch actually UNCOVERED — now, or next at the escalation ceiling?
+    ///
+    /// A statement about the world, not about a client's UI. It is the honest input to a client's
+    /// own decision about what deserves an interruption, and it excludes
+    /// [`BelowRecommendedBuffer`](Self::BelowRecommendedBuffer) because nothing is uncovered there.
+    pub const fn is_shortfall(self) -> bool {
+        matches!(
+            self,
+            CollateralFundingState::ShortNow | CollateralFundingState::DangerouslyLow
+        )
+    }
+}
+
+/// Why a node cannot state its recommended buffer or its funding position.
+///
+/// Separate from [`CollateralUnknownReason`] because the buffer needs three facts the epoch
+/// requirement does not, and each has a different remedy: a node missing its served set needs its
+/// hosted-store view, one missing reclaim state needs its transition bookkeeping, and one missing
+/// its balance needs a chain source. Collapsing them into the requirement's reasons would answer
+/// every one of those with "not censused", which is both false and unactionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollateralBufferUnknownReason {
+    /// The epoch requirement itself is unknown, so every term scaled by it is unknown too. Call
+    /// `control.collateral.requirement` for WHICH fact is missing — this variant deliberately does
+    /// not restate that taxonomy, because a copy of it here would drift from the original.
+    RequirementUnknown,
+    /// The node cannot enumerate the `(owner, store, root)` pairs IT serves. Nothing may be
+    /// substituted for this: the census `stores` figure counts network-wide advertisements and is
+    /// not a count of this node's own set.
+    ServedSetUnknown,
+    /// The node cannot read how much collateral is still locked against positions it has not yet
+    /// reclaimed, so the transition-overlap term is unknown.
+    ReclaimStateUnknown,
+    /// The node cannot read its own spendable $DIG, so it can state a buffer but not a position
+    /// against it.
+    BalanceUnknown,
+}
+
+impl CollateralBufferUnknownReason {
+    /// Every reason, for exhaustive rendering and for the wire-token uniqueness KAT.
+    pub const ALL: &'static [CollateralBufferUnknownReason] = &[
+        CollateralBufferUnknownReason::RequirementUnknown,
+        CollateralBufferUnknownReason::ServedSetUnknown,
+        CollateralBufferUnknownReason::ReclaimStateUnknown,
+        CollateralBufferUnknownReason::BalanceUnknown,
+    ];
+
+    /// The stable snake_case wire token, matching the `reason` field.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            CollateralBufferUnknownReason::RequirementUnknown => "requirement_unknown",
+            CollateralBufferUnknownReason::ServedSetUnknown => "served_set_unknown",
+            CollateralBufferUnknownReason::ReclaimStateUnknown => "reclaim_state_unknown",
+            CollateralBufferUnknownReason::BalanceUnknown => "balance_unknown",
+        }
+    }
+}
+
+/// `control.collateral.buffer` — the $DIG this node recommends holding, and where it stands against
+/// that figure.
+///
+/// **Every amount here is in DIG BASE UNITS.** $DIG carries 3 decimals, so one base unit is
+/// `0.001 DIG`. It is NOT a mojo: a mojo is XCH's base unit at `1e-12` XCH, nine orders of magnitude
+/// away. `margin_bp` is the one field that is not an amount and is in BASIS POINTS (`100` is `+1%`),
+/// the unit the collateral crate's own presets and rounding use, never converted.
+///
+/// **UNKNOWN is a first-class answer, and a zero here is the money lie in its purest form.** On
+/// `control.collateral.requirement` a fabricated zero reads as a free requirement; here it reads as
+/// *no buffer needed*, which is worse, because an operator acting on it would post nothing and lose
+/// the epoch. A node that cannot enumerate the pairs it serves, cannot read its reclaim state, or
+/// cannot see its balance says so WITH the reason — the tagged variant means there is no
+/// representable state in which a client holds a figure it was never given.
+///
+/// **The horizon travels with the buffer, because a buffer without one is a magic number.** The
+/// escalation of the per-store requirement is bounded at `+12.5%` per epoch and COMPOUNDS: about
+/// x1.12 at one epoch, x1.60 at four, x4.62 at thirteen. Two nodes quoting a buffer over different
+/// horizons are answering different questions, and neither figure can be checked without knowing
+/// which. `escalation_ceiling_micros` states the multiplier this node assumed, and it is a WORST
+/// CASE, not a forecast: inside the controller's dead band the multiplier does not move at all.
+///
+/// **The total is authoritative; the terms are the working.** `recommended_buffer_dig_base_units`
+/// is the figure to hold and the figure `funding_state` was decided against. The other fields exist
+/// so a client can show WHY that number is what it is — which is the difference between a figure an
+/// operator can weigh and one they can only accept — and a client MUST NOT re-add them and prefer
+/// its own sum, because rounding lives in the node's arithmetic, not the client's.
+///
+/// **Why this is not part of [`CollateralRequirementResult`].** The requirement is consensus-derived
+/// and every node derives it identically; the buffer is LOCAL — it depends on the pairs this
+/// particular node serves, on an operator preference (the margin), and on a horizon this node chose.
+/// 0.23.0 kept the margin out of the requirement on exactly that grounds, and the same reasoning
+/// binds harder here, because a buffer folded into the requirement's result would make one node's
+/// preferences look like the network's price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CollateralBufferResult {
+    /// The node can state its buffer and its position against it.
+    Known {
+        /// The epoch the underlying requirement governs, one-based.
+        epoch: u64,
+        /// The collateral protocol version that COMPUTED that epoch, carried for the same reason
+        /// [`CollateralRequirementResult::Known`] carries it: a client holding only numbers cannot
+        /// tell a disagreement from a rule change.
+        protocol_version: u16,
+        /// Where this node stands against `recommended_buffer_dig_base_units`.
+        funding_state: CollateralFundingState,
+        /// The $DIG this node recommends holding, in DIG base units. The authoritative figure.
+        recommended_buffer_dig_base_units: u64,
+        /// The spendable $DIG the node compared against the buffer, in DIG base units.
+        ///
+        /// Carried so `funding_state` is checkable rather than merely assertive: a client can show
+        /// the two numbers the verdict came from. It is what is SPENDABLE — collateral already
+        /// locked is not in it.
+        spendable_dig_base_units: u64,
+        /// Qualifying `(owner, store, root)` pairs THIS NODE serves.
+        ///
+        /// This node's own set, never the census `stores` count, which is a network-wide
+        /// advertisement count. Multiplying the census figure by the requirement is the confident,
+        /// badly wrong number this field exists to prevent.
+        pairs_served_by_this_node: u64,
+        /// The epoch's per-store requirement, in DIG base units, BEFORE any local safety margin —
+        /// the same value `control.collateral.requirement` returns.
+        required_per_store_dig_base_units: u64,
+        /// The local safety margin in force, in BASIS POINTS (`100` is `+1%`).
+        margin_bp: u64,
+        /// Collateral still locked against positions this node has not yet reclaimed, in DIG base
+        /// units.
+        ///
+        /// A transition overlap: during the changeover the node must be able to cover the new
+        /// epoch while the previous epoch's posting is not yet back. It is NOT derivable from any
+        /// other field here, which is why a node that cannot read its reclaim state answers
+        /// [`ReclaimStateUnknown`](CollateralBufferUnknownReason::ReclaimStateUnknown) rather than
+        /// omitting the term.
+        overlap_dig_base_units: u64,
+        /// The headroom included for the requirement escalating over `horizon_epochs`, in DIG base
+        /// units. Also not derivable client-side, because it depends on the horizon and ceiling
+        /// this node chose.
+        escalation_headroom_dig_base_units: u64,
+        /// How many future epochs the headroom covers. Never implied, never defaulted by a reader:
+        /// the same buffer over a different horizon is a different claim.
+        horizon_epochs: u32,
+        /// The compounded WORST-CASE escalation multiplier assumed over `horizon_epochs`, in
+        /// millionths (`1_000_000` is x1.0).
+        ///
+        /// A ceiling, not a forecast. Escalation is capped at `+12.5%` per epoch, so four epochs
+        /// bound at roughly `1_601_806` (x1.60); in the dead band the multiplier does not move at
+        /// all and the realised figure is `1_000_000`. A surface presenting this as an expectation
+        /// would tell an operator to hold money for a rise the controller may never make.
+        escalation_ceiling_micros: u64,
+    },
+    /// The node cannot state the buffer, and names which fact is missing.
+    Unknown {
+        /// Which fact the node is missing.
+        reason: CollateralBufferUnknownReason,
+    },
+}
+
 /// `control.collateral.margin.get` / `.set` — the node's LOCAL safety margin.
 ///
 /// `.set` returns the margin now in force, so a caller never has to re-read to learn what was

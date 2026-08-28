@@ -219,6 +219,8 @@ pub enum ControlMethod {
     CollateralMarginGet,
     /// `control.collateral.margin.set` -- set the node's local safety margin, in basis points.
     CollateralMarginSet,
+    /// `control.collateral.buffer` -- the $DIG this node recommends holding, and its funding state.
+    CollateralBuffer,
 
     // ---- dig-profile bodies (delegated to the engine) ----
     /// `control.profile.putBody` — hand the node the profile body a CONFIRMED chain root commits to.
@@ -288,6 +290,7 @@ impl ControlMethod {
             ControlMethod::CollateralRequirement => "control.collateral.requirement",
             ControlMethod::CollateralMarginGet => "control.collateral.margin.get",
             ControlMethod::CollateralMarginSet => "control.collateral.margin.set",
+            ControlMethod::CollateralBuffer => "control.collateral.buffer",
             ControlMethod::ProfilePutBody => "control.profile.putBody",
             ControlMethod::ProfileGetBody => "control.profile.getBody",
             ControlMethod::PairingRequest => "pairing.request",
@@ -520,7 +523,8 @@ impl ControlMethod {
             ControlMethod::SpendsList => Category::Spends,
             ControlMethod::CollateralRequirement
             | ControlMethod::CollateralMarginGet
-            | ControlMethod::CollateralMarginSet => Category::Collateral,
+            | ControlMethod::CollateralMarginSet
+            | ControlMethod::CollateralBuffer => Category::Collateral,
             ControlMethod::ProfilePutBody | ControlMethod::ProfileGetBody => Category::Profile,
         }
     }
@@ -581,6 +585,7 @@ impl ControlMethod {
             ControlMethod::WalletReservationsHeld => "READ-only: every coin currently committed to an in-flight spend, each with the reservation holding it and the unix second that hold lapses, plus the node's own clock. `reserved: []` means NOTHING is held; a set that cannot be read is an error, never an empty list. Narrows what a caller may SELECT; never subtract these from a balance -- the coins are still the user's money. TOKEN-GATED although it is a read: the caller supplies nothing, so the answer is this node's OWN state.",
             ControlMethod::WalletReservationsReserve => "Atomically hold coins against further selection: EVERY named coin or none. A coin already held refuses the whole call and reserves nothing, as WALLET_COINS_RESERVED -- a WAIT, never a shortfall. Reserving an empty list succeeds with a handle that releases nothing. The requested ttl_secs is clamped by the node, which returns the lifetime it actually applied. Bookkeeping only: it holds no key and authorizes nothing (§908). TOKEN-GATED.",
             ControlMethod::WalletReservationsRelease => "Free a hold now rather than waiting out its TTL -- call it the moment a spend is known settled or known dead. A handle that names no live reservation is a SUCCESS with released: false, because a caller releasing on confirmation cannot know whether the TTL got there first. Every hold also lapses on its own, so an abandoned reservation is recoverable and never a permanent funds lockout. TOKEN-GATED.",
+            ControlMethod::CollateralBuffer => "READ-only: the $DIG this node recommends HOLDING, in DIG base units, and the funding state it is in -- plus the working behind the figure: the (owner, store, root) pairs THIS NODE serves, the epoch's pre-margin per-store requirement, the local margin in force (BASIS POINTS, `100` is +1%, never converted), the unreclaimed transition overlap, and the escalation headroom. Amounts are DIG base units (3 decimals, one base unit is 0.001 DIG) and never mojos, which are XCH's 1e-12 unit. The HORIZON the headroom assumed travels in the payload and is never implied: escalation is bounded at +12.5% per epoch and COMPOUNDS (x1.12 at one epoch, x1.60 at four, x4.62 at thirteen), so the same buffer over a different horizon is a different claim; `escalation_ceiling_micros` is a WORST CASE, not a forecast -- in the dead band the multiplier does not move. The FUNDING STATE is carried rather than left to each client to re-derive from thresholds, because two clients deriving it will disagree and the one that disagrees about a funding warning is the one an operator acts on; `short_now` and `dangerously_low` leave an epoch uncovered, `below_recommended_buffer` covers every epoch with no cushion and is a READOUT, never a notification. A node that cannot enumerate its served set, cannot read its reclaim state, cannot see its balance, or has no requirement to scale answers `unknown` WITH the reason -- never a zero, which here reads as NO BUFFER NEEDED and would have an operator post nothing. It is a SEPARATE method from `control.collateral.requirement` because that figure is consensus-derived while this one is local: it depends on this node's own served set, an operator preference, and a horizon this node chose. TOKEN-GATED although it is a read: the caller supplies nothing, so the answer is this node's OWN served set, preference and balance.",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
         }
@@ -640,6 +645,7 @@ impl ControlMethod {
         ControlMethod::CollateralRequirement,
         ControlMethod::CollateralMarginGet,
         ControlMethod::CollateralMarginSet,
+        ControlMethod::CollateralBuffer,
         ControlMethod::ProfilePutBody,
         ControlMethod::ProfileGetBody,
         ControlMethod::PairingRequest,

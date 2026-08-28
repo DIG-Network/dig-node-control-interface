@@ -1635,6 +1635,25 @@ impl ControlHandler for MockNode {
         })
     }
 
+    async fn collateral_buffer(&self) -> Result<results::CollateralBufferResult, ControlError> {
+        // Deliberately NOT the census `stores` figure the requirement mock returns (4_200): the
+        // pairs this node serves are 12, so a test can tell a served-set answer from a census one.
+        Ok(results::CollateralBufferResult::Known {
+            epoch: 7,
+            protocol_version: 1,
+            funding_state: results::CollateralFundingState::DangerouslyLow,
+            recommended_buffer_dig_base_units: 32_400,
+            spendable_dig_base_units: 14_050,
+            pairs_served_by_this_node: 12,
+            required_per_store_dig_base_units: 1_036,
+            margin_bp: MARGIN_BP.with(|m| *m.borrow()),
+            overlap_dig_base_units: 3_108,
+            escalation_headroom_dig_base_units: 7_468,
+            horizon_epochs: 4,
+            escalation_ceiling_micros: 1_601_806,
+        })
+    }
+
     async fn spends_list(
         &self,
         params: SpendsListParams,
@@ -4738,4 +4757,198 @@ fn published_bp_figures(spec: &str, name: &str) -> Vec<u64> {
             digits[..end].parse().ok()
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Collateral: the recommended $DIG buffer + the node's funding state (#35).
+// ---------------------------------------------------------------------------------------------
+
+/// **`control.collateral.buffer` is in the catalog, in the collateral category, shell-owned, and
+/// TOKEN-GATED.**
+///
+/// Resolved through [`ControlMethod::from_name`] rather than by naming the variant, because
+/// `from_name` searches `ControlMethod::ALL`. A variant added to the enum but forgotten in `ALL` is
+/// invisible to discovery, to the OpenRPC surface and to every conformance sweep while still
+/// compiling everywhere — this fails in exactly that case, and a direct `CollateralBuffer.name()`
+/// assertion would not.
+///
+/// The auth assertion is the load-bearing half. The caller supplies nothing, so the answer is this
+/// node's own served set, operator preference and balance; opening it would disclose that
+/// association to any local process.
+#[test]
+fn the_buffer_method_is_in_the_catalog_categorised_and_gated() {
+    let m = ControlMethod::from_name("control.collateral.buffer")
+        .expect("control.collateral.buffer must be reachable through ControlMethod::ALL");
+    assert_eq!(m.category(), crate::method::Category::Collateral);
+    assert_eq!(m.routing(), crate::method::Routing::Owned);
+    assert!(m.requires_auth(), "the buffer read is token-gated");
+    assert!(!m.is_open_read());
+    assert!(!m.requires_master_token(), "a read grants nothing lasting");
+}
+
+/// **The horizon is part of the payload, not an implied default.**
+///
+/// The fixture is a complete `known` payload with `horizon_epochs` REMOVED — the nearest wrong
+/// implementation, which makes the field optional and lets a reader fall back to
+/// [`DEFAULT_BUFFER_HORIZON_EPOCHS`]. That reader would state a claim the node never made: the same
+/// buffer over one epoch and over thirteen differ by the whole compounding range (x1.12 vs x4.62).
+/// A second removal (`escalation_ceiling_micros`) pins the multiplier for the same reason, and the
+/// intact payload is the control that proves the fixture is otherwise decodable.
+#[test]
+fn a_buffer_without_its_horizon_does_not_decode() {
+    let full = json!({
+        "state": "known",
+        "epoch": 7,
+        "protocol_version": 1,
+        "funding_state": "below_recommended_buffer",
+        "recommended_buffer_dig_base_units": 32_400,
+        "spendable_dig_base_units": 40_000,
+        "pairs_served_by_this_node": 12,
+        "required_per_store_dig_base_units": 1_036,
+        "margin_bp": 100,
+        "overlap_dig_base_units": 3_108,
+        "escalation_headroom_dig_base_units": 7_468,
+        "horizon_epochs": 4,
+        "escalation_ceiling_micros": 1_601_806
+    });
+    serde_json::from_value::<results::CollateralBufferResult>(full.clone())
+        .expect("the intact payload must decode -- otherwise the removals below prove nothing");
+
+    for required in ["horizon_epochs", "escalation_ceiling_micros"] {
+        let mut stripped = full.as_object().unwrap().clone();
+        stripped.remove(required);
+        assert!(
+            serde_json::from_value::<results::CollateralBufferResult>(Value::Object(stripped))
+                .is_err(),
+            "{required} must be REQUIRED: a buffer read without it cannot be checked by anyone"
+        );
+    }
+}
+
+/// **An `unknown` buffer cannot carry a number, because a zero here reads as NO BUFFER NEEDED.**
+///
+/// The assertion is structural rather than about one field's value: every `unknown` payload is
+/// serialized and checked to contain no numeric value at all. The nearest wrong implementation is a
+/// flat struct with `Option<u64>` amounts beside a reason, which serializes `0` (or `null` a client
+/// coerces to `0`) on exactly the path where an operator would then post nothing and lose the epoch.
+/// Every reason is exercised, so a taxonomy that leaks a number on one branch is caught.
+#[test]
+fn an_unknown_buffer_carries_a_reason_and_never_a_number() {
+    for &reason in results::CollateralBufferUnknownReason::ALL {
+        let json =
+            serde_json::to_value(results::CollateralBufferResult::Unknown { reason }).unwrap();
+        let obj = json.as_object().expect("the unknown answer is an object");
+        assert_eq!(obj["state"], "unknown");
+        assert_eq!(obj["reason"], reason.as_wire());
+        assert_eq!(
+            obj.len(),
+            2,
+            "an unknown answer carries the tag and the reason and nothing else: {json}"
+        );
+        for (key, value) in obj {
+            assert!(
+                !value.is_number() && !value.is_null(),
+                "`{key}` puts a number-shaped value on an unknown answer: {json}"
+            );
+        }
+    }
+
+    let tokens: std::collections::BTreeSet<&str> = results::CollateralBufferUnknownReason::ALL
+        .iter()
+        .map(|r| r.as_wire())
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        results::CollateralBufferUnknownReason::ALL.len(),
+        "two reasons sharing a wire token make one of them unreportable"
+    );
+}
+
+/// **The funding states are four, their tokens are distinct, and exactly two of them mean an epoch
+/// is UNCOVERED.**
+///
+/// The shortfall set is written out rather than derived from `is_shortfall`, so this pins the SET
+/// and not the implementation's opinion of itself. `below_recommended_buffer` is the one that
+/// matters: a healthy node sits there much of the time, and an implementation that folded it in
+/// would have every client raising a recurring alert on a normal node — which is how an operator
+/// learns to dismiss the two that are real.
+#[test]
+fn exactly_two_funding_states_mean_an_epoch_is_uncovered() {
+    let tokens: std::collections::BTreeSet<&str> = results::CollateralFundingState::ALL
+        .iter()
+        .map(|s| s.as_wire())
+        .collect();
+    assert_eq!(tokens.len(), results::CollateralFundingState::ALL.len());
+    assert_eq!(
+        tokens,
+        [
+            "short_now",
+            "dangerously_low",
+            "below_recommended_buffer",
+            "funded"
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    let shortfalls: std::collections::BTreeSet<&str> = results::CollateralFundingState::ALL
+        .iter()
+        .filter(|s| s.is_shortfall())
+        .map(|s| s.as_wire())
+        .collect();
+    assert_eq!(
+        shortfalls,
+        ["short_now", "dangerously_low"].into_iter().collect(),
+        "below_recommended_buffer is a READOUT: nothing is uncovered there"
+    );
+
+    // Each state survives a wire round-trip under its own token, so a client switching on the
+    // string and one switching on the enum cannot disagree.
+    for &state in results::CollateralFundingState::ALL {
+        let back: results::CollateralFundingState =
+            serde_json::from_value(json!(state.as_wire())).unwrap();
+        assert_eq!(back, state);
+    }
+}
+
+/// **The dispatcher routes the buffer read to its typed handler, and the served-set count that
+/// comes back is THIS NODE's — not the census figure.**
+///
+/// The mock deliberately answers `12` pairs while its requirement handler answers a census `stores`
+/// of `4_200`. Both are u64 counts in the same domain, so a handler wired to the census figure
+/// compiles, type-checks and looks plausible; only a fixture in which the two DIFFER can see it.
+/// That substitution is the specific "confident, badly wrong number" this method was declared to
+/// prevent.
+#[test]
+fn the_buffer_read_returns_this_nodes_served_set_not_the_census_count() {
+    let census_stores = match round_trip(&CollateralRequirementParams {}).unwrap() {
+        results::CollateralRequirementResult::Known { stores, .. } => stores,
+        results::CollateralRequirementResult::Unknown { .. } => panic!("mock answers known"),
+    };
+
+    match round_trip(&CollateralBufferParams {}).unwrap() {
+        results::CollateralBufferResult::Known {
+            funding_state,
+            pairs_served_by_this_node,
+            horizon_epochs,
+            recommended_buffer_dig_base_units,
+            ..
+        } => {
+            assert_ne!(
+                pairs_served_by_this_node, census_stores,
+                "the served set must not be the network-wide advertisement count"
+            );
+            assert_eq!(pairs_served_by_this_node, 12);
+            assert_eq!(
+                funding_state,
+                results::CollateralFundingState::DangerouslyLow
+            );
+            assert!(funding_state.is_shortfall());
+            assert_eq!(horizon_epochs, 4);
+            assert!(recommended_buffer_dig_base_units > 0);
+        }
+        results::CollateralBufferResult::Unknown { reason } => {
+            panic!("the mock states a buffer, got unknown: {reason:?}")
+        }
+    }
 }

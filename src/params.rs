@@ -1796,6 +1796,32 @@ no_params!(
     CollateralRequirementParams => ControlMethod::CollateralRequirement,
     results::CollateralRequirementResult
 );
+/// The horizon, in future epochs, a node covers when it recommends a buffer without being told
+/// otherwise — `4`.
+///
+/// Published on the contract so a client can recognise the ordinary case, NOT so it can assume one:
+/// the horizon a node actually used always travels in
+/// [`CollateralBufferResult::Known`](crate::results::CollateralBufferResult::Known), and a reader
+/// that substituted this constant for a payload it failed to read would state a claim the node
+/// never made.
+///
+/// Four epochs bounds the compounded escalation ceiling at roughly x1.60. Fewer leaves a node one
+/// bad epoch from `dangerously_low`; many more prices in a x4.62 worst case the controller reaches
+/// only by escalating every single epoch, and locking $DIG against it has a real opportunity cost.
+pub const DEFAULT_BUFFER_HORIZON_EPOCHS: u32 = 4;
+
+/// The per-epoch escalation step denominator — `8`, i.e. the requirement can rise by at most
+/// `+1/8` (`+12.5%`) in one epoch.
+///
+/// The same value as `dig_mirror_collateral::UP_STEP_DENOM`, restated here for the same reason
+/// [`DEFAULT_SAFETY_MARGIN_BP`] is: `dig-mirror-collateral` sits at the SAME crate level as this
+/// contract and a same-level dependency is forbidden (CLAUDE.md Appendix B).
+///
+/// It is a CEILING on one epoch's rise, and it compounds across epochs — which is precisely why the
+/// horizon must travel with any buffer derived from it. It is not a forecast: inside the
+/// controller's dead band the requirement does not move at all.
+pub const ESCALATION_UP_STEP_DENOM: u64 = 8;
+
 no_params!(
     /// `control.collateral.margin.get` params (none).
     CollateralMarginGetParams => ControlMethod::CollateralMarginGet,
@@ -1839,3 +1865,14 @@ impl CollateralMarginSetParams {
     }
 }
 control_call!(CollateralMarginSetParams => ControlMethod::CollateralMarginSet, results::CollateralMarginResult);
+
+no_params!(
+    /// `control.collateral.buffer` params (none).
+    ///
+    /// The caller names neither an epoch nor a horizon. Both are the NODE's: the served set and
+    /// the reclaim state the buffer rests on exist only for the epoch being posted against, and a
+    /// caller-chosen horizon would let a client quietly shrink the recommendation on a money
+    /// surface by asking for a shorter one. The horizon the node used is returned instead.
+    CollateralBufferParams => ControlMethod::CollateralBuffer,
+    results::CollateralBufferResult
+);
