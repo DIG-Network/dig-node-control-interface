@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.23.0] - 2026-08-28
+
+### Features
+- **collateral:** Declare the epoch collateral requirement + safety margin control methods (#33)
+
 ## [0.22.0] - 2026-08-27
 
 ### Features
