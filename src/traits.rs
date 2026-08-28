@@ -688,13 +688,17 @@ pub trait ControlHandler: Sync {
             ControlMethod::WalletReservationsRelease => {
                 encode(self.wallet_reservations_release(decode(params)?).await?)
             }
-            // Re-validated here idempotently; deserialization already enforced the same rule.
             ControlMethod::CollateralRequirement => encode(self.collateral_requirement().await?),
             ControlMethod::CollateralMarginGet => encode(self.collateral_margin_get().await?),
+            // `CollateralMarginSetParams` derives `Deserialize`, so decoding enforces NOTHING beyond
+            // the field's type. `validated()` here is the SOLE enforcement of `MAX_SAFETY_MARGIN_BP`
+            // on this money-path mutation — dropping it admits an unbounded margin, and the margin
+            // arithmetic saturates rather than failing, so the result is a silently enormous posting.
             ControlMethod::CollateralMarginSet => {
                 let params: params::CollateralMarginSetParams = decode(params)?;
                 encode(self.collateral_margin_set(params.validated()?).await?)
             }
+            // Re-validated here idempotently; deserialization already enforced the same rule.
             ControlMethod::SpendsList => {
                 let params: params::SpendsListParams = decode(params)?;
                 encode(self.spends_list(params.validated()?).await?)

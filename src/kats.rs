@@ -4684,17 +4684,54 @@ fn setting_the_margin_persists_it_and_getting_it_back_agrees() {
 /// The same check covers the default, for the same reason: `SPEC.md` promises `100`, and a node that
 /// reported `0` for a config predating the field would be telling an operator they declined a
 /// cushion they never declined.
+///
+/// The figure is READ OUT of the sentence that names the constant — `` `NAME` (N bp`` — and compared
+/// as a number, rather than asking whether the constant's digits occur somewhere in the document. A
+/// substring probe over a 900-line file cannot distinguish a MISSING row from a WRONG one: `"10"`
+/// occurs inside the `"100"` that is already there, so a default silently retuned to `10` reads as
+/// published, and a §4.2e rewritten to teach `250 bp` reads as agreeing while being normatively false
+/// about a money-path default. EVERY occurrence is checked, not the first, so a second sentence
+/// naming a different figure is a failure rather than a shadowed one.
 #[test]
 fn the_published_margin_bounds_match_the_declared_constants() {
     let spec = include_str!("../SPEC.md");
-    for (label, value) in [
-        ("ceiling", MAX_SAFETY_MARGIN_BP),
-        ("default", DEFAULT_SAFETY_MARGIN_BP),
+    for (label, name, value) in [
+        ("ceiling", "MAX_SAFETY_MARGIN_BP", MAX_SAFETY_MARGIN_BP),
+        ("default", "DEFAULT_SAFETY_MARGIN_BP", DEFAULT_SAFETY_MARGIN_BP),
     ] {
+        let published = published_bp_figures(spec, name);
         assert!(
-            spec.contains(&value.to_string()),
-            "SPEC.md never states the margin {label} ({value}), so its normative prose and the \
-             constant can drift apart unnoticed"
+            !published.is_empty(),
+            "SPEC.md never states the margin {label} as `{name}` (<n> bp, …), so its normative prose \
+             and the constant can drift apart unnoticed"
         );
+        for figure in published {
+            assert_eq!(
+                figure, value,
+                "SPEC.md publishes the margin {label} as {figure} bp while `{name}` is {value}; a \
+                 reimplementer building against the document would enforce a different money-path \
+                 bound than this crate does"
+            );
+        }
     }
+}
+
+/// Every basis-point figure `SPEC.md` attaches to `name`, read from the `` `NAME` (N bp`` shape §4.2e
+/// uses to publish a constant.
+///
+/// Returns each occurrence rather than the first: a document that names a constant twice with two
+/// different numbers is exactly as false as one that names it once with the wrong number, and taking
+/// only the first would hide the second.
+fn published_bp_figures(spec: &str, name: &str) -> Vec<u64> {
+    spec.match_indices(name)
+        .filter_map(|(at, _)| {
+            let tail = spec[at + name.len()..].trim_start_matches(['`', ' ']);
+            let digits = tail.strip_prefix('(')?;
+            let end = digits.find(|c: char| !c.is_ascii_digit())?;
+            if !digits[end..].starts_with(" bp") {
+                return None;
+            }
+            digits[..end].parse().ok()
+        })
+        .collect()
 }

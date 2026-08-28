@@ -29,6 +29,11 @@ pub enum Routing {
 }
 
 /// The functional area a control method belongs to — for grouping in UIs and docs.
+///
+/// `#[non_exhaustive]` so adding a category in a minor release is additive; downstream matches must
+/// carry a `_ => …` arm. A new method often arrives with a new area, so this enum grows on the same
+/// cadence as [`ControlMethod`] and needs the same guarantee.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
     /// Node status snapshot.
