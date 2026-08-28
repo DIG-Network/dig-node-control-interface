@@ -467,6 +467,63 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::SpendsListParams,
     ) -> Result<results::SpendsListResult, ControlError>;
+    /// `control.collateral.requirement` (TOKEN-GATED)
+    ///
+    /// This epoch's derived per-store collateral requirement, with the census inputs behind it.
+    ///
+    /// Gated although the figure itself is derivable from chain by anyone: the UNKNOWN branch names
+    /// this node's own census position, and the caller supplies no identifier, so the answer is a
+    /// fact about this node rather than a relayed public one.
+    ///
+    /// Three obligations, each of which a plausible implementation gets wrong:
+    ///
+    /// - **Answer `unknown` WITH a reason rather than a number the node does not have.** A node that
+    ///   has not censused the epoch, or that sits inside `CENSUS_FINALITY_DEPTH_BLOCKS` of the tip,
+    ///   MUST return [`Unknown`](results::CollateralRequirementResult::Unknown). It MUST NOT return
+    ///   a zero, a stale epoch's figure presented as this epoch's, or an error that a client would
+    ///   render as "no collateral required" — under-posting costs the operator that epoch's rewards.
+    /// - **Report the protocol version that COMPUTED the epoch**, not the newest version this build
+    ///   implements. The two differ exactly when a node has upgraded mid-schedule, which is the one
+    ///   case where a client needs to know the difference.
+    /// - **Never derive the figure from the local safety margin.** The margin MUST NOT reach any
+    ///   value another node derives; `required_per_store_dig_base_units` is the pre-margin
+    ///   requirement, and a node that returned the margined amount here would make its own
+    ///   preference look like the network's price.
+    async fn collateral_requirement(
+        &self,
+    ) -> Result<results::CollateralRequirementResult, ControlError>;
+
+    /// `control.collateral.margin.get` (TOKEN-GATED)
+    ///
+    /// The node's local safety margin in basis points.
+    ///
+    /// A node whose stored configuration predates the field MUST answer
+    /// [`DEFAULT_SAFETY_MARGIN_BP`](params::DEFAULT_SAFETY_MARGIN_BP), never `0`: a zero margin is a
+    /// deliberate choice to post the requirement exactly, and reporting it for a config that never
+    /// expressed one tells the operator they opted out of a cushion they never declined.
+    async fn collateral_margin_get(&self) -> Result<results::CollateralMarginResult, ControlError>;
+
+    /// `control.collateral.margin.set` (TOKEN-GATED)
+    ///
+    /// Persist the node's local safety margin and return the margin now in force.
+    ///
+    /// The node is the authoritative home for this setting — the flywheel is headless, so a machine
+    /// with no GUI must be able to set it — and dig-app is a remote control for the same value.
+    ///
+    /// Two obligations:
+    ///
+    /// - **Persist it**, so it survives a restart. A margin that lapses to the default on reboot
+    ///   silently changes what the node posts.
+    /// - **Return what was actually stored.** The returned `margin_bp` MUST equal the accepted
+    ///   request's, because a value above [`MAX_SAFETY_MARGIN_BP`](params::MAX_SAFETY_MARGIN_BP) is
+    ///   REFUSED rather than clamped. An implementation that clamped and returned the clamped value
+    ///   would leave the caller's stored intent and the node's behaviour disagreeing on the money
+    ///   path.
+    async fn collateral_margin_set(
+        &self,
+        params: params::CollateralMarginSetParams,
+    ) -> Result<results::CollateralMarginResult, ControlError>;
+
     /// `control.profile.putBody` (TOKEN-GATED)
     ///
     /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
@@ -632,6 +689,12 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_reservations_release(decode(params)?).await?)
             }
             // Re-validated here idempotently; deserialization already enforced the same rule.
+            ControlMethod::CollateralRequirement => encode(self.collateral_requirement().await?),
+            ControlMethod::CollateralMarginGet => encode(self.collateral_margin_get().await?),
+            ControlMethod::CollateralMarginSet => {
+                let params: params::CollateralMarginSetParams = decode(params)?;
+                encode(self.collateral_margin_set(params.validated()?).await?)
+            }
             ControlMethod::SpendsList => {
                 let params: params::SpendsListParams = decode(params)?;
                 encode(self.spends_list(params.validated()?).await?)

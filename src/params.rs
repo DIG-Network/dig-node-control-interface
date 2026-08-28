@@ -1766,3 +1766,76 @@ mod tests {
         assert_ne!(chia_peer_endpoint("::1", 8444), naive);
     }
 }
+
+/// The default local safety margin, in basis points — `+1%`.
+///
+/// The same value as `dig_mirror_collateral::SAFETY_MARGIN_BP_DEFAULT`, restated here rather than
+/// imported: `dig-mirror-collateral` sits at the SAME crate level as this contract, and a
+/// same-level dependency is forbidden (CLAUDE.md Appendix B). It is published on the contract so a
+/// config written before the field existed loads as the default rather than as a zero margin.
+///
+/// The default errs HIGH because the failure is asymmetric: under-posting likely costs an epoch's
+/// rewards, while over-posting costs only the opportunity cost of the locked $DIG.
+pub const DEFAULT_SAFETY_MARGIN_BP: u64 = 100;
+
+/// The largest safety margin a node accepts, in basis points — `10_000`, i.e. +100%.
+///
+/// A margin is a cushion against the requirement rising, so doubling the requirement is already far
+/// past any honest cushion. The bound exists because `.set` is a MONEY-PATH mutation reachable with
+/// an ordinary paired token: an unbounded `u64` lets a caller commit the operator to locking an
+/// arbitrary multiple of every store's requirement, and the margin arithmetic saturates rather than
+/// failing, so an absurd value produces a silently enormous posting instead of an error.
+pub const MAX_SAFETY_MARGIN_BP: u64 = 10_000;
+
+no_params!(
+    /// `control.collateral.requirement` params (none).
+    ///
+    /// The caller supplies no epoch: the answer is the epoch the NODE currently derives, so a
+    /// caller-named epoch would invite a client to render a requirement for an epoch that is not
+    /// the one being posted against.
+    CollateralRequirementParams => ControlMethod::CollateralRequirement,
+    results::CollateralRequirementResult
+);
+no_params!(
+    /// `control.collateral.margin.get` params (none).
+    CollateralMarginGetParams => ControlMethod::CollateralMarginGet,
+    results::CollateralMarginResult
+);
+
+/// `control.collateral.margin.set` params.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollateralMarginSetParams {
+    /// The margin in BASIS POINTS over the requirement (`100` is +1%), at most
+    /// [`MAX_SAFETY_MARGIN_BP`].
+    ///
+    /// Basis points, never a percentage and never a float: it is the unit
+    /// `dig_mirror_collateral::apply_safety_margin` takes and the unit dig-app `SPEC.md` §3.7b
+    /// fixes for `collateral.margin_bp`. A 1 bp margin (0.01%) is a legal choice and any conversion
+    /// to whole percent would erase it.
+    pub margin_bp: u64,
+}
+
+impl CollateralMarginSetParams {
+    /// Refuse a margin above [`MAX_SAFETY_MARGIN_BP`] as `-32602 INVALID_PARAMS`.
+    ///
+    /// Refused rather than clamped, and the asymmetry with dig-app is deliberate. dig-app CLAMPS a
+    /// stored margin that exceeds its own ceiling, because refusing a value already on disk would
+    /// leave the node posting the lower amount it was trying to move away from. This is the
+    /// opposite situation: a caller is stating an intent right now, and silently applying a
+    /// different number than the one requested would make a subsequent
+    /// [`CollateralMarginResult`](crate::results::CollateralMarginResult) disagree with what the
+    /// caller believes it set — on the money path.
+    pub fn validated(self) -> Result<Self, ControlError> {
+        if self.margin_bp > MAX_SAFETY_MARGIN_BP {
+            return Err(ControlError::of(
+                ControlErrorCode::InvalidParams,
+                format!(
+                    "margin_bp must be at most {MAX_SAFETY_MARGIN_BP} basis points (+100%); got {}",
+                    self.margin_bp
+                ),
+            ));
+        }
+        Ok(self)
+    }
+}
+control_call!(CollateralMarginSetParams => ControlMethod::CollateralMarginSet, results::CollateralMarginResult);

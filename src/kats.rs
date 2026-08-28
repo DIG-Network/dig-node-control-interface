@@ -951,6 +951,12 @@ const MOCK_DEFAULT_TTL_SECS: u64 = 300;
 const RESERVE_COIN_A: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const RESERVE_COIN_B: &str = "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2";
 
+thread_local! {
+    /// The margin `MockNode` currently holds, so `.set` then `.get` is a real round trip through
+    /// stored state rather than two independent echoes of the same literal.
+    static MARGIN_BP: std::cell::RefCell<u64> = const { std::cell::RefCell::new(crate::params::DEFAULT_SAFETY_MARGIN_BP) };
+}
+
 // The reservation table `MockNode` serves from: reservation_id -> (held coins, expiry).
 //
 // THREAD-LOCAL for the same reason the enrolment registry is: one test's hold must never satisfy
@@ -1597,6 +1603,38 @@ impl ControlHandler for MockNode {
             }
         }))
     }
+    async fn collateral_requirement(
+        &self,
+    ) -> Result<results::CollateralRequirementResult, ControlError> {
+        Ok(results::CollateralRequirementResult::Known {
+            epoch: 7,
+            protocol_version: 1,
+            required_per_store_dig_base_units: 1_036,
+            stores: 4_200,
+            owners: 310,
+            multiplier_micros: 1_050_000,
+            handicap_dig_base_units: 2_760,
+        })
+    }
+
+    async fn collateral_margin_get(&self) -> Result<results::CollateralMarginResult, ControlError> {
+        Ok(results::CollateralMarginResult {
+            margin_bp: MARGIN_BP.with(|m| *m.borrow()),
+        })
+    }
+
+    async fn collateral_margin_set(
+        &self,
+        params: crate::params::CollateralMarginSetParams,
+    ) -> Result<results::CollateralMarginResult, ControlError> {
+        // Stores what it was given, so a test can distinguish "persisted the request" from
+        // "echoed the request" by reading it back through the OTHER method.
+        MARGIN_BP.with(|m| *m.borrow_mut() = params.margin_bp);
+        Ok(results::CollateralMarginResult {
+            margin_bp: params.margin_bp,
+        })
+    }
+
     async fn spends_list(
         &self,
         params: SpendsListParams,
@@ -4407,4 +4445,195 @@ fn every_catalogued_error_code_is_a_row_of_an_error_code_table() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Collateral: the epoch requirement + the local safety margin (#32).
+// ---------------------------------------------------------------------------------------------
+
+/// **The three collateral methods carry their exact wire names, category, routing and auth tier.**
+///
+/// The names are pinned as LITERALS rather than derived from the enum, because every consumer that
+/// must agree with them — `dign`, dig-app, the node dispatcher — spells them by hand somewhere.
+///
+/// The auth assertions are the load-bearing half. `control.collateral.requirement` is a READ of a
+/// number every node derives identically, so the tempting judgement is to make it an OPEN read by
+/// analogy with `control.wallet.peak`. It is NOT one, and the rule in
+/// [`ControlMethod::is_open_read`] says why: its UNKNOWN branch discloses this node's own census
+/// position, and the caller supplies no identifier. Asserting the gate here means a later widening
+/// has to argue with a test rather than with a comment.
+#[test]
+fn the_collateral_methods_are_named_categorised_and_gated() {
+    use crate::method::{Category, Routing};
+
+    assert_eq!(
+        ControlMethod::CollateralRequirement.name(),
+        "control.collateral.requirement"
+    );
+    assert_eq!(
+        ControlMethod::CollateralMarginGet.name(),
+        "control.collateral.margin.get"
+    );
+    assert_eq!(
+        ControlMethod::CollateralMarginSet.name(),
+        "control.collateral.margin.set"
+    );
+
+    for m in [
+        ControlMethod::CollateralRequirement,
+        ControlMethod::CollateralMarginGet,
+        ControlMethod::CollateralMarginSet,
+    ] {
+        assert_eq!(m.category(), Category::Collateral, "{}", m.name());
+        assert_eq!(m.routing(), Routing::Owned, "{}", m.name());
+        assert!(m.requires_auth(), "{} must be token-gated", m.name());
+        assert!(!m.is_open_read(), "{} must not be an open read", m.name());
+        assert!(
+            !m.requires_master_token(),
+            "{} grants no authority outliving its token, so it stays on the ordinary tier",
+            m.name()
+        );
+        assert!(ControlMethod::ALL.contains(&m), "{} missing from ALL", m.name());
+    }
+}
+
+/// **The margin is BASIS POINTS on the wire, under the key `margin_bp`.**
+///
+/// The fixture is deliberately `1`, not `100`. `100` is +1% and survives a
+/// basis-points-to-percent conversion as the plausible integer `1`, so a percent-converting
+/// implementation could still round-trip a "reasonable-looking" value; `1` bp is
+/// `SAFETY_MARGIN_BP_TIGHT` (0.01%) and any conversion to whole percent collapses it to `0` — the
+/// exact silent no-margin the round-up in `apply_safety_margin` exists to prevent.
+///
+/// The KEY is pinned too. dig-app `SPEC.md` §3.7b fixes `collateral.margin_bp` and requires `dign`
+/// to persist the same integer under the same key; a rename here is the drift that spec forbids.
+#[test]
+fn the_margin_is_basis_points_under_the_margin_bp_key() {
+    let set = CollateralMarginSetParams { margin_bp: 1 };
+    assert_eq!(
+        serde_json::to_value(&set).unwrap(),
+        json!({ "margin_bp": 1 }),
+        "a tight 1bp margin must stay 1 bp; converting to percent would render it as 0"
+    );
+
+    let read: results::CollateralMarginResult =
+        serde_json::from_value(json!({ "margin_bp": 1 })).unwrap();
+    assert_eq!(read.margin_bp, 1);
+
+    // The default the contract publishes is the crate's own +1%, expressed in the same unit.
+    assert_eq!(DEFAULT_SAFETY_MARGIN_BP, 100);
+}
+
+/// **The margin ceiling is pinned from BOTH sides.**
+///
+/// A bound tested only from below can only confirm itself: an implementation with no bound at all
+/// passes an "at the ceiling is accepted" assertion. So the at-bound value MUST be accepted and the
+/// one-over value MUST be refused, and the refusal must carry `-32602 INVALID_PARAMS` rather than
+/// any code that would invite a retry.
+#[test]
+fn the_margin_ceiling_is_pinned_from_both_sides() {
+    let at_bound = CollateralMarginSetParams {
+        margin_bp: MAX_SAFETY_MARGIN_BP,
+    };
+    assert!(
+        at_bound.clone().validated().is_ok(),
+        "the ceiling itself must be a legal margin"
+    );
+
+    let over = CollateralMarginSetParams {
+        margin_bp: MAX_SAFETY_MARGIN_BP + 1,
+    };
+    let err = over.validated().expect_err("one over the ceiling must be refused");
+    assert_eq!(err.code, ControlErrorCode::InvalidParams.code());
+}
+
+/// **An unknown requirement can never be read as a zero cost.**
+///
+/// This is the guard dig-app `SPEC.md` §3.7b demands ("there MUST be no path that renders an absent
+/// requirement as a zero cost"), enforced on the CONTRACT rather than on one client.
+///
+/// The fixture is a full `unknown` envelope, and the assertion is that it does not deserialize into
+/// anything carrying a number. The nearest wrong shape is `required_per_store_dig_base_units:
+/// Option<u64>` beside a `known: bool` — which happily accepts an unknown response and yields
+/// `unwrap_or(0)` at the first careless call site. A tagged enum makes that state unrepresentable,
+/// and the reason cannot be dropped: each unknown names WHICH fact is missing.
+#[test]
+fn an_unknown_requirement_carries_a_reason_and_no_number() {
+    let unknown: results::CollateralRequirementResult = serde_json::from_value(json!({
+        "state": "unknown",
+        "reason": "not_censused",
+    }))
+    .unwrap();
+
+    match unknown {
+        results::CollateralRequirementResult::Unknown { reason } => {
+            assert_eq!(reason, results::CollateralUnknownReason::NotCensused);
+        }
+        results::CollateralRequirementResult::Known { .. } => {
+            panic!("an unknown requirement decoded as a known figure")
+        }
+    }
+
+    // Every reason is a distinct wire token, so a client can tell "this node has not censused the
+    // epoch" from "this node is inside the finality depth" -- different remedies, different waits.
+    let tokens: std::collections::BTreeSet<&str> = results::CollateralUnknownReason::ALL
+        .iter()
+        .map(|r| r.as_wire())
+        .collect();
+    assert_eq!(tokens.len(), results::CollateralUnknownReason::ALL.len());
+}
+
+/// **A known requirement cannot omit the protocol version that produced it.**
+///
+/// The collateral model is versioned and upgradable, and the version that computed an epoch travels
+/// with its record. A client shown a requirement without knowing the ruleset behind it cannot
+/// detect that it and the node disagree — it can only render a number confidently and be wrong.
+///
+/// So the assertion is a REFUSAL: the same fixture minus `protocol_version` must fail to decode. An
+/// `Option<u16>` or a `#[serde(default)]` would pass a "the field is present" test on the complete
+/// fixture while silently accepting the incomplete one.
+#[test]
+fn a_known_requirement_must_declare_its_protocol_version() {
+    let complete = json!({
+        "state": "known",
+        "epoch": 7,
+        "protocol_version": 1,
+        "required_per_store_dig_base_units": 1_036,
+        "stores": 4_200,
+        "owners": 310,
+        "multiplier_micros": 1_050_000,
+        "handicap_dig_base_units": 2_760,
+    });
+    let known: results::CollateralRequirementResult =
+        serde_json::from_value(complete.clone()).unwrap();
+    match known {
+        results::CollateralRequirementResult::Known {
+            epoch,
+            protocol_version,
+            required_per_store_dig_base_units,
+            stores,
+            owners,
+            multiplier_micros,
+            handicap_dig_base_units,
+        } => {
+            // Every field carries a DIFFERENT value, so a transposition of any pair fails here
+            // rather than passing on a shape they share.
+            assert_eq!(epoch, 7);
+            assert_eq!(protocol_version, 1);
+            assert_eq!(required_per_store_dig_base_units, 1_036);
+            assert_eq!(stores, 4_200);
+            assert_eq!(owners, 310);
+            assert_eq!(multiplier_micros, 1_050_000);
+            assert_eq!(handicap_dig_base_units, 2_760);
+        }
+        results::CollateralRequirementResult::Unknown { .. } => panic!("known decoded as unknown"),
+    }
+
+    let mut missing = complete.as_object().unwrap().clone();
+    missing.remove("protocol_version");
+    assert!(
+        serde_json::from_value::<results::CollateralRequirementResult>(Value::Object(missing))
+            .is_err(),
+        "a requirement without its protocol version must be REFUSED, not defaulted"
+    );
 }
