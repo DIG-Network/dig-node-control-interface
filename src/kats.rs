@@ -2307,6 +2307,7 @@ fn minimal_params(m: ControlMethod) -> Value {
         | ControlMethod::SyncTrigger => json!({"store": STORE}),
         ControlMethod::CapsuleFetch => json!({"store": STORE, "root": ROOT}),
         ControlMethod::UpdaterSetChannel => json!({"channel": "stable"}),
+        ControlMethod::CollateralMarginSet => json!({"margin_bp": 100}),
         ControlMethod::UpdaterPause => json!({}),
         ControlMethod::PairingApprove => json!({"pairing_id": "x"}),
         ControlMethod::PairingRevoke => json!({"token_id": "x"}),
