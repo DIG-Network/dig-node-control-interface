@@ -131,6 +131,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.collateral.requirement` | yes | owned | — | `CollateralRequirementResult` (`{state:"known", epoch, protocol_version, required_per_store_dig_base_units, stores, owners, multiplier_micros, handicap_dig_base_units}` \| `{state:"unknown", reason}`) |
 | `control.collateral.margin.get` | yes | owned | — | `{margin_bp:u64}` |
 | `control.collateral.margin.set` | yes | owned | `{margin_bp:u64}` | `{margin_bp:u64}` |
+| `control.collateral.buffer` | yes | owned | — | `CollateralBufferResult` (`{state:"known", epoch, protocol_version, funding_state, recommended_buffer_dig_base_units, spendable_dig_base_units, pairs_served_by_this_node, required_per_store_dig_base_units, margin_bp, overlap_dig_base_units, escalation_headroom_dig_base_units, horizon_epochs, escalation_ceiling_micros}` \| `{state:"unknown", reason}`) |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -965,9 +966,79 @@ supplies no identifier, so the answer is a fact about this node rather than a re
 are NOT open reads (§4.2), and they are NOT master-token methods (§2.1): setting a margin grants the
 caller no authority that outlives the token, and the operator can revoke and reset it.
 
-**The count of stores THIS node holds is not served here.** A client assembling a recommended-$DIG
-buffer reads the held-store count from `control.hostedStores.list`; duplicating it in the requirement
-response would create a second source of truth for a figure that feeds a money calculation.
+**The count of stores THIS node holds is not served here.** It is served by
+`control.collateral.buffer` (§4.2f) as `pairs_served_by_this_node`, together with the buffer that
+figure feeds; duplicating it in the requirement response would create a second source of truth for
+a value on the money path.
+
+### 4.2f The recommended $DIG buffer and the node's funding state
+
+`control.collateral.buffer` states the $DIG a node recommends HOLDING and where that node stands
+against the figure. It is a SEPARATE method from `control.collateral.requirement`, and MUST remain
+one: the requirement is consensus-derived and identical on every node, whereas the buffer is LOCAL —
+it rests on the `(owner, store, root)` pairs this node serves, on an operator preference (the safety
+margin), on this node's unreclaimed collateral, and on a horizon this node chose. Folding it into the
+requirement's result would make one node's local position look like a network figure, which is the
+same conflation §4.2e forbids for the margin.
+
+**A client MUST NOT derive this figure.** The buffer is
+`pairs_served_by_this_node x required_per_store x (1 + margin)` plus the transition overlap plus the
+escalation headroom. The first term is THIS node's served set, and the census `stores` figure returned
+by `control.collateral.requirement` is a network-wide advertisement count that MUST NOT be substituted
+for it; the overlap term needs reclaim state no other method exposes. A client multiplying the census
+count by the requirement produces a confident, badly wrong number on a money surface. The node owns
+the calculation for two further reasons: `dign` MUST answer the same question on a headless host where
+no notification will ever fire, and two independent derivations of one money figure will disagree.
+
+**All amounts are in DIG BASE UNITS**, `$DIG` carrying 3 decimals so that one base unit is
+`0.001 DIG`. They are NOT mojos — a mojo is XCH's base unit at `1e-12` XCH, nine orders of magnitude
+away. `margin_bp` is in BASIS POINTS (`100` is +1%) and MUST NOT be converted, per §4.2e.
+
+**`recommended_buffer_dig_base_units` is authoritative and the other terms are the working.** A client
+MUST render the node's total rather than re-adding the terms and preferring its own sum: the rounding
+lives in the node's arithmetic. `pairs_served_by_this_node`, `required_per_store_dig_base_units`,
+`margin_bp`, `overlap_dig_base_units` and `escalation_headroom_dig_base_units` exist so a surface can
+show WHY the number is what it is; `spendable_dig_base_units` is the balance the verdict was reached
+against, and carrying it is what makes `funding_state` checkable rather than merely asserted.
+
+**The horizon MUST travel in the payload and MUST NOT be implied.** Escalation of the per-store
+requirement is bounded at `+1/ESCALATION_UP_STEP_DENOM` (`+12.5%`) per epoch and COMPOUNDS — about
+x1.12 at one epoch, x1.60 at four, x4.62 at thirteen — so the same buffer quoted over different
+horizons answers different questions and neither can be checked without knowing which.
+`horizon_epochs` states how many future epochs the headroom covers and `escalation_ceiling_micros`
+states the compounded multiplier assumed, in millionths. A reader MUST reject a `known` payload
+missing either rather than defaulting it. `escalation_ceiling_micros` is a WORST CASE and MUST NOT be
+presented as a forecast: inside the controller's dead band the multiplier does not move at all.
+
+**The node decides the funding state; a client MUST NOT re-derive it from thresholds.** Two clients
+choosing their own thresholds will disagree, and the one that disagrees about a funding warning is the
+one an operator acts on. The four states are:
+
+| `funding_state` | meaning |
+| --- | --- |
+| `short_now` | cannot cover the CURRENT epoch; stores this node serves are already going uncollateralised |
+| `dangerously_low` | covers now, could not cover the NEXT epoch at the escalation ceiling |
+| `below_recommended_buffer` | covers every epoch in the horizon but holds less than the buffer: funded, no cushion |
+| `funded` | holds at least the recommended buffer over the stated horizon |
+
+`short_now` and `dangerously_low` leave an epoch uncovered. **`below_recommended_buffer` is a READOUT
+and MUST NOT be raised as a recurring notification**: a healthy node sits there much of the time, and a
+client that alerted on it would teach an operator to dismiss the two states that matter. Whether a
+state warrants interrupting somebody is otherwise the client's decision; which state the node is in is
+the node's.
+
+**An undeterminable buffer MUST be stated as unknown, with its reason, and MUST NOT be a zero.** On the
+requirement a fabricated zero reads as a free requirement; here it reads as *no buffer needed*, and an
+operator acting on it posts nothing and loses the epoch. The four reasons — `requirement_unknown`,
+`served_set_unknown`, `reclaim_state_unknown`, `balance_unknown` — name DIFFERENT missing facts with
+different remedies and MUST NOT be collapsed. `requirement_unknown` deliberately does not restate
+§4.2e's taxonomy; a client needing to know WHICH census fact is missing calls
+`control.collateral.requirement`. `known` and `unknown` are variants of one tagged union so that no
+representable value carries a figure the node was not given.
+
+**The read is TOKEN-GATED although it is a read.** The caller supplies nothing, so the answer is this
+node's own served set, operator preference and balance — an association, not a relayed public fact. It
+is NOT an open read (§4.2) and NOT a master-token method (§2.1).
 
 **Nothing on this contract claims a margin guarantees inclusion.** The requirement is re-derived every
 epoch and can rise by more than any margin chosen.

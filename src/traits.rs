@@ -524,6 +524,35 @@ pub trait ControlHandler: Sync {
         params: params::CollateralMarginSetParams,
     ) -> Result<results::CollateralMarginResult, ControlError>;
 
+    /// `control.collateral.buffer` (TOKEN-GATED)
+    ///
+    /// The $DIG this node recommends holding, and its funding position against that figure.
+    ///
+    /// Gated although it is a read, for the same reason `control.wallet.watched` is: the caller
+    /// supplies nothing, so the answer is this node's OWN served set, operator preference and
+    /// balance — an association, not a relayed public fact.
+    ///
+    /// Four obligations, each of which a plausible implementation gets wrong:
+    ///
+    /// - **Answer `unknown` WITH a reason rather than a number the node does not have.** A zero here
+    ///   reads as *no buffer needed* — the money lie in its purest form, because an operator acting
+    ///   on it posts nothing and loses the epoch. An implementation MUST NOT substitute a zero, a
+    ///   previous epoch's buffer presented as this one's, or an error a client renders as "nothing
+    ///   required".
+    /// - **Count the pairs THIS NODE serves.** `pairs_served_by_this_node` is this node's own
+    ///   `(owner, store, root)` set. The census `stores` figure from
+    ///   `control.collateral.requirement` is a network-wide advertisement count and MUST NOT be
+    ///   substituted for it; a node that cannot enumerate its own set answers
+    ///   [`ServedSetUnknown`](results::CollateralBufferUnknownReason::ServedSetUnknown).
+    /// - **State the horizon actually used.** `horizon_epochs` and `escalation_ceiling_micros` MUST
+    ///   describe the headroom this answer contains, not a documented default. Escalation compounds
+    ///   at up to +12.5% per epoch ([`ESCALATION_UP_STEP_DENOM`](params::ESCALATION_UP_STEP_DENOM)), so a
+    ///   buffer quoted against an unstated horizon cannot be checked by anyone.
+    /// - **Decide the funding state here, once.** `funding_state` is the node's verdict, not a hint;
+    ///   an implementation that returned a placeholder and left clients to threshold the numbers
+    ///   themselves recreates the rival derivations this method exists to prevent.
+    async fn collateral_buffer(&self) -> Result<results::CollateralBufferResult, ControlError>;
+
     /// `control.profile.putBody` (TOKEN-GATED)
     ///
     /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
@@ -689,6 +718,7 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_reservations_release(decode(params)?).await?)
             }
             ControlMethod::CollateralRequirement => encode(self.collateral_requirement().await?),
+            ControlMethod::CollateralBuffer => encode(self.collateral_buffer().await?),
             ControlMethod::CollateralMarginGet => encode(self.collateral_margin_get().await?),
             // `CollateralMarginSetParams` derives `Deserialize`, so decoding enforces NOTHING beyond
             // the field's type. `validated()` here is the SOLE enforcement of `MAX_SAFETY_MARGIN_BP`
