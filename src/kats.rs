@@ -4494,7 +4494,11 @@ fn the_collateral_methods_are_named_categorised_and_gated() {
             "{} grants no authority outliving its token, so it stays on the ordinary tier",
             m.name()
         );
-        assert!(ControlMethod::ALL.contains(&m), "{} missing from ALL", m.name());
+        assert!(
+            ControlMethod::ALL.contains(&m),
+            "{} missing from ALL",
+            m.name()
+        );
     }
 }
 
@@ -4512,7 +4516,7 @@ fn the_collateral_methods_are_named_categorised_and_gated() {
 fn the_margin_is_basis_points_under_the_margin_bp_key() {
     let set = CollateralMarginSetParams { margin_bp: 1 };
     assert_eq!(
-        serde_json::to_value(&set).unwrap(),
+        serde_json::to_value(set).unwrap(),
         json!({ "margin_bp": 1 }),
         "a tight 1bp margin must stay 1 bp; converting to percent would render it as 0"
     );
@@ -4537,14 +4541,16 @@ fn the_margin_ceiling_is_pinned_from_both_sides() {
         margin_bp: MAX_SAFETY_MARGIN_BP,
     };
     assert!(
-        at_bound.clone().validated().is_ok(),
+        at_bound.validated().is_ok(),
         "the ceiling itself must be a legal margin"
     );
 
     let over = CollateralMarginSetParams {
         margin_bp: MAX_SAFETY_MARGIN_BP + 1,
     };
-    let err = over.validated().expect_err("one over the ceiling must be refused");
+    let err = over
+        .validated()
+        .expect_err("one over the ceiling must be refused");
     assert_eq!(err.code, ControlErrorCode::InvalidParams.code());
 }
 
@@ -4659,8 +4665,8 @@ fn setting_the_margin_persists_it_and_getting_it_back_agrees() {
         .expect("setting a legal margin must succeed");
     assert_eq!(set.margin_bp, 1);
 
-    let got = round_trip(&CollateralMarginGetParams {})
-        .expect("reading the margin back must succeed");
+    let got =
+        round_trip(&CollateralMarginGetParams {}).expect("reading the margin back must succeed");
     assert_eq!(
         got.margin_bp, 1,
         "the margin read back must be the one set, not the default and not an echo"
