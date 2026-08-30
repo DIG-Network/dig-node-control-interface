@@ -2201,6 +2201,291 @@ pub struct SpendsListResult {
     pub unreadable_lines: u32,
 }
 
+// ---------------------------------------------------------------------------
+// Mirror bonds: the per-`(store, root)` bond state surface (dig-node SPEC §25.8).
+// ---------------------------------------------------------------------------
+
+/// What this node can say about ONE `(store, root)` bond right now.
+///
+/// # The whole point is that "no coin yet" is never one answer
+///
+/// Six of these seven variants mean "there is no current-epoch coin", and every one of them calls
+/// for a different response from a person: add funds, wait, do nothing, turn a switch back on, or
+/// nothing at all because the capsule was never this node's to advertise. Collapsing any two of
+/// them is what produces an hourly out-of-funds alarm about a perfectly healthy node
+/// (dig-app#300), which is the defect this method exists to remove.
+///
+/// # Vocabulary: `withheld`, `disabled` and `reclaiming` are three different things
+///
+/// dig-node's internal `BondState` (`mirror/pass.rs`) used the single word `Withheld` for the
+/// node-wide collateralisation switch being OFF, while dig-node `SPEC.md` §25.8 used the same word
+/// for a capsule of `Relayed` provenance — one this node holds but deliberately never advertises.
+/// They are not the same state. They differ in SCOPE (one switch for the node, versus one
+/// capsule's provenance) and, more importantly, in REMEDY: an operator told "withheld" about a
+/// disabled node goes looking at content, and one told "withheld" about a relayed capsule goes
+/// looking for a switch. **This contract keeps them apart, and neither existing use survives
+/// unchanged:**
+///
+/// - [`Withheld`](Self::Withheld) carries §25.8's meaning — `Relayed` provenance, per capsule.
+/// - [`Disabled`](Self::Disabled) is the node-wide switch, which §25.8 could not express at all.
+/// - [`Reclaiming`](Self::Reclaiming) is §25.8's seventh state, which `BondState` had no variant
+///   for even though the money is still locked while it lasts.
+///
+/// So dig-node MUST rename `BondState::Withheld` to `Disabled` and add `Withheld` + `Reclaiming`,
+/// and §25.8 MUST gain `disabled`. Serving the old enum under §25.8's words would publish a
+/// contract whose terms mean something else — the drift class this crate exists to prevent.
+///
+/// **[`Withheld`](Self::Withheld) is VACUOUS until dig-node's surface enumerates its SERVED set
+/// rather than its `Held` set.** A relayed capsule is by construction absent from the desired-bond
+/// set, so a derivation keyed on `Held` bonds can never emit this variant — it would silently
+/// answer "no such row" where §25.8 promises "withheld on purpose". Declaring it here is correct;
+/// a producer that cannot reach it MUST say so rather than report the state as satisfied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "bond_state", rename_all = "snake_case")]
+pub enum MirrorBondState {
+    /// A coin bonding this `(store, root)` for the CURRENT epoch is on chain.
+    Bonded {
+        /// The coin a person can look up, hex, no `0x`.
+        coin_id: String,
+        /// The epoch it bonds, one-based.
+        epoch: u64,
+        /// What the coin actually LOCKS, in DIG base units, read from the coin — never from this
+        /// epoch's requirement. A coin created under a previous requirement locks the previous
+        /// amount, and rendering today's price against yesterday's coin is a figure nobody holds.
+        amount_dig_base_units: u64,
+    },
+    /// A create for this bond has been submitted and has not confirmed.
+    ///
+    /// Nothing is wrong and no money is missing. A client MUST NOT render this as a shortfall.
+    Pending,
+    /// The wallet cannot cover the create for this bond.
+    ///
+    /// The genuine out-of-funds state, and the ONLY one a client may raise a funding alarm on.
+    Unfunded {
+        /// How many more DIG base units THIS BOND alone needs.
+        ///
+        /// DIG base units — $DIG has 3 decimals, so one unit is `0.001 DIG`. It is NOT a mojo,
+        /// which is XCH's `1e-12` unit, nine orders of magnitude away. A mirror amount is never
+        /// quoted in mojos.
+        ///
+        /// Per bond, never a total. "How short is this node overall" is
+        /// `control.collateral.buffer`'s question, and it answers it authoritatively.
+        short_dig_base_units: u64,
+    },
+    /// The epoch's collateral requirement is not known, so no create can be PRICED.
+    ///
+    /// **NOT an out-of-funds state.** The wallet may be full. A client that renders this as a
+    /// shortfall tells an operator to send money that would change nothing.
+    Deferred {
+        /// Why the requirement is unknown, in the SAME taxonomy
+        /// [`CollateralRequirementResult::Unknown`] uses.
+        ///
+        /// Reused rather than restated: a second copy of that taxonomy here would drift from the
+        /// original, and a client already renders these tokens for
+        /// `control.collateral.requirement`.
+        reason: CollateralUnknownReason,
+    },
+    /// This node holds the capsule with `Relayed` provenance: it does not claim to serve it, and
+    /// deliberately never advertises it.
+    ///
+    /// §25.8's `withheld`. Nothing is wrong, nothing is owed, and there is no remedy — which is
+    /// exactly why conflating it with [`Unfunded`](Self::Unfunded) is the dig-app#300 defect.
+    Withheld,
+    /// Collateralisation is switched OFF for this node, so no bond is advertised regardless of
+    /// funds, provenance or price.
+    ///
+    /// Node-wide, not per capsule: every row reads `disabled` together. The remedy is a switch, and
+    /// it is the operator's own earlier decision — a client MUST NOT present it as a fault.
+    Disabled,
+    /// A live coin is being reclaimed: the bond is going away and the money is not back yet.
+    ///
+    /// Carries the coin because the funds are STILL LOCKED for the duration. A surface that showed
+    /// this as unbonded-and-unlocked would report money as available that cannot be spent, and a
+    /// reclaim that fails leaves the coin exactly where this says it is.
+    Reclaiming {
+        /// The coin being reclaimed, hex, no `0x`.
+        coin_id: String,
+        /// The epoch that coin bonds — frequently a PREVIOUS epoch, which is usually why it is
+        /// being reclaimed.
+        epoch: u64,
+        /// What it still locks, in DIG base units, read from the coin.
+        amount_dig_base_units: u64,
+    },
+}
+
+/// The `(store_id, root)` pair that identifies one mirror bond — the read's sort key and its cursor.
+///
+/// A composite key rather than an opaque string, because the order it names is the contract's own
+/// (ascending `store_id`, then ascending `root`) and a caller resuming a walk can check its position
+/// rather than trust an encoding it cannot read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MirrorBondKey {
+    /// The store id — LOWERCASE 64-hex, unprefixed.
+    ///
+    /// The canonical form is part of the key's contract rather than a formatting preference: the
+    /// order this key names is ascending over these STRINGS, and uppercase hex sorts differently
+    /// from lowercase, so two producers spelling it differently would disagree on the order and
+    /// `after` would mean two different positions. A `0x` prefix is TOLERATED on input to
+    /// [`MirrorBondStatesParams`](crate::params::MirrorBondStatesParams) and normalized away; it
+    /// is never emitted.
+    pub store_id: String,
+    /// The root — LOWERCASE 64-hex, unprefixed, on the same terms as [`store_id`](Self::store_id).
+    pub root: String,
+}
+
+/// One row of [`MirrorBondStatesResult`]: which bond, and what its state is.
+///
+/// The state is FLATTENED into the row, so a row is one object carrying `store_id`, `root`,
+/// `bond_state` and that state's own payload — never a nested envelope a client has to unwrap
+/// before it can branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorBondEntry {
+    /// The store id this bond is for, hex, no `0x`.
+    pub store_id: String,
+    /// The ROOT this bond is for, hex, no `0x`.
+    ///
+    /// Part of the key, never decoration. A publisher funds the latest root and may decline to fund
+    /// older ones, so a coin bonds one `(store, root)` pair and a surface keyed on the store alone
+    /// would merge a funded root with an unfunded one into a single misleading row.
+    pub root: String,
+    /// What this node can say about the bond.
+    #[serde(flatten)]
+    pub state: MirrorBondState,
+}
+
+/// Why a node cannot state its bond states AT ALL.
+///
+/// The "cannot tell" axis, and it is deliberately separate from every per-bond state, all of which
+/// are DEFINITE statements. A fact the node could not read makes the WHOLE answer
+/// [`MirrorBondStatesResult::Unknown`] rather than degrading individual rows: a partial list is
+/// indistinguishable from a complete one, and the rows a broken read would drop are exactly the
+/// bonds nobody is then watching.
+///
+/// The epoch requirement being unknown is NOT a member — that is a definite per-bond state
+/// ([`MirrorBondState::Deferred`]) and the node can still answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorBondStatesUnknownReason {
+    /// The node cannot enumerate the `(store, root)` pairs it holds, so it does not know which
+    /// bonds exist to have a state. Nothing may be substituted: the census `stores` figure counts
+    /// network-wide advertisements and is not this node's set.
+    ServedSetUnknown,
+    /// The node cannot read mirror coins from chain, so it cannot tell a bonded pair from an
+    /// unfunded one. Answering `unfunded` here would be a fabricated shortfall.
+    ChainUnreadable,
+    /// The node cannot read its own in-flight creates, so it cannot tell
+    /// [`Pending`](MirrorBondState::Pending) from [`Unfunded`](MirrorBondState::Unfunded) — a
+    /// submitted create and no create at all look identical from chain alone during the gap.
+    InFlightUnknown,
+    /// The node can enumerate the `(store, root)` pairs it holds, but cannot determine their
+    /// PROVENANCE, so it cannot tell a `Relayed` capsule apart from one that is simply absent.
+    ///
+    /// The one non-infrastructure reason, and it exists because the alternative is a lie. A
+    /// derivation keyed on the desired-bond (`Held`) set enumerates perfectly well and yet can
+    /// never emit [`Withheld`](MirrorBondState::Withheld), because a `Relayed` capsule is by
+    /// construction absent from that set. Without this reason its only conforming-LOOKING answer
+    /// is a `known` page with `complete: true` and every withheld row silently missing — the exact
+    /// "no such row where the contract promises withheld on purpose" failure, wearing the shape of
+    /// a complete answer. This reason is how such a node says so instead.
+    ProvenanceUnknown,
+}
+
+impl MirrorBondStatesUnknownReason {
+    /// Every reason, for exhaustive rendering and for the wire-token uniqueness KAT.
+    pub const ALL: &'static [MirrorBondStatesUnknownReason] = &[
+        MirrorBondStatesUnknownReason::ServedSetUnknown,
+        MirrorBondStatesUnknownReason::ChainUnreadable,
+        MirrorBondStatesUnknownReason::InFlightUnknown,
+        MirrorBondStatesUnknownReason::ProvenanceUnknown,
+    ];
+
+    /// The stable snake_case wire token, matching the `reason` field.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            MirrorBondStatesUnknownReason::ServedSetUnknown => "served_set_unknown",
+            MirrorBondStatesUnknownReason::ChainUnreadable => "chain_unreadable",
+            MirrorBondStatesUnknownReason::InFlightUnknown => "in_flight_unknown",
+            MirrorBondStatesUnknownReason::ProvenanceUnknown => "provenance_unknown",
+        }
+    }
+}
+
+/// `control.mirror.bondStates` — the per-`(store, root)` state of every mirror bond this node
+/// holds, and the $DIG those bonds have locked.
+///
+/// # "No bond" and "cannot tell" are different answers, at different levels
+///
+/// Every per-row [`MirrorBondState`] is a DEFINITE statement, including the six that mean "no coin
+/// yet": each names WHY, and each has its own remedy. A node that could not read a fact it needs
+/// does not report a row at all — it answers [`Unknown`](Self::Unknown) for the WHOLE call, with
+/// the reason. There is deliberately no per-row "unknown" and no empty-list fallback: a short list
+/// and a complete one look the same, and the rows a broken read would drop are precisely the bonds
+/// an operator most needs to see.
+///
+/// `entries: []` with `complete: true` is therefore an ANSWER — this node holds no mirror bonds —
+/// and it is never what a caller gets when something could not be read.
+///
+/// # The locked total is the node's, and a client MUST NOT sum the page
+///
+/// `locked_dig_base_units` covers the WHOLE bond set, not this page, and includes
+/// [`Reclaiming`](MirrorBondState::Reclaiming) coins because their money is still locked. A client
+/// that summed `entries` instead would under-report the locked total by exactly one page boundary
+/// and would show money as available that cannot be spent — the money lie this method's paging
+/// makes easiest to tell. It is what dig-app#289's locked-total surface reads.
+///
+/// # Every amount is DIG BASE UNITS
+///
+/// $DIG carries 3 decimals, so one base unit is `0.001 DIG`. It is NOT a mojo — XCH's `1e-12` base
+/// unit, nine orders of magnitude away. A mirror amount is never quoted in mojos.
+///
+/// # A page, and it says so
+///
+/// Rows come in ASCENDING `(store_id, root)`, a total order over the LOWERCASE unprefixed hex
+/// spelling of both halves, stable across the pages of one walk. `complete` states whether the page is the whole set and is never inferred from the
+/// page's length: a node may return a short page for its own reasons, and a set that is an exact
+/// multiple of the page size makes the last full page indistinguishable from a truncated one.
+/// Resume from `cursor` — the key of the last row you were actually HANDED.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MirrorBondStatesResult {
+    /// The node can state every bond's state.
+    Known {
+        /// One page of bonds, ascending by `(store_id, root)`, possibly empty.
+        entries: Vec<MirrorBondEntry>,
+        /// Is this page the WHOLE bond set?
+        ///
+        /// Required on the wire, and stated positively so the reading a caller falls into when the
+        /// field is absent or defaulted is the SAFE one — `complete` defaults to "there may be
+        /// more", which costs at worst one redundant request, whereas a `truncated` spelling would
+        /// default to "this is everything" and end a walk early.
+        complete: bool,
+        /// The key of the LAST row in this page — the value to resume from — or `null` for an empty
+        /// page.
+        ///
+        /// The key the caller was HANDED, never a position the node "got to". Pass it as
+        /// [`MirrorBondStatesParams::after`](crate::params::MirrorBondStatesParams::after).
+        ///
+        /// The key MUST be present; `null` is meaningful and an absent key must NOT decode into it.
+        #[serde(deserialize_with = "required_option")]
+        cursor: Option<MirrorBondKey>,
+        /// The $DIG this node has LOCKED in mirror coins across the whole bond set, in DIG base
+        /// units.
+        ///
+        /// Authoritative and node-computed. Includes reclaiming coins. Spans every page.
+        locked_dig_base_units: u64,
+        /// The epoch in force when this answer was taken, one-based.
+        ///
+        /// Carried so a client can tell a bond at the current epoch from one it is reading across a
+        /// rollover, without consulting a second method whose answer may have moved in between.
+        epoch: u64,
+    },
+    /// The node cannot state the bond states, and names which fact is missing.
+    Unknown {
+        /// Which fact the node is missing.
+        reason: MirrorBondStatesUnknownReason,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

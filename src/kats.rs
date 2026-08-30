@@ -1646,6 +1646,43 @@ impl ControlHandler for MockNode {
         })
     }
 
+    async fn mirror_bond_states(
+        &self,
+        params: crate::params::MirrorBondStatesParams,
+    ) -> Result<results::MirrorBondStatesResult, ControlError> {
+        // Two roots of the SAME store in DIFFERENT states, so a dispatch test cannot pass against
+        // an implementation that answers per store rather than per (store, root).
+        let entries = vec![
+            results::MirrorBondEntry {
+                store_id: STORE.into(),
+                root: ROOT.into(),
+                state: results::MirrorBondState::Bonded {
+                    coin_id: BOND_COIN_A.into(),
+                    epoch: 7,
+                    amount_dig_base_units: 1_047,
+                },
+            },
+            results::MirrorBondEntry {
+                store_id: STORE.into(),
+                root: BOND_ROOT_B.into(),
+                state: results::MirrorBondState::Unfunded {
+                    short_dig_base_units: 1_047,
+                },
+            },
+        ];
+        let _ = params.effective_limit();
+        Ok(results::MirrorBondStatesResult::Known {
+            cursor: Some(results::MirrorBondKey {
+                store_id: STORE.into(),
+                root: BOND_ROOT_B.into(),
+            }),
+            entries,
+            complete: true,
+            locked_dig_base_units: 1_047,
+            epoch: 7,
+        })
+    }
+
     async fn collateral_margin_get(&self) -> Result<results::CollateralMarginResult, ControlError> {
         Ok(results::CollateralMarginResult {
             margin_bp: MARGIN_BP.with(|m| *m.borrow()),
@@ -5144,6 +5181,482 @@ fn the_buffer_read_returns_this_nodes_served_set_not_the_census_count() {
         }
         results::CollateralBufferResult::Unknown { reason } => {
             panic!("the mock states a buffer, got unknown: {reason:?}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mirror bonds (#38): the per-`(store, root)` bond state surface.
+// ---------------------------------------------------------------------------
+
+/// A second store, so a fixture can carry two DIFFERENT bonds rather than one repeated.
+const BOND_STORE_B: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
+/// A second root under [`STORE`], so a fixture can show the SAME store at two roots in two
+/// different states — the case a store-keyed surface would silently merge.
+const BOND_ROOT_B: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+const BOND_COIN_A: &str = "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1";
+const BOND_COIN_B: &str = "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2";
+
+/// **`control.mirror.bondStates` carries its exact wire name, category, routing and auth tier.**
+///
+/// TOKEN-GATED although it is a read, for the same reason `control.spends.list` is: the caller
+/// names nothing, so the answer is this node's OWN bond set and funding position. Asserted against
+/// the open-surface predicate rather than by reading the summary, so widening the open set by
+/// analogy trips here.
+#[test]
+fn the_bond_state_method_is_named_categorised_and_gated() {
+    assert_eq!(
+        ControlMethod::MirrorBondStates.name(),
+        "control.mirror.bondStates"
+    );
+    assert_eq!(
+        ControlMethod::from_name("control.mirror.bondStates"),
+        Some(ControlMethod::MirrorBondStates)
+    );
+    assert_eq!(
+        ControlMethod::MirrorBondStates.category(),
+        crate::method::Category::Collateral
+    );
+    assert!(ControlMethod::MirrorBondStates.requires_auth());
+    assert!(!ControlMethod::MirrorBondStates.is_open_read());
+    assert!(!ControlMethod::MirrorBondStates.requires_master_token());
+    assert!(ControlMethod::ALL.contains(&ControlMethod::MirrorBondStates));
+}
+
+/// **The seven bond states are seven DISTINCT wire tokens, and each pins its own payload.**
+///
+/// One vector per state, each on a different `(store, root)` — including two roots of the SAME
+/// store in different states, which is the case a store-keyed surface would merge into one
+/// misleading row. Byte-stable in both directions, so a renamed token or a dropped payload field
+/// fails here rather than at a client six weeks later.
+///
+/// `bonded` and `reclaiming` deliberately carry DIFFERENT amounts from each other and from any
+/// requirement in this file: the amount is read from the coin, so a fixture reusing one number
+/// could not tell a coin-read implementation from one substituting today's price.
+#[test]
+fn golden_bond_state_vectors_pin_every_state() {
+    let rows = json!([
+        {
+            "store_id": STORE, "root": ROOT, "bond_state": "bonded",
+            "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64
+        },
+        {
+            "store_id": STORE, "root": BOND_ROOT_B, "bond_state": "unfunded",
+            "short_dig_base_units": 1_047u64
+        },
+        {"store_id": BOND_STORE_B, "root": ROOT, "bond_state": "pending"},
+        {
+            "store_id": BOND_STORE_B, "root": BOND_ROOT_B, "bond_state": "deferred",
+            "reason": "not_censused"
+        },
+    ]);
+
+    assert_result_round_trips::<results::MirrorBondStatesResult>(json!({
+        "state": "known",
+        "entries": rows,
+        "complete": false,
+        "cursor": {"store_id": BOND_STORE_B, "root": BOND_ROOT_B},
+        "locked_dig_base_units": 3_094u64,
+        "epoch": 7u64,
+    }));
+
+    // The three states with no payload, plus `reclaiming`, which HAS one because its money is
+    // still locked.
+    assert_result_round_trips::<results::MirrorBondStatesResult>(json!({
+        "state": "known",
+        "entries": [
+            {"store_id": STORE, "root": ROOT, "bond_state": "withheld"},
+            {"store_id": STORE, "root": BOND_ROOT_B, "bond_state": "disabled"},
+            {
+                "store_id": BOND_STORE_B, "root": ROOT, "bond_state": "reclaiming",
+                "coin_id": BOND_COIN_B, "epoch": 6u64, "amount_dig_base_units": 2_047u64
+            },
+        ],
+        "complete": true,
+        "cursor": {"store_id": BOND_STORE_B, "root": ROOT},
+        "locked_dig_base_units": 2_047u64,
+        "epoch": 7u64,
+    }));
+
+    for reason in results::MirrorBondStatesUnknownReason::ALL {
+        assert_result_round_trips::<results::MirrorBondStatesResult>(json!({
+            "state": "unknown",
+            "reason": reason.as_wire(),
+        }));
+    }
+}
+
+/// **Every wire token in this surface is unique, and the tokens are the contract.**
+///
+/// Asserted over `ALL` rather than over a hand-written list, so a variant added without a token —
+/// or with a token that collides — fails here. A collision would silently merge two states that
+/// this method exists to keep apart.
+#[test]
+fn the_bond_surface_wire_tokens_are_unique() {
+    let reasons: Vec<&str> = results::MirrorBondStatesUnknownReason::ALL
+        .iter()
+        .map(|r| r.as_wire())
+        .collect();
+    let mut sorted = reasons.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), reasons.len(), "unknown-reason tokens collide");
+
+    // The bond-state tokens come from serde, so they are read back off the wire rather than off a
+    // second list that could agree with itself while disagreeing with the encoder.
+    let states = [
+        results::MirrorBondState::Bonded {
+            coin_id: BOND_COIN_A.into(),
+            epoch: 7,
+            amount_dig_base_units: 1_047,
+        },
+        results::MirrorBondState::Pending,
+        results::MirrorBondState::Unfunded {
+            short_dig_base_units: 1_047,
+        },
+        results::MirrorBondState::Deferred {
+            reason: results::CollateralUnknownReason::NoChainSource,
+        },
+        results::MirrorBondState::Withheld,
+        results::MirrorBondState::Disabled,
+        results::MirrorBondState::Reclaiming {
+            coin_id: BOND_COIN_B.into(),
+            epoch: 6,
+            amount_dig_base_units: 2_047,
+        },
+    ];
+    let mut tokens: Vec<String> = states
+        .iter()
+        .map(|s| {
+            serde_json::to_value(s).unwrap()["bond_state"]
+                .as_str()
+                .expect("every state carries a bond_state token")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(tokens.len(), 7, "all seven states must be represented");
+    tokens.sort();
+    tokens.dedup();
+    assert_eq!(tokens.len(), 7, "bond-state tokens collide");
+}
+
+/// **An ABSENT `cursor` or `complete` must FAIL to decode — neither may collapse into a value.**
+///
+/// This is the whole reason `cursor` carries `deserialize_with = "required_option"` and `complete`
+/// carries no `default`. An absent `cursor` decoding to `null` would read as *there was nothing to
+/// resume from*, ending a walk at whatever the truncation left; an absent `complete` defaulting to
+/// `false` merely costs a redundant request, but defaulting it at all would let a payload that
+/// never said so assert a page boundary.
+///
+/// The mutation that proves this test load-bearing is on the FIELD ATTRIBUTES — remove
+/// `deserialize_with` (or add `#[serde(default)]`) and this fails. Mutating the body of
+/// `required_option` would NOT be caught, and correctly so: an absent key never reaches a
+/// `deserialize_with` function, so the two cover disjoint inputs and only the attribute is under
+/// test here.
+#[test]
+fn an_absent_paging_key_never_becomes_a_definite_answer() {
+    let complete_known = json!({
+        "state": "known",
+        "entries": [],
+        "complete": true,
+        "cursor": null,
+        "locked_dig_base_units": 0u64,
+        "epoch": 7u64,
+    });
+    // The control: with both keys present it decodes, so the failures below are about ABSENCE and
+    // not about the rest of the payload.
+    assert_result_round_trips::<results::MirrorBondStatesResult>(complete_known.clone());
+
+    for missing in ["cursor", "complete"] {
+        let mut wire = complete_known.clone();
+        wire.as_object_mut().unwrap().remove(missing);
+        assert!(
+            serde_json::from_value::<results::MirrorBondStatesResult>(wire).is_err(),
+            "an absent `{missing}` must be a decode failure, never a default"
+        );
+    }
+}
+
+/// **The locked total is the NODE's figure over the whole set, and is not the page's sum.**
+///
+/// The fixture is a TRUNCATED page whose visible amounts sum to less than `locked_dig_base_units`,
+/// which is exactly the shape a client-side sum gets wrong. A fixture whose page happened to sum to
+/// the total could not tell the two implementations apart — it would pass against a client that
+/// re-derived the number and against one that read it, which is the false green this test is built
+/// to avoid.
+#[test]
+fn the_locked_total_spans_pages_and_is_never_the_page_sum() {
+    let wire = json!({
+        "state": "known",
+        "entries": [{
+            "store_id": STORE, "root": ROOT, "bond_state": "bonded",
+            "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64
+        }],
+        "complete": false,
+        "cursor": {"store_id": STORE, "root": ROOT},
+        "locked_dig_base_units": 5_000u64,
+        "epoch": 7u64,
+    });
+    assert_result_round_trips::<results::MirrorBondStatesResult>(wire.clone());
+
+    let parsed: results::MirrorBondStatesResult = serde_json::from_value(wire).unwrap();
+    let results::MirrorBondStatesResult::Known {
+        entries,
+        complete,
+        locked_dig_base_units,
+        ..
+    } = parsed
+    else {
+        panic!("the vector is a known answer");
+    };
+    assert!(!complete, "the fixture must be a TRUNCATED page");
+    let page_sum: u64 = entries
+        .iter()
+        .map(|e| match &e.state {
+            results::MirrorBondState::Bonded {
+                amount_dig_base_units,
+                ..
+            }
+            | results::MirrorBondState::Reclaiming {
+                amount_dig_base_units,
+                ..
+            } => *amount_dig_base_units,
+            _ => 0,
+        })
+        .sum();
+    assert!(
+        page_sum < locked_dig_base_units,
+        "the page must under-count the locked total, or this proves nothing"
+    );
+}
+
+/// **The page bound is refused on BOTH sides, and the bound itself is at the cap, not below it.**
+///
+/// `MAX` must PASS and `MAX + 1` must fail: a bound checked only from below confirms only itself.
+/// Zero is refused because a page that holds nothing makes no progress and a caller looping until
+/// `complete` would loop forever.
+#[test]
+fn the_bond_page_bound_is_enforced_from_both_sides() {
+    let at_bound = MirrorBondStatesParams {
+        limit: Some(MIRROR_BOND_STATES_MAX_LIMIT),
+        ..MirrorBondStatesParams::default()
+    };
+    assert!(
+        at_bound.clone().validated().is_ok(),
+        "the cap itself must be accepted"
+    );
+    assert_eq!(at_bound.effective_limit(), MIRROR_BOND_STATES_MAX_LIMIT);
+
+    for bad in [0, MIRROR_BOND_STATES_MAX_LIMIT + 1] {
+        let err = MirrorBondStatesParams {
+            limit: Some(bad),
+            ..MirrorBondStatesParams::default()
+        }
+        .validated()
+        .expect_err("an out-of-range page size must be refused");
+        assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+        let over = serde_json::to_value(bad).unwrap();
+        assert!(
+            serde_json::from_value::<MirrorBondStatesParams>(json!({"limit": over})).is_err(),
+            "the refusal must be enforced on the way IN, so a node cannot forget it"
+        );
+    }
+
+    // An omitted limit is not a refusal — it is the contract's own default.
+    let defaulted: MirrorBondStatesParams = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(
+        defaulted.effective_limit(),
+        MIRROR_BOND_STATES_DEFAULT_LIMIT
+    );
+    assert_eq!(defaulted.after, None);
+}
+
+/// **The request envelope, pinned — including a cursor that names BOTH halves of the key.**
+///
+/// Resuming by `store_id` alone would drop every remaining root of the store the page boundary fell
+/// inside, so the cursor is a pair on the wire and this vector is what proves it.
+#[test]
+fn bond_states_request_wire_vector_is_pinned() {
+    assert_request(
+        &MirrorBondStatesParams::default(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "control.mirror.bondStates",
+            "params": {},
+        }),
+    );
+    assert_request(
+        &MirrorBondStatesParams {
+            after: Some(results::MirrorBondKey {
+                store_id: STORE.into(),
+                root: ROOT.into(),
+            }),
+            limit: Some(2),
+        },
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "control.mirror.bondStates",
+            "params": {"after": {"store_id": STORE, "root": ROOT}, "limit": 2},
+        }),
+    );
+}
+
+/// **A provenance-blind producer has a CONFORMING answer, and it is not a silently-short page.**
+///
+/// `withheld` means a held capsule with `Relayed` provenance, which is by construction absent from
+/// a node's desired-bond (`Held`) set. A producer keyed on that set enumerates its pairs perfectly
+/// well, so none of the three infrastructure reasons fits it — and without a fourth reason its only
+/// conforming-LOOKING move is a `known` page with `complete: true` and every withheld row missing.
+/// That page asserts a completeness the node knows it lacks, and it makes `withheld` a state a
+/// conformance list can tick while no surface can ever emit it.
+///
+/// The fixture is built against exactly that nearest wrong implementation: the truthful answer
+/// CONTAINS a withheld row, so the short page and the sanctioned refusal are two observably
+/// different answers about the same node rather than two spellings of one.
+#[test]
+fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
+    // What a node that CAN see provenance would answer about this set.
+    let truthful = json!({
+        "state": "known",
+        "entries": [
+            {"store_id": STORE, "root": ROOT, "bond_state": "bonded",
+             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64},
+            {"store_id": STORE, "root": BOND_ROOT_B, "bond_state": "withheld"},
+        ],
+        "complete": true,
+        "cursor": {"store_id": STORE, "root": BOND_ROOT_B},
+        "locked_dig_base_units": 1_047u64,
+        "epoch": 7u64,
+    });
+    assert_result_round_trips::<results::MirrorBondStatesResult>(truthful);
+
+    // The sanctioned answer for a node that cannot see provenance. A golden vector, because this
+    // token is what dig-app renders and what the node must emit.
+    let sanctioned = json!({"state": "unknown", "reason": "provenance_unknown"});
+    assert_result_round_trips::<results::MirrorBondStatesResult>(sanctioned.clone());
+    let parsed: results::MirrorBondStatesResult = serde_json::from_value(sanctioned).unwrap();
+    assert_eq!(
+        parsed,
+        results::MirrorBondStatesResult::Unknown {
+            reason: results::MirrorBondStatesUnknownReason::ProvenanceUnknown,
+        },
+        "a provenance-blind node's answer must be the WHOLE-call refusal, never a page"
+    );
+
+    // It is a REASON IN ITS OWN RIGHT, not an alias of the enumerate-failure. Binding it to
+    // `served_set_unknown` would tell an operator the node cannot list its bonds, which is false
+    // and sends them looking in the wrong place.
+    assert_ne!(
+        results::MirrorBondStatesUnknownReason::ProvenanceUnknown.as_wire(),
+        results::MirrorBondStatesUnknownReason::ServedSetUnknown.as_wire()
+    );
+    assert!(
+        results::MirrorBondStatesUnknownReason::ALL
+            .contains(&results::MirrorBondStatesUnknownReason::ProvenanceUnknown),
+        "a reason a producer must be able to emit has to be enumerable by a renderer"
+    );
+    // The `as_wire` token and the serde token are the SAME string, read back off the wire rather
+    // than off a second list that could agree with itself.
+    let encoded = serde_json::to_value(results::MirrorBondStatesResult::Unknown {
+        reason: results::MirrorBondStatesUnknownReason::ProvenanceUnknown,
+    })
+    .unwrap();
+    assert_eq!(
+        encoded["reason"],
+        json!(results::MirrorBondStatesUnknownReason::ProvenanceUnknown.as_wire())
+    );
+
+    // And the forbidden alternative is a DIFFERENT observable answer, not a variant spelling of
+    // this one: it decodes as `known`, claims completeness, and is one row short of the truth.
+    let short_page = json!({
+        "state": "known",
+        "entries": [
+            {"store_id": STORE, "root": ROOT, "bond_state": "bonded",
+             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64},
+        ],
+        "complete": true,
+        "cursor": {"store_id": STORE, "root": ROOT},
+        "locked_dig_base_units": 1_047u64,
+        "epoch": 7u64,
+    });
+    let short: results::MirrorBondStatesResult = serde_json::from_value(short_page).unwrap();
+    assert_ne!(short, parsed);
+    let results::MirrorBondStatesResult::Known {
+        entries, complete, ..
+    } = &short
+    else {
+        panic!("the forbidden alternative is a `known` page by construction")
+    };
+    assert!(
+        *complete && entries.len() == 1,
+        "the failure this reason removes is a complete-looking page missing its withheld rows"
+    );
+}
+
+/// **A malformed resume cursor is REFUSED, never read as "start from the beginning".**
+///
+/// The order is ascending over the key's STRING form, so a `0x`-prefixed key sorts before every
+/// canonical one: a node that dropped it would restart the walk while looking like it resumed, and
+/// a repeated page inflates the locked-$DIG total a client accumulates across a walk — wrong in the
+/// reassuring direction and indistinguishable from a correct answer. So `0x` is NORMALIZED (callers
+/// hand-copy ids out of block explorers) and everything else is refused, matching
+/// `WalletCoinsParams::validated` rather than inventing a second convention.
+#[test]
+fn a_malformed_bond_cursor_is_refused_rather_than_restarting_the_walk() {
+    let key = |store: &str, root: &str| results::MirrorBondKey {
+        store_id: store.into(),
+        root: root.into(),
+    };
+    let with = |k: results::MirrorBondKey| MirrorBondStatesParams {
+        after: Some(k),
+        ..MirrorBondStatesParams::default()
+    };
+
+    // The well-formed control: a canonical key passes and is handed back UNCHANGED.
+    let canonical = with(key(STORE, ROOT)).validated().expect("canonical key");
+    assert_eq!(canonical.after, Some(key(STORE, ROOT)));
+
+    // `0x` is tolerated on input and normalized away; it is never emitted.
+    let prefixed = with(key(&format!("0x{STORE}"), &format!("0x{ROOT}")))
+        .validated()
+        .expect("a 0x-prefixed key is tolerated");
+    assert_eq!(prefixed.after, Some(key(STORE, ROOT)));
+    assert_eq!(
+        serde_json::to_value(&prefixed).unwrap()["after"],
+        json!({"store_id": STORE, "root": ROOT}),
+        "the normalized form is what goes back on the wire"
+    );
+
+    // Every other spelling is refused — and refused in EITHER half, so a good store id cannot
+    // launder a bad root past the check.
+    let uppercase = STORE.to_ascii_uppercase();
+    let short = &STORE[1..];
+    let long = format!("{STORE}a");
+    let non_hex = "z".repeat(64);
+    let bad: [&str; 6] = [&uppercase, short, &long, &non_hex, "", "0xnothex"];
+    for spelling in bad {
+        for candidate in [key(spelling, ROOT), key(STORE, spelling)] {
+            let err = with(candidate.clone())
+                .validated()
+                .expect_err("a malformed cursor must be refused");
+            assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+
+            // Enforced on the way IN, so a node cannot forget to call `validated`...
+            let wire = json!({"after": {
+                "store_id": candidate.store_id, "root": candidate.root
+            }});
+            let decoded = serde_json::from_value::<MirrorBondStatesParams>(wire);
+            assert!(
+                decoded.is_err(),
+                "a malformed cursor must not decode into a request at all"
+            );
+            // ...and REFUSED, never coerced to `None`, which would silently restart the walk.
+            assert!(
+                decoded.map(|p| p.after).unwrap_or(None).is_none(),
+                "an unparseable cursor must never become start-of-set"
+            );
         }
     }
 }

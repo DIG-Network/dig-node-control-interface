@@ -553,6 +553,47 @@ pub trait ControlHandler: Sync {
     ///   themselves recreates the rival derivations this method exists to prevent.
     async fn collateral_buffer(&self) -> Result<results::CollateralBufferResult, ControlError>;
 
+    /// `control.mirror.bondStates` (TOKEN-GATED)
+    ///
+    /// The per-`(store, root)` state of every mirror bond this node holds, and the $DIG they lock.
+    ///
+    /// An implementation MUST:
+    ///
+    /// - **Keep the seven states apart.** `unfunded` is the only genuine out-of-funds state.
+    ///   `deferred` (no priced requirement), `pending` (submitted, unconfirmed), `withheld`
+    ///   (`Relayed` provenance) and `disabled` (the node-wide switch) all mean "no coin yet" and
+    ///   none of them means "send money". Collapsing any of them into `unfunded` is the dig-app#300
+    ///   defect this method exists to remove.
+    /// - **Read `bonded` and `reclaiming` amounts FROM THE COIN**, never from this epoch's
+    ///   requirement. A coin created under a previous requirement locks the previous amount, and
+    ///   the current price is not a fact about an existing coin.
+    /// - **Enumerate the SERVED set, not only the desired-bond set.**
+    ///   [`Withheld`](results::MirrorBondState::Withheld) means a capsule this node holds with
+    ///   `Relayed` provenance, which is by construction absent from the `Held` set; a derivation
+    ///   keyed on `Held` alone can never emit it and silently answers "no such row" where the
+    ///   contract promises "withheld on purpose". An implementation that CANNOT see provenance MUST
+    ///   answer
+    ///   [`ProvenanceUnknown`](results::MirrorBondStatesUnknownReason::ProvenanceUnknown) for the
+    ///   whole call and MUST NOT return a `known` page — a page with its withheld rows silently
+    ///   missing claims a completeness the node knows it lacks.
+    /// - **Answer [`Unknown`](results::MirrorBondStatesResult::Unknown) for the WHOLE call** when it
+    ///   cannot enumerate its bonds, cannot read chain, cannot read its own in-flight creates, or
+    ///   cannot determine provenance.
+    ///   There is no per-row unknown and no empty-list fallback: `entries: []` with
+    ///   `complete: true` asserts this node holds no bonds, and a partial list read as a complete
+    ///   one hides exactly the bonds nobody is watching.
+    /// - **Compute `locked_dig_base_units` over the WHOLE set, including reclaiming coins**, and
+    ///   never over the page. A reclaim in flight still locks its money.
+    /// - **Order rows by ascending `(store_id, root)` and keep that order stable across the pages of
+    ///   one walk**, over the LOWERCASE unprefixed hex spelling of both halves, since `after` means
+    ///   *strictly after this key in that order* and uppercase hex sorts elsewhere. Set `complete`
+    ///   explicitly, and set `cursor` to the key of the LAST row actually handed back (`null` for an
+    ///   empty page) — never to a position the node "got to".
+    async fn mirror_bond_states(
+        &self,
+        params: params::MirrorBondStatesParams,
+    ) -> Result<results::MirrorBondStatesResult, ControlError>;
+
     /// `control.profile.putBody` (TOKEN-GATED)
     ///
     /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
@@ -719,6 +760,13 @@ pub trait ControlHandler: Sync {
             }
             ControlMethod::CollateralRequirement => encode(self.collateral_requirement().await?),
             ControlMethod::CollateralBuffer => encode(self.collateral_buffer().await?),
+            // Re-validated here idempotently; `MirrorBondStatesParams`'s own `Deserialize` already
+            // enforced the page bound. A limit above the cap is REFUSED, never clamped, or the
+            // cursor handed back names a position the caller never asked about.
+            ControlMethod::MirrorBondStates => {
+                let params: params::MirrorBondStatesParams = decode(params)?;
+                encode(self.mirror_bond_states(params.validated()?).await?)
+            }
             ControlMethod::CollateralMarginGet => encode(self.collateral_margin_get().await?),
             // `CollateralMarginSetParams` derives `Deserialize`, so decoding enforces NOTHING beyond
             // the field's type. `validated()` here is the SOLE enforcement of `MAX_SAFETY_MARGIN_BP`
