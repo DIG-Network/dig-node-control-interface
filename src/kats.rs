@@ -4841,6 +4841,98 @@ fn an_unknown_requirement_carries_a_reason_and_no_number() {
     assert_eq!(tokens.len(), results::CollateralUnknownReason::ALL.len());
 }
 
+/// **`ALL` cannot silently miss a variant.**
+///
+/// `ALL` is a hand-written list, so the uniqueness KAT above proves only that the variants SOMEONE
+/// REMEMBERED to list have distinct tokens — a variant added without being listed is invisible to
+/// it, and `as_wire`'s exhaustive match does not force the list to grow with it.
+///
+/// The match below closes that: it is exhaustive over the enum, so a new variant fails to COMPILE
+/// here until it is given an index, and the count assertion then fails until `ALL` holds it too.
+/// Membership is checked per variant rather than by length alone, because two entries for one
+/// variant would satisfy a length check while leaving another absent.
+#[test]
+fn every_collateral_unknown_reason_is_listed_in_all() {
+    use results::CollateralUnknownReason as R;
+
+    // Exhaustive on purpose. Adding a variant MUST break this match.
+    const fn index(reason: R) -> usize {
+        match reason {
+            R::NotCensused => 0,
+            R::BehindFinalityDepth => 1,
+            R::RecordUnreadable => 2,
+            R::NoChainSource => 3,
+            R::BalanceUnreadable => 4,
+        }
+    }
+    const VARIANT_COUNT: usize = 5;
+
+    assert_eq!(
+        R::ALL.len(),
+        VARIANT_COUNT,
+        "ALL has drifted from the variant set"
+    );
+    for i in 0..VARIANT_COUNT {
+        assert!(
+            R::ALL.iter().any(|r| index(*r) == i),
+            "variant with index {i} is missing from ALL"
+        );
+    }
+}
+
+/// **The wallet-unreadable reason is its OWN token, and it rides `deferred` rather than a shortfall.**
+///
+/// dig-node's mirror pass has a state for "chain reads fine, but this node cannot read its own $DIG
+/// balance". Reporting that as [`MirrorBondState::Unfunded`] would assert a shortfall the node has
+/// no evidence for, on the very surface an operator uses to decide whether to alarm (dig-app#300);
+/// reporting it as `record_unreadable` would send that operator to repair a census that is working.
+///
+/// So the fixture pins the EXACT bytes both halves produce: the `deferred` tag, and the
+/// `balance_unreadable` token beside it. The nearest wrong implementation reuses one of the four
+/// census/record/chain reasons, and it is distinguishable here only because the token itself is
+/// asserted — a test that merely round-tripped the value would pass against every one of them.
+#[test]
+fn a_balance_unreadable_bond_is_deferred_not_unfunded() {
+    let state = results::MirrorBondState::Deferred {
+        reason: results::CollateralUnknownReason::BalanceUnreadable,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&state).unwrap(),
+        json!({"bond_state": "deferred", "reason": "balance_unreadable"}),
+        "the wallet-unreadable bond's wire bytes are pinned"
+    );
+
+    // And the same token decodes back into the same variant, so a client and a node reading this
+    // contract cannot disagree about which fact is missing.
+    let round: results::MirrorBondState =
+        serde_json::from_value(json!({"bond_state": "deferred", "reason": "balance_unreadable"}))
+            .unwrap();
+    assert_eq!(round, state);
+
+    // The reason is REQUIRED: `deferred` alone names no missing fact and no remedy.
+    assert!(
+        serde_json::from_value::<results::MirrorBondState>(json!({"bond_state": "deferred"}))
+            .is_err(),
+        "a deferred bond without a reason must fail to decode"
+    );
+
+    // The token is distinct from every census/record/chain reason, which is the whole point of
+    // adding it rather than reusing one.
+    assert_eq!(
+        results::CollateralUnknownReason::BalanceUnreadable.as_wire(),
+        "balance_unreadable"
+    );
+    assert!(
+        results::CollateralUnknownReason::ALL
+            .iter()
+            .filter(|r| r.as_wire() == "balance_unreadable")
+            .count()
+            == 1,
+        "exactly one variant owns the balance_unreadable token"
+    );
+}
+
 /// **A known requirement cannot omit the protocol version that produced it.**
 ///
 /// The collateral model is versioned and upgradable, and the version that computed an epoch travels

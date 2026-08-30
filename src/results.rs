@@ -3154,6 +3154,19 @@ pub enum CollateralUnknownReason {
     RecordUnreadable,
     /// The node cannot see the chain at all, so it cannot know whether a record should exist.
     NoChainSource,
+    /// The node can read the epoch's record, but cannot read its OWN $DIG balance, so it cannot
+    /// tell whether it could fund what the record prices.
+    ///
+    /// The one WALLET-shaped reason, and it exists because every other reason in this enum points
+    /// an operator at the census, the record, or the chain. A node whose census is healthy and
+    /// whose wallet read failed, reported as [`RecordUnreadable`](Self::RecordUnreadable), tells
+    /// that operator to repair a census that is working — the same remedy misdirection the
+    /// `withheld`/`disabled`/`reclaiming` split exists to prevent.
+    ///
+    /// It is emphatically NOT a shortfall. Answering
+    /// [`Unfunded`](crate::results::MirrorBondState::Unfunded) here would assert a gap the node has
+    /// no evidence for, on the surface an operator uses to decide whether to alarm.
+    BalanceUnreadable,
 }
 
 impl CollateralUnknownReason {
@@ -3163,6 +3176,7 @@ impl CollateralUnknownReason {
         CollateralUnknownReason::BehindFinalityDepth,
         CollateralUnknownReason::RecordUnreadable,
         CollateralUnknownReason::NoChainSource,
+        CollateralUnknownReason::BalanceUnreadable,
     ];
 
     /// The stable snake_case wire token, matching the `reason` field.
@@ -3172,6 +3186,7 @@ impl CollateralUnknownReason {
             CollateralUnknownReason::BehindFinalityDepth => "behind_finality_depth",
             CollateralUnknownReason::RecordUnreadable => "record_unreadable",
             CollateralUnknownReason::NoChainSource => "no_chain_source",
+            CollateralUnknownReason::BalanceUnreadable => "balance_unreadable",
         }
     }
 }

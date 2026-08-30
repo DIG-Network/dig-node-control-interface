@@ -976,9 +976,16 @@ rewards, while over-posting costs only the opportunity cost of the locked $DIG.
 **An unknown requirement MUST be stated as unknown, with its reason.** A node that has not censused the
 epoch, or that sits inside `CENSUS_FINALITY_DEPTH_BLOCKS` of the chain tip, MUST return
 `{state:"unknown", reason}` and MUST NOT return `0`, an error a client would render as "no collateral
-required", or a previous epoch's figure presented as this epoch's. The four reasons —
-`not_censused`, `behind_finality_depth`, `record_unreadable`, `no_chain_source` — name DIFFERENT missing
-facts with different remedies, and MUST NOT be collapsed into one. `known` and `unknown` are variants of
+required", or a previous epoch's figure presented as this epoch's. The five reasons —
+`not_censused`, `behind_finality_depth`, `record_unreadable`, `no_chain_source`, `balance_unreadable` —
+name DIFFERENT missing facts with different remedies, and MUST NOT be collapsed into one.
+
+**`balance_unreadable` is the WALLET axis and MUST NOT be spelled as any of the other four.** A node
+whose census, record and chain reads all succeed but which cannot read its own $DIG balance does not
+know whether it could fund what the record prices. Reporting that as `record_unreadable` or
+`no_chain_source` sends an operator to repair machinery that is working. It is also NOT a shortfall: a
+node in this state MUST NOT report `unfunded` for the bonds it cannot price (§25.8), because the wallet
+may be full and the node holds no evidence either way. `known` and `unknown` are variants of
 one tagged union precisely so that no representable value carries a figure the node was not given; this
 is what dig-app `SPEC.md` §3.7b requires when it forbids any path that renders an absent requirement as
 a zero cost.
@@ -1094,7 +1101,7 @@ alarms about a perfectly healthy node, which is the defect this method exists to
 | `bonded` | `coin_id`, `epoch`, `amount_dig_base_units` | a coin for this pair and epoch is on chain | none |
 | `pending` | — | a create is submitted and unconfirmed | wait |
 | `unfunded` | `short_dig_base_units` | the wallet cannot cover this create | add $DIG |
-| `deferred` | `reason` | the epoch requirement is unknown, so no create can be PRICED | none; the wallet may be full |
+| `deferred` | `reason` | the epoch requirement is unknown, so no create can be PRICED — including `balance_unreadable`, where the node cannot read its own $DIG balance | none; the wallet may be full |
 | `withheld` | — | the capsule has `Relayed` provenance: held, deliberately never advertised | none |
 | `disabled` | — | collateralisation is switched OFF for this node | the operator's own switch |
 | `reclaiming` | `coin_id`, `epoch`, `amount_dig_base_units` | a live coin is being reclaimed; the money is STILL LOCKED | wait |
