@@ -197,3 +197,5 @@ See `SPEC.md` for the normative contract and the superproject `SYSTEM.md` for th
 dig-node (server-side dispatch — implements `ControlHandler`), the CLI `dign`, dig-chrome-extension,
 dig-app, hub — all consuming this one control contract per epic #1110 (dig-node adoption + the
 dig-rpc Control-tier removal land in later tasks of the cascade).
+
+<!-- WIP: control.mirror.bondState (dig-node#412 step 6) -->
