@@ -2320,9 +2320,16 @@ pub enum MirrorBondState {
 /// rather than trust an encoding it cannot read.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MirrorBondKey {
-    /// The store id, hex, no `0x`.
+    /// The store id — LOWERCASE 64-hex, unprefixed.
+    ///
+    /// The canonical form is part of the key's contract rather than a formatting preference: the
+    /// order this key names is ascending over these STRINGS, and uppercase hex sorts differently
+    /// from lowercase, so two producers spelling it differently would disagree on the order and
+    /// `after` would mean two different positions. A `0x` prefix is TOLERATED on input to
+    /// [`MirrorBondStatesParams`](crate::params::MirrorBondStatesParams) and normalized away; it
+    /// is never emitted.
     pub store_id: String,
-    /// The root, hex, no `0x`.
+    /// The root — LOWERCASE 64-hex, unprefixed, on the same terms as [`store_id`](Self::store_id).
     pub root: String,
 }
 
@@ -2370,6 +2377,17 @@ pub enum MirrorBondStatesUnknownReason {
     /// [`Pending`](MirrorBondState::Pending) from [`Unfunded`](MirrorBondState::Unfunded) — a
     /// submitted create and no create at all look identical from chain alone during the gap.
     InFlightUnknown,
+    /// The node can enumerate the `(store, root)` pairs it holds, but cannot determine their
+    /// PROVENANCE, so it cannot tell a `Relayed` capsule apart from one that is simply absent.
+    ///
+    /// The one non-infrastructure reason, and it exists because the alternative is a lie. A
+    /// derivation keyed on the desired-bond (`Held`) set enumerates perfectly well and yet can
+    /// never emit [`Withheld`](MirrorBondState::Withheld), because a `Relayed` capsule is by
+    /// construction absent from that set. Without this reason its only conforming-LOOKING answer
+    /// is a `known` page with `complete: true` and every withheld row silently missing — the exact
+    /// "no such row where the contract promises withheld on purpose" failure, wearing the shape of
+    /// a complete answer. This reason is how such a node says so instead.
+    ProvenanceUnknown,
 }
 
 impl MirrorBondStatesUnknownReason {
@@ -2378,6 +2396,7 @@ impl MirrorBondStatesUnknownReason {
         MirrorBondStatesUnknownReason::ServedSetUnknown,
         MirrorBondStatesUnknownReason::ChainUnreadable,
         MirrorBondStatesUnknownReason::InFlightUnknown,
+        MirrorBondStatesUnknownReason::ProvenanceUnknown,
     ];
 
     /// The stable snake_case wire token, matching the `reason` field.
@@ -2386,6 +2405,7 @@ impl MirrorBondStatesUnknownReason {
             MirrorBondStatesUnknownReason::ServedSetUnknown => "served_set_unknown",
             MirrorBondStatesUnknownReason::ChainUnreadable => "chain_unreadable",
             MirrorBondStatesUnknownReason::InFlightUnknown => "in_flight_unknown",
+            MirrorBondStatesUnknownReason::ProvenanceUnknown => "provenance_unknown",
         }
     }
 }
@@ -2420,8 +2440,8 @@ impl MirrorBondStatesUnknownReason {
 ///
 /// # A page, and it says so
 ///
-/// Rows come in ASCENDING `(store_id, root)`, a total order over the key, stable across the pages
-/// of one walk. `complete` states whether the page is the whole set and is never inferred from the
+/// Rows come in ASCENDING `(store_id, root)`, a total order over the LOWERCASE unprefixed hex
+/// spelling of both halves, stable across the pages of one walk. `complete` states whether the page is the whole set and is never inferred from the
 /// page's length: a node may return a short page for its own reasons, and a set that is an exact
 /// multiple of the page size makes the last full page indistinguishable from a truncated one.
 /// Resume from `cursor` — the key of the last row you were actually HANDED.

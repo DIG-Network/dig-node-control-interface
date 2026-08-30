@@ -1671,6 +1671,9 @@ pub const MIRROR_BOND_STATES_MAX_LIMIT: u32 = COINS_BY_PARENT_MAX_LIMIT;
 
 const MIRROR_BOND_STATES_LIMIT_ERROR: &str = "limit must be between 1 and 1000 bonds per page";
 
+const MIRROR_BOND_AFTER_ERROR: &str =
+    "after.store_id and after.root must each be lowercase 64-hex, optionally 0x-prefixed";
+
 /// `control.mirror.bondStates` params — one page of this node's mirror bond states.
 ///
 /// # The caller narrows nothing
@@ -1696,6 +1699,10 @@ pub struct MirrorBondStatesParams {
     /// [`cursor`](results::MirrorBondStatesResult::Known::cursor) — never a key the caller kept for
     /// another reason. Resuming by `store_id` alone would drop every remaining root of the store
     /// the boundary fell inside.
+    ///
+    /// Both halves are LOWERCASE 64-hex, unprefixed, and a `0x` prefix is tolerated on input and
+    /// normalized away by [`validated`](Self::validated). Anything else is REFUSED — see there for
+    /// why a malformed cursor must never be read as "start from the beginning".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<results::MirrorBondKey>,
     /// The page size. `None` asks for [`MIRROR_BOND_STATES_DEFAULT_LIMIT`].
@@ -1721,6 +1728,16 @@ impl MirrorBondStatesParams {
     /// `limit: 0` is refused because a page that can hold nothing makes no progress: a caller
     /// looping until `complete` would loop forever. A limit above the cap is refused rather than
     /// clamped so the caller's model of the page and the node's stay identical.
+    ///
+    /// [`after`](Self::after) is normalized on the same terms as every other hex id in this crate
+    /// ([`WalletCoinsParams::validated`]) and a malformed one is REFUSED rather than dropped. That
+    /// refusal is the point: this order is ascending over the key's STRING form, so a
+    /// `0x`-prefixed key sorts before every canonical one and a node that quietly ignored it would
+    /// RESTART the walk while looking like it resumed. On the surface a locked-$DIG total is
+    /// summed from, a silently repeated page is wrong in the reassuring direction, and it is
+    /// indistinguishable from a correct answer. Coercing an unparseable cursor to start-of-set is
+    /// the same defect by another route, and it would contradict this method's own
+    /// refuse-don't-clamp rule for `limit`.
     pub fn validated(self) -> Result<Self, ControlError> {
         if let Some(limit) = self.limit {
             if limit == 0 || limit > MIRROR_BOND_STATES_MAX_LIMIT {
@@ -1730,8 +1747,25 @@ impl MirrorBondStatesParams {
                 ));
             }
         }
-        Ok(self)
+        let after = self.after.map(normalize_bond_key).transpose()?;
+        Ok(MirrorBondStatesParams { after, ..self })
     }
+}
+
+/// Normalize both halves of a bond cursor, or reject the whole key.
+///
+/// Reuses [`normalize_coin_id`] rather than restating the rule: a store id, a root and a coin id
+/// are all 32-byte hex on this wire, and a second copy of the rule is how two of three end up
+/// accepting different spellings.
+fn normalize_bond_key(key: results::MirrorBondKey) -> Result<results::MirrorBondKey, ControlError> {
+    let malformed = || ControlError::of(ControlErrorCode::InvalidParams, MIRROR_BOND_AFTER_ERROR);
+    let store_id = normalize_coin_id(&key.store_id)
+        .ok_or_else(malformed)?
+        .to_owned();
+    let root = normalize_coin_id(&key.root)
+        .ok_or_else(malformed)?
+        .to_owned();
+    Ok(results::MirrorBondKey { store_id, root })
 }
 
 impl<'de> Deserialize<'de> for MirrorBondStatesParams {

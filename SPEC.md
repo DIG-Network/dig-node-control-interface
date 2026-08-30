@@ -1114,12 +1114,20 @@ is still locked. Consequently dig-node MUST rename `BondState::Withheld` to `Dis
 **A node that enumerates only its desired-bond set can never emit `withheld`.** A `Relayed` capsule is
 by construction absent from the `Held` set, so such an implementation answers "no such row" where this
 contract promises "withheld on purpose". An implementation MUST enumerate the SERVED set, and one that
-cannot MUST say so rather than report the state as satisfied.
+cannot MUST say so rather than report the state as satisfied. **Saying so has exactly one spelling:
+`{state:"unknown", reason:"provenance_unknown"}` for the WHOLE call.** An implementation that cannot
+determine a held capsule's provenance MUST answer that, and MUST NOT return a `known` page — a page
+whose withheld rows are silently absent asserts, via `complete`, a completeness the node knows it does
+not have. `provenance_unknown` is the only reason of the four that is not an infrastructure failure,
+and it exists so that this limitation is REPORTABLE: without it a provenance-blind node has no
+conforming answer at all, and `withheld` would be a state a conformance list could tick while no
+surface could ever emit it.
 
 **"No bond" and "cannot tell" are answers at DIFFERENT levels.** Every per-row state is a definite
 statement. A node that cannot enumerate its bonds, cannot read chain, or cannot read its own in-flight
-creates MUST answer `{state:"unknown", reason}` for the WHOLE call — `served_set_unknown`,
-`chain_unreadable` or `in_flight_unknown` — and MUST NOT degrade individual rows or return a shorter
+creates, or cannot determine the provenance of what it holds, MUST answer `{state:"unknown", reason}`
+for the WHOLE call — `served_set_unknown`, `chain_unreadable`, `in_flight_unknown` or
+`provenance_unknown` — and MUST NOT degrade individual rows or return a shorter
 list. There is deliberately no per-row unknown: a truncated list and a complete one read the same, and
 the rows a broken read would drop are exactly the bonds nobody is then watching. `entries: []` with
 `complete: true` is an ANSWER — this node holds no mirror bonds — and MUST NOT be returned for a fact
@@ -1136,7 +1144,14 @@ sum the page instead.** A page sum under-reports the locked total by exactly one
 shows unspendable money as available. It is the figure a locked-total surface reads.
 
 **The read is PAGED and says so.** Rows come in ascending `(store_id, root)`, an order an
-implementation MUST keep stable across the pages of one walk. `complete` states whether the page is the
+implementation MUST keep stable across the pages of one walk. Both halves of the key are LOWERCASE
+64-hex characters, unprefixed, on the wire and in `after`; the order is defined over that canonical
+spelling, because uppercase and lowercase hex order differently as strings and two producers spelling
+it differently would disagree about what `after` names. A `0x` prefix is TOLERATED on input to `after`
+and normalized away; it is never emitted. Any other spelling of either half of `after` MUST be REFUSED
+as `-32602 INVALID_PARAMS` and MUST NOT be treated as an absent cursor: a `0x`-prefixed key sorts
+before every canonical one, so a node that ignored it would silently RESTART the walk while appearing
+to resume, and a repeated page inflates a total a client is accumulating. `complete` states whether the page is the
 whole set and MUST NOT be inferred from the page's length. `cursor` is the key of the LAST row actually
 handed back, or `null` for an empty page; both keys are REQUIRED on the wire and a reader MUST reject a
 payload missing either rather than defaulting it. `after` means *strictly after this key in that

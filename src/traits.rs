@@ -571,16 +571,22 @@ pub trait ControlHandler: Sync {
     ///   [`Withheld`](results::MirrorBondState::Withheld) means a capsule this node holds with
     ///   `Relayed` provenance, which is by construction absent from the `Held` set; a derivation
     ///   keyed on `Held` alone can never emit it and silently answers "no such row" where the
-    ///   contract promises "withheld on purpose".
+    ///   contract promises "withheld on purpose". An implementation that CANNOT see provenance MUST
+    ///   answer
+    ///   [`ProvenanceUnknown`](results::MirrorBondStatesUnknownReason::ProvenanceUnknown) for the
+    ///   whole call and MUST NOT return a `known` page — a page with its withheld rows silently
+    ///   missing claims a completeness the node knows it lacks.
     /// - **Answer [`Unknown`](results::MirrorBondStatesResult::Unknown) for the WHOLE call** when it
-    ///   cannot enumerate its bonds, cannot read chain, or cannot read its own in-flight creates.
+    ///   cannot enumerate its bonds, cannot read chain, cannot read its own in-flight creates, or
+    ///   cannot determine provenance.
     ///   There is no per-row unknown and no empty-list fallback: `entries: []` with
     ///   `complete: true` asserts this node holds no bonds, and a partial list read as a complete
     ///   one hides exactly the bonds nobody is watching.
     /// - **Compute `locked_dig_base_units` over the WHOLE set, including reclaiming coins**, and
     ///   never over the page. A reclaim in flight still locks its money.
     /// - **Order rows by ascending `(store_id, root)` and keep that order stable across the pages of
-    ///   one walk**, since `after` means *strictly after this key in that order*. Set `complete`
+    ///   one walk**, over the LOWERCASE unprefixed hex spelling of both halves, since `after` means
+    ///   *strictly after this key in that order* and uppercase hex sorts elsewhere. Set `complete`
     ///   explicitly, and set `cursor` to the key of the LAST row actually handed back (`null` for an
     ///   empty page) — never to a position the node "got to".
     async fn mirror_bond_states(

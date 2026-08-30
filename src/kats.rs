@@ -5502,3 +5502,161 @@ fn bond_states_request_wire_vector_is_pinned() {
         }),
     );
 }
+
+/// **A provenance-blind producer has a CONFORMING answer, and it is not a silently-short page.**
+///
+/// `withheld` means a held capsule with `Relayed` provenance, which is by construction absent from
+/// a node's desired-bond (`Held`) set. A producer keyed on that set enumerates its pairs perfectly
+/// well, so none of the three infrastructure reasons fits it — and without a fourth reason its only
+/// conforming-LOOKING move is a `known` page with `complete: true` and every withheld row missing.
+/// That page asserts a completeness the node knows it lacks, and it makes `withheld` a state a
+/// conformance list can tick while no surface can ever emit it.
+///
+/// The fixture is built against exactly that nearest wrong implementation: the truthful answer
+/// CONTAINS a withheld row, so the short page and the sanctioned refusal are two observably
+/// different answers about the same node rather than two spellings of one.
+#[test]
+fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
+    // What a node that CAN see provenance would answer about this set.
+    let truthful = json!({
+        "state": "known",
+        "entries": [
+            {"store_id": STORE, "root": ROOT, "bond_state": "bonded",
+             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64},
+            {"store_id": STORE, "root": BOND_ROOT_B, "bond_state": "withheld"},
+        ],
+        "complete": true,
+        "cursor": {"store_id": STORE, "root": BOND_ROOT_B},
+        "locked_dig_base_units": 1_047u64,
+        "epoch": 7u64,
+    });
+    assert_result_round_trips::<results::MirrorBondStatesResult>(truthful);
+
+    // The sanctioned answer for a node that cannot see provenance. A golden vector, because this
+    // token is what dig-app renders and what the node must emit.
+    let sanctioned = json!({"state": "unknown", "reason": "provenance_unknown"});
+    assert_result_round_trips::<results::MirrorBondStatesResult>(sanctioned.clone());
+    let parsed: results::MirrorBondStatesResult = serde_json::from_value(sanctioned).unwrap();
+    assert_eq!(
+        parsed,
+        results::MirrorBondStatesResult::Unknown {
+            reason: results::MirrorBondStatesUnknownReason::ProvenanceUnknown,
+        },
+        "a provenance-blind node's answer must be the WHOLE-call refusal, never a page"
+    );
+
+    // It is a REASON IN ITS OWN RIGHT, not an alias of the enumerate-failure. Binding it to
+    // `served_set_unknown` would tell an operator the node cannot list its bonds, which is false
+    // and sends them looking in the wrong place.
+    assert_ne!(
+        results::MirrorBondStatesUnknownReason::ProvenanceUnknown.as_wire(),
+        results::MirrorBondStatesUnknownReason::ServedSetUnknown.as_wire()
+    );
+    assert!(
+        results::MirrorBondStatesUnknownReason::ALL
+            .contains(&results::MirrorBondStatesUnknownReason::ProvenanceUnknown),
+        "a reason a producer must be able to emit has to be enumerable by a renderer"
+    );
+    // The `as_wire` token and the serde token are the SAME string, read back off the wire rather
+    // than off a second list that could agree with itself.
+    let encoded = serde_json::to_value(results::MirrorBondStatesResult::Unknown {
+        reason: results::MirrorBondStatesUnknownReason::ProvenanceUnknown,
+    })
+    .unwrap();
+    assert_eq!(
+        encoded["reason"],
+        json!(results::MirrorBondStatesUnknownReason::ProvenanceUnknown.as_wire())
+    );
+
+    // And the forbidden alternative is a DIFFERENT observable answer, not a variant spelling of
+    // this one: it decodes as `known`, claims completeness, and is one row short of the truth.
+    let short_page = json!({
+        "state": "known",
+        "entries": [
+            {"store_id": STORE, "root": ROOT, "bond_state": "bonded",
+             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64},
+        ],
+        "complete": true,
+        "cursor": {"store_id": STORE, "root": ROOT},
+        "locked_dig_base_units": 1_047u64,
+        "epoch": 7u64,
+    });
+    let short: results::MirrorBondStatesResult = serde_json::from_value(short_page).unwrap();
+    assert_ne!(short, parsed);
+    let results::MirrorBondStatesResult::Known {
+        entries, complete, ..
+    } = &short
+    else {
+        panic!("the forbidden alternative is a `known` page by construction")
+    };
+    assert!(
+        *complete && entries.len() == 1,
+        "the failure this reason removes is a complete-looking page missing its withheld rows"
+    );
+}
+
+/// **A malformed resume cursor is REFUSED, never read as "start from the beginning".**
+///
+/// The order is ascending over the key's STRING form, so a `0x`-prefixed key sorts before every
+/// canonical one: a node that dropped it would restart the walk while looking like it resumed, and
+/// a repeated page inflates the locked-$DIG total a client accumulates across a walk — wrong in the
+/// reassuring direction and indistinguishable from a correct answer. So `0x` is NORMALIZED (callers
+/// hand-copy ids out of block explorers) and everything else is refused, matching
+/// `WalletCoinsParams::validated` rather than inventing a second convention.
+#[test]
+fn a_malformed_bond_cursor_is_refused_rather_than_restarting_the_walk() {
+    let key = |store: &str, root: &str| results::MirrorBondKey {
+        store_id: store.into(),
+        root: root.into(),
+    };
+    let with = |k: results::MirrorBondKey| MirrorBondStatesParams {
+        after: Some(k),
+        ..MirrorBondStatesParams::default()
+    };
+
+    // The well-formed control: a canonical key passes and is handed back UNCHANGED.
+    let canonical = with(key(STORE, ROOT)).validated().expect("canonical key");
+    assert_eq!(canonical.after, Some(key(STORE, ROOT)));
+
+    // `0x` is tolerated on input and normalized away; it is never emitted.
+    let prefixed = with(key(&format!("0x{STORE}"), &format!("0x{ROOT}")))
+        .validated()
+        .expect("a 0x-prefixed key is tolerated");
+    assert_eq!(prefixed.after, Some(key(STORE, ROOT)));
+    assert_eq!(
+        serde_json::to_value(&prefixed).unwrap()["after"],
+        json!({"store_id": STORE, "root": ROOT}),
+        "the normalized form is what goes back on the wire"
+    );
+
+    // Every other spelling is refused — and refused in EITHER half, so a good store id cannot
+    // launder a bad root past the check.
+    let uppercase = STORE.to_ascii_uppercase();
+    let short = &STORE[1..];
+    let long = format!("{STORE}a");
+    let non_hex = "z".repeat(64);
+    let bad: [&str; 6] = [&uppercase, short, &long, &non_hex, "", "0xnothex"];
+    for spelling in bad {
+        for candidate in [key(spelling, ROOT), key(STORE, spelling)] {
+            let err = with(candidate.clone())
+                .validated()
+                .expect_err("a malformed cursor must be refused");
+            assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+
+            // Enforced on the way IN, so a node cannot forget to call `validated`...
+            let wire = json!({"after": {
+                "store_id": candidate.store_id, "root": candidate.root
+            }});
+            let decoded = serde_json::from_value::<MirrorBondStatesParams>(wire);
+            assert!(
+                decoded.is_err(),
+                "a malformed cursor must not decode into a request at all"
+            );
+            // ...and REFUSED, never coerced to `None`, which would silently restart the walk.
+            assert!(
+                decoded.map(|p| p.after).unwrap_or(None).is_none(),
+                "an unparseable cursor must never become start-of-set"
+            );
+        }
+    }
+}
