@@ -132,6 +132,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.collateral.margin.get` | yes | owned | — | `{margin_bp:u64}` |
 | `control.collateral.margin.set` | yes | owned | `{margin_bp:u64}` | `{margin_bp:u64}` |
 | `control.collateral.buffer` | yes | owned | — | `CollateralBufferResult` (`{state:"known", epoch, protocol_version, funding_state, recommended_buffer_dig_base_units, spendable_dig_base_units, pairs_served_by_this_node, required_per_store_dig_base_units, margin_bp, overlap_dig_base_units, escalation_headroom_dig_base_units, horizon_epochs, escalation_ceiling_micros}` \| `{state:"unknown", reason}`) |
+| `control.mirror.bondStates` | yes | owned | `{after?:{store_id,root}, limit?:u32}` | `MirrorBondStatesResult` (`{state:"known", entries:[{store_id, root, bond_state, …}], complete, cursor, locked_dig_base_units, epoch}` \| `{state:"unknown", reason}`) |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -1075,6 +1076,78 @@ is NOT an open read (§4.2) and NOT a master-token method (§2.1).
 
 **Nothing on this contract claims a margin guarantees inclusion.** The requirement is re-derived every
 epoch and can rise by more than any margin chosen.
+
+### 4.2g The per-`(store, root)` mirror bond state (`control.mirror.bondStates`)
+
+`control.mirror.bondStates` states, for every mirror bond this node holds, whether it is bonded and —
+when it is not — WHY, together with the $DIG those bonds have locked. It is the surface dig-node
+`SPEC.md` §25.8 requires, and it is served over the control plane before the node adopts it
+(release-first).
+
+**Its whole purpose is that "no coin yet" is never one answer.** Six of the seven states mean there is
+no current-epoch coin, and each calls for a different response from a person. A client MUST NOT
+collapse any two of them; conflating "out of funds" with "withheld on purpose" produces hourly funding
+alarms about a perfectly healthy node, which is the defect this method exists to remove.
+
+| `bond_state` | payload | means | remedy |
+| --- | --- | --- | --- |
+| `bonded` | `coin_id`, `epoch`, `amount_dig_base_units` | a coin for this pair and epoch is on chain | none |
+| `pending` | — | a create is submitted and unconfirmed | wait |
+| `unfunded` | `short_dig_base_units` | the wallet cannot cover this create | add $DIG |
+| `deferred` | `reason` | the epoch requirement is unknown, so no create can be PRICED | none; the wallet may be full |
+| `withheld` | — | the capsule has `Relayed` provenance: held, deliberately never advertised | none |
+| `disabled` | — | collateralisation is switched OFF for this node | the operator's own switch |
+| `reclaiming` | `coin_id`, `epoch`, `amount_dig_base_units` | a live coin is being reclaimed; the money is STILL LOCKED | wait |
+
+**`unfunded` is the ONLY state a client may raise a funding alarm on.** `deferred` in particular is not
+one: the node does not know the price, and an operator sending money in response changes nothing.
+
+**`withheld`, `disabled` and `reclaiming` are three different states and this specification names them
+apart deliberately.** dig-node's internal `BondState` used `Withheld` for the node-wide switch, while
+dig-node `SPEC.md` §25.8 used the same word for `Relayed` provenance. They differ in SCOPE — one switch
+for the node, versus one capsule's provenance — and in REMEDY, so an implementation MUST NOT serve one
+under the other's name. In this contract `withheld` carries §25.8's meaning, `disabled` is the switch,
+and `reclaiming` is §25.8's seventh state, which `BondState` had no variant for even though its money
+is still locked. Consequently dig-node MUST rename `BondState::Withheld` to `Disabled` and add
+`Withheld` and `Reclaiming`, and dig-node `SPEC.md` §25.8 MUST gain `disabled`.
+
+**A node that enumerates only its desired-bond set can never emit `withheld`.** A `Relayed` capsule is
+by construction absent from the `Held` set, so such an implementation answers "no such row" where this
+contract promises "withheld on purpose". An implementation MUST enumerate the SERVED set, and one that
+cannot MUST say so rather than report the state as satisfied.
+
+**"No bond" and "cannot tell" are answers at DIFFERENT levels.** Every per-row state is a definite
+statement. A node that cannot enumerate its bonds, cannot read chain, or cannot read its own in-flight
+creates MUST answer `{state:"unknown", reason}` for the WHOLE call — `served_set_unknown`,
+`chain_unreadable` or `in_flight_unknown` — and MUST NOT degrade individual rows or return a shorter
+list. There is deliberately no per-row unknown: a truncated list and a complete one read the same, and
+the rows a broken read would drop are exactly the bonds nobody is then watching. `entries: []` with
+`complete: true` is an ANSWER — this node holds no mirror bonds — and MUST NOT be returned for a fact
+the node could not read. The epoch requirement being unknown is NOT one of these reasons; it is the
+definite per-row state `deferred`.
+
+**All amounts are in DIG BASE UNITS**, `$DIG` carrying 3 decimals so one base unit is `0.001 DIG`. They
+are NOT mojos — a mojo is XCH's base unit at `1e-12` XCH, nine orders of magnitude away. A `bonded` or
+`reclaiming` amount MUST be read FROM THE COIN and never from this epoch's requirement: a coin created
+under a previous requirement locks the previous amount.
+
+**`locked_dig_base_units` covers the WHOLE bond set, including reclaiming coins, and a client MUST NOT
+sum the page instead.** A page sum under-reports the locked total by exactly one page boundary and
+shows unspendable money as available. It is the figure a locked-total surface reads.
+
+**The read is PAGED and says so.** Rows come in ascending `(store_id, root)`, an order an
+implementation MUST keep stable across the pages of one walk. `complete` states whether the page is the
+whole set and MUST NOT be inferred from the page's length. `cursor` is the key of the LAST row actually
+handed back, or `null` for an empty page; both keys are REQUIRED on the wire and a reader MUST reject a
+payload missing either rather than defaulting it. `after` means *strictly after this key in that
+order*, and it names BOTH halves of the key: resuming by `store_id` alone would drop every remaining
+root of the store the boundary fell inside. `limit` is bounded by `MIRROR_BOND_STATES_MAX_LIMIT` and an
+out-of-range value is REFUSED as `-32602 INVALID_PARAMS` rather than clamped, so the caller's model of
+the page and the node's stay identical.
+
+**The read is TOKEN-GATED although it is a read.** The caller supplies nothing, so the answer is this
+node's own bond set and funding position — an association, not a relayed public fact. It is NOT an open
+read (§4.2) and NOT a master-token method (§2.1).
 
 ### 4.3 The custody boundary (§908)
 
