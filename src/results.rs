@@ -780,10 +780,53 @@ pub struct WalletCoinRecord {
 /// `WalletReadFailed` / `WalletRateLimited`). The distinction is the whole point of the method —
 /// a well-shaped empty result on an unreachable chain would tell somebody who holds funds that they
 /// hold nothing, and a spend built on that answer refuses with a shortfall that is not true.
+///
+/// # The order is part of the contract, because paging is meaningless without one
+///
+/// A node MUST return coins in ASCENDING `coin_id` order and MUST keep that order stable across the
+/// pages of one walk;
+/// [`after_coin_id`](crate::params::WalletCoinsParams::after_coin_id) means *strictly after this id
+/// in that order*. Coin ids are fixed-length lowercase hex, so ascending lexicographic order and
+/// ascending 32-byte numeric order are the SAME order and cannot disagree.
+///
+/// The order is what makes the boundary survive a CHANGING coin set, which is the case that matters
+/// here and does not arise for `coinsByParent`: a spent coin drops out of an address's unspent set
+/// between two pages. Against a cursor, the rows before the boundary are simply gone and every row
+/// after it still follows the cursor. Against an OFFSET, every remaining row shifts one position
+/// earlier and the next page silently begins one row late — a coin the caller never sees, which on
+/// this read means funds it cannot spend and a spend that refuses with an untrue shortfall.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletCoinsResult {
-    /// The spendable coins found at the address, possibly empty (see the type docs).
+    /// One page of the address's spendable coins, ascending by `coin_id`, possibly empty (see the
+    /// type docs). NOT necessarily the whole set — see [`complete`](Self::complete).
     pub coins: Vec<WalletCoinRecord>,
+    /// Is this page the WHOLE unspent set at this address for this asset?
+    ///
+    /// `Some(true)` means every coin the node knows of is in [`coins`](Self::coins). `Some(false)`
+    /// means the answer was TRUNCATED and more coins exist — resume from [`cursor`](Self::cursor).
+    ///
+    /// A node MUST derive this from whether rows remain BEYOND the page, never from whether the page
+    /// filled. The two differ exactly when the coin count is a multiple of the page size, where the
+    /// length-based reading declares a truncated page whole — so a caller summing a balance or
+    /// selecting coins for a spend stops early on a set it believes it saw all of.
+    ///
+    /// `None` means a node too old to disclose it (pre-0.25), which served this read UNPAGED and
+    /// whose answer is therefore the whole set already. It is distinct from `Some(false)` on
+    /// purpose: such a node also ignores `after_coin_id`, so a caller that read `None` as
+    /// "truncated" and resumed would be re-served page one forever.
+    #[serde(default)]
+    pub complete: Option<bool>,
+    /// The last coin in this page — **the value to resume from** — or `null` for an empty page, and
+    /// from a pre-0.25 node that never paged at all.
+    ///
+    /// It is the id the caller was HANDED, never a marker for where the chain got to. Pass it as
+    /// [`after_coin_id`](crate::params::WalletCoinsParams::after_coin_id) to fetch the next page.
+    ///
+    /// Unlike its `coinsByParent` twin the key is OMITTABLE, because this method predates paging and
+    /// an older node emits no such key. [`complete`](Self::complete) is what carries the
+    /// old-node case, and reading this field without it is what the doc above warns against.
+    #[serde(default)]
+    pub cursor: Option<String>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
     /// Whether THESE coins reflect a caught-up local view; always `false` for a fallback answer.

@@ -49,6 +49,17 @@ const CHILD_COINS: [&str; 4] = [
     "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
 ];
 
+/// The UNSPENT coins the mock node holds at one address, ASCENDING by coin id (dig-node#381).
+///
+/// FOUR of them for the reason [`CHILD_COINS`] is four, and every id DISTINCT from that set so a
+/// dispatch arm wired to `control.wallet.coinsByParent` cannot land here and look like a hit.
+const ADDRESS_COINS: [&str; 4] = [
+    "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+    "7070707070707070707070707070707070707070707070707070707070707070",
+    "8181818181818181818181818181818181818181818181818181818181818181",
+];
+
 /// The two halves of a spend, given DIFFERENT values so a serialization that transposed the fields
 /// cannot pass. Short stand-ins for serialized CLVM — the contract fixes the encoding (lowercase hex)
 /// and not the programs, which belong to whatever puzzle was actually revealed.
@@ -164,10 +175,7 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.balance","params":{"address":"xch1exampleaddr","asset":"dig"}}),
     );
     assert_request(
-        &WalletCoinsParams {
-            address: "xch1exampleaddr".into(),
-            asset: Asset::Xch,
-        },
+        &WalletCoinsParams::first_page("xch1exampleaddr", Asset::Xch),
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coins","params":{"address":"xch1exampleaddr","asset":"xch"}}),
     );
     // The two vectors above are the ORIGINAL frozen bytes and stay untouched: $DIG and XCH keep
@@ -181,10 +189,10 @@ fn golden_request_vectors() {
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.balance","params":{"address":"xch1exampleaddr","asset":{"cat":"3c".repeat(32)}}}),
     );
     assert_request(
-        &WalletCoinsParams {
-            address: "xch1exampleaddr".into(),
-            asset: Asset::Cat(AssetId::from_hex(&"3c".repeat(32)).unwrap()),
-        },
+        &WalletCoinsParams::first_page(
+            "xch1exampleaddr",
+            Asset::Cat(AssetId::from_hex(&"3c".repeat(32)).unwrap()),
+        ),
         json!({"jsonrpc":"2.0","id":1,"method":"control.wallet.coins","params":{"address":"xch1exampleaddr","asset":{"cat":"3c".repeat(32)}}}),
     );
     assert_request(
@@ -296,12 +304,14 @@ fn golden_response_result_vectors_are_byte_stable() {
             "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
             "created_height": 5_000_000u32, "spent_height": null
         }],
+        "complete": true, "cursor": "aa".repeat(32),
         "source": "db", "synced": true, "peak_height": 5_000_000u32
     }));
     // A chain that was consulted and holds nothing. It must be expressible as a SUCCESS, because
     // that is the only shape that leaves "unreachable" free to be an error.
     assert_result_round_trips::<results::WalletCoinsResult>(json!({
-        "coins": [], "source": "fallback", "synced": false, "peak_height": null
+        "coins": [], "complete": true, "cursor": null,
+        "source": "fallback", "synced": false, "peak_height": null
     }));
     // `control.wallet.coinById` — the SPENT coin. No `.coins` vector can carry one: that method
     // answers with unspent coins only, which is exactly why observing a mint needs this method.
@@ -1292,26 +1302,45 @@ impl ControlHandler for MockNode {
             peak_height: Some(5_000_000),
         })
     }
-    /// Echoes the REQUEST into the coin so a mis-routed dispatch cannot look like a hit: the coin
-    /// id carries the address and the amount carries the asset.
+    /// Serves [`ADDRESS_COINS`] one PAGE at a time, by the contract's own rules, and echoes the
+    /// REQUEST into every record so a mis-routed dispatch cannot look like a hit: the puzzle hash
+    /// carries the address and the amount carries the asset.
+    ///
+    /// `complete` is derived from a row fetched BEYOND the page, never from the page's length —
+    /// the mock is deliberately the shape a conforming node must have, because a mock that got this
+    /// wrong would let a KAT asserting the distinction pass against a fixture that cannot show it.
     async fn wallet_coins(
         &self,
         params: WalletCoinsParams,
     ) -> Result<results::WalletCoinsResult, ControlError> {
-        Ok(results::WalletCoinsResult {
-            coins: vec![results::WalletCoinRecord {
-                coin_id: params.address,
+        let amount = match params.asset {
+            Asset::Xch => 1,
+            a if a.is_dig() => 2,
+            Asset::Cat(_) => 3,
+        };
+        let remaining = ADDRESS_COINS
+            .iter()
+            .skip_while(|id| params.after_coin_id.as_deref().is_some_and(|a| **id <= a));
+        let limit = params.effective_limit() as usize;
+        let page: Vec<&str> = remaining.take(limit + 1).copied().collect();
+        let complete = page.len() <= limit;
+        let coins: Vec<results::WalletCoinRecord> = page
+            .into_iter()
+            .take(limit)
+            .map(|coin_id| results::WalletCoinRecord {
+                coin_id: coin_id.into(),
                 asset: Some(params.asset),
-                amount: match params.asset {
-                    Asset::Xch => 1,
-                    a if a.is_dig() => 2,
-                    Asset::Cat(_) => 3,
-                },
+                amount,
                 parent_coin_info: "11".repeat(32),
-                puzzle_hash: "22".repeat(32),
+                puzzle_hash: params.address.clone(),
                 created_height: Some(5_000_000),
                 spent_height: None,
-            }],
+            })
+            .collect();
+        Ok(results::WalletCoinsResult {
+            cursor: coins.last().map(|c| c.coin_id.clone()),
+            coins,
+            complete: Some(complete),
             source: Some(results::WalletReadSource::Db),
             synced: true,
             peak_height: Some(5_000_000),
@@ -2364,12 +2393,12 @@ fn minimal_params(m: ControlMethod) -> Value {
 /// rather than passing on a shape both happen to share.
 #[test]
 fn the_dispatcher_routes_each_wallet_chain_method_to_its_own_handler() {
-    let coins = round_trip(&WalletCoinsParams {
-        address: "xch1mintfunder".into(),
-        asset: Asset::DIG,
-    })
-    .expect("coins must route");
-    assert_eq!(coins.coins[0].coin_id, "xch1mintfunder");
+    let coins = round_trip(&WalletCoinsParams::first_page("xch1mintfunder", Asset::DIG))
+        .expect("coins must route");
+    assert_eq!(
+        coins.coins[0].puzzle_hash, "xch1mintfunder",
+        "the record echoes the ADDRESS it was asked for, so a mis-routed dispatch cannot pass"
+    );
     assert_eq!(
         coins.coins[0].asset,
         Some(Asset::DIG),
@@ -2712,6 +2741,168 @@ fn wallet_coins_by_parent_params_enforce_the_coin_id_rule_on_their_own_field() {
     );
 }
 
+/// **The coin read's truncated page and its final page carry the SAME number of rows.**
+///
+/// Four coins read two at a time, so both pages hold exactly two records and only one of them is
+/// the last. Every length-based inference — `coins.len() < limit`, `coins.is_empty()`, "a full page
+/// means more" — gives the same answer for both, so this is the fixture that makes `complete`
+/// load-bearing rather than decorative on THIS read.
+///
+/// The dangerous direction is asserted first, and it is worse here than on `coinsByParent`: reading
+/// page one as complete presents a partial coin set as the whole one, and a spend selected from it
+/// refuses with a shortfall that is not true while the funds are sitting in the coins that were
+/// withheld.
+#[test]
+fn the_coin_page_and_the_final_page_are_told_apart_by_complete_not_by_length() {
+    let first = round_trip(&WalletCoinsParams {
+        address: "xch1funded".into(),
+        asset: Asset::DIG,
+        after_coin_id: None,
+        limit: Some(2),
+    })
+    .expect("a bounded first page must route");
+
+    assert_eq!(first.coins.len(), 2);
+    assert_eq!(
+        first.complete,
+        Some(false),
+        "two of four coins were withheld -- reporting this page as complete presents a partial \
+         coin set as the whole one"
+    );
+    assert_eq!(
+        first.cursor.as_deref(),
+        Some(ADDRESS_COINS[1]),
+        "the cursor is the last coin actually HANDED over, never a chain-head marker"
+    );
+
+    let second = round_trip(&WalletCoinsParams {
+        address: "xch1funded".into(),
+        asset: Asset::DIG,
+        after_coin_id: first.cursor.clone(),
+        limit: Some(2),
+    })
+    .expect("resuming from the handed-back cursor must route");
+
+    assert_eq!(
+        second.coins.len(),
+        first.coins.len(),
+        "both pages carry the same row count -- which is exactly why length cannot decide \
+         completeness"
+    );
+    assert_eq!(
+        second.complete,
+        Some(true),
+        "the last two coins fit, so this page IS the end of the set"
+    );
+
+    // Nothing repeated, nothing skipped, ascending -- so a handler that ignored `after_coin_id`
+    // and re-served page one fails HERE rather than passing on a shape both pages share.
+    let walked: Vec<&str> = first
+        .coins
+        .iter()
+        .chain(second.coins.iter())
+        .map(|c| c.coin_id.as_str())
+        .collect();
+    assert_eq!(walked, ADDRESS_COINS.to_vec());
+}
+
+/// **The coin read's page bound is refused out of range, and pinned from BOTH sides.**
+///
+/// A bound tested only from below can only confirm itself, so the at-maximum case MUST be accepted
+/// and the one-over case MUST be refused. Zero is refused for a different reason than "too large":
+/// a page that can hold nothing makes no progress, so a caller looping until a short page arrives
+/// would loop forever.
+#[test]
+fn the_coin_page_bound_is_refused_out_of_range_rather_than_clamped() {
+    let at_max = serde_json::from_value::<WalletCoinsParams>(json!({
+        "address": "xch1funded", "asset": "xch", "limit": COINS_MAX_LIMIT
+    }))
+    .expect("the documented maximum must be ACCEPTED, or the constant is not the real bound");
+    assert_eq!(at_max.effective_limit(), COINS_MAX_LIMIT);
+
+    for over in [COINS_MAX_LIMIT + 1, u32::MAX, 0] {
+        let wire = json!({"address": "xch1funded", "asset": "xch", "limit": over});
+        assert!(
+            serde_json::from_value::<WalletCoinsParams>(wire).is_err(),
+            "limit {over} must be REFUSED, never clamped: a silently shrunk page hands back a \
+             cursor for a position the caller never asked about"
+        );
+        assert!(WalletCoinsParams {
+            address: "xch1funded".into(),
+            asset: Asset::Xch,
+            after_coin_id: None,
+            limit: Some(over),
+        }
+        .validated()
+        .is_err());
+    }
+
+    // An omitted limit resolves in ONE place, so a node and a client cannot page to two different
+    // boundaries.
+    assert_eq!(
+        WalletCoinsParams::first_page("xch1funded", Asset::Xch).effective_limit(),
+        COINS_DEFAULT_LIMIT
+    );
+
+    // A cursor is held to the same id rule every by-coin read uses, at BOTH seams.
+    assert!(serde_json::from_value::<WalletCoinsParams>(
+        json!({"address": "xch1funded", "asset": "xch", "after_coin_id": "AB".repeat(32)})
+    )
+    .is_err());
+    let prefixed = serde_json::from_value::<WalletCoinsParams>(
+        json!({"address": "xch1funded", "asset": "xch", "after_coin_id": format!("0x{}", "ab".repeat(32))}),
+    )
+    .expect("an 0x-prefixed cursor is tolerated on input");
+    assert_eq!(prefixed.after_coin_id.as_deref(), Some(&*"ab".repeat(32)));
+}
+
+/// **A pre-0.25 node's UNPAGED answer decodes, and is distinguishable from a truncated page.**
+///
+/// `control.wallet.coins` shipped before it was paged, so an older node emits neither key. This is
+/// the one place the two absent-field readings differ in consequence, and the safe one is not the
+/// one serde would pick by itself:
+///
+/// * as `Some(false)` — "truncated, resume from the cursor" — a caller resumes from a `null` cursor,
+///   is re-served page one by a node that ignores `after_coin_id`, and walks forever;
+/// * as `None` — "this node does not page, so this IS everything" — which is the truth about such a
+///   node's answer.
+///
+/// A new node NEVER emits `None`, so the two cases can never be confused in the other direction.
+#[test]
+fn an_unpaged_answer_from_an_older_node_is_not_read_as_a_truncated_page() {
+    let legacy = serde_json::from_value::<results::WalletCoinsResult>(json!({
+        "coins": [{
+            "coin_id": "aa".repeat(32), "asset": "xch", "amount": 1_750_000_000_000u64,
+            "parent_coin_info": "bb".repeat(32), "puzzle_hash": "cc".repeat(32),
+            "created_height": 5_000_000u32, "spent_height": null
+        }],
+        "source": "db", "synced": true, "peak_height": 5_000_000u32
+    }))
+    .expect("a pre-0.25 node's answer must still decode");
+    assert_eq!(
+        legacy.complete, None,
+        "an absent `complete` is UNDISCLOSED -- reading it as `Some(false)` sends a caller \
+         resuming into a node that never paged"
+    );
+    assert_eq!(legacy.cursor, None);
+    assert_eq!(legacy.coins.len(), 1, "the coins themselves still decode");
+
+    // ...and a node that DOES page says so explicitly, so the two are told apart by value and not
+    // by convention.
+    let truncated = round_trip(&WalletCoinsParams {
+        address: "xch1funded".into(),
+        asset: Asset::DIG,
+        after_coin_id: None,
+        limit: Some(2),
+    })
+    .expect("a paged first page must route");
+    assert_eq!(truncated.complete, Some(false));
+    assert_ne!(
+        truncated.complete, legacy.complete,
+        "undisclosed and truncated MUST NOT be the same value"
+    );
+}
+
 /// **A truncated page and a final page can carry the SAME number of rows.**
 ///
 /// The fixture is four children read two at a time, so both pages hold exactly two records and only
@@ -2971,6 +3162,8 @@ fn dig_apps_frozen_engine_shapes_deserialize_our_wallet_results() {
             created_height: Some(5_000_000),
             spent_height: None,
         }],
+        complete: Some(true),
+        cursor: Some("aa".repeat(32)),
         source: Some(results::WalletReadSource::Db),
         synced: true,
         peak_height: Some(5_000_000),
@@ -3026,6 +3219,8 @@ fn dig_apps_frozen_coin_shape_rejects_null_asset_in_wallet_coins() {
             created_height: Some(5_000_000),
             spent_height: None,
         }],
+        complete: Some(true),
+        cursor: Some("aa".repeat(32)),
         source: Some(results::WalletReadSource::Db),
         synced: true,
         peak_height: Some(5_000_000),

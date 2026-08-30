@@ -113,7 +113,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.unsubscribe` | yes | delegated | `{store_id:string}` | `{subscribed, removed, store_id}` |
 | `control.listSubscriptions` | yes | delegated | — | `{subscriptions:[string], count}` |
 | `control.wallet.balance` | no | delegated | `{address:string, asset:Asset}` | `{balance, pending, source, synced, peak_height}` |
-| `control.wallet.coins` | no | delegated | `{address:string, asset:Asset}` | `WalletCoinsResult` |
+| `control.wallet.coins` | no | delegated | `{address:string, asset:Asset, after_coin_id?:string, limit?:u32}` | `WalletCoinsResult` |
 | `control.wallet.coinById` | no | delegated | `{coin_id:string}` | `WalletCoinByIdResult` |
 | `control.wallet.coinSpend` | no | delegated | `{coin_id:string}` | `WalletCoinSpendResult` |
 | `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string, after_coin_id?:string, limit?:u32}` | `WalletCoinsByParentResult` |
@@ -238,10 +238,43 @@ opposite remedies — see §4.2.
   Consumers MUST model this as a two-case type — native XCH, or a CAT identified by asset id — with
   $DIG a named constant of the CAT case rather than a third case.
 
-- **`WalletCoinsResult`**: `{coins:[WalletCoinRecord], source:"db"|"fallback"|null, synced:bool,
-  peak_height:u32|null}`. `source`/`synced`/`peak_height` carry exactly the meanings defined for
-  `WalletBalanceResult` below. `coins` MUST list the address's spendable coins for the requested
-  asset (XCH coins sit AT the puzzle hash; CAT coins are HINTED to it).
+- **`WalletCoinsResult`**: `{coins:[WalletCoinRecord], complete:bool|null, cursor:string|null,
+  source:"db"|"fallback"|null, synced:bool, peak_height:u32|null}`.
+  `source`/`synced`/`peak_height` carry exactly the meanings defined for `WalletBalanceResult`
+  below. `coins` MUST list ONE PAGE of the address's spendable coins for the requested asset (XCH
+  coins sit AT the puzzle hash; CAT coins are HINTED to it).
+
+  The read is PAGED. A node MUST return coins in ASCENDING `coin_id` order and MUST keep that order
+  stable across the pages of one walk; `after_coin_id` means strictly after that id in that order.
+  A node MUST NOT page by OFFSET. An address's unspent set SHRINKS as coins are spent, so against an
+  offset every row after a departed coin moves one position earlier and the next page begins one row
+  late — a coin the caller never sees, on the read whose whole purpose is selecting coins for a
+  spend. Against a cursor the rows before the boundary are simply gone and every row after it still
+  follows the cursor.
+
+  `complete` MUST state whether the page carries the LAST coin, derived from whether rows remain
+  BEYOND the page. A node MUST NOT report `complete:true` on a page it truncated, and MUST NOT
+  derive it from the page LENGTH: a coin count that is an exact multiple of the page size makes the
+  final full page indistinguishable from a truncated one. A caller that stops early on that page
+  selects a spend from a coin set it believes it saw all of, and refuses with a shortfall that is
+  not true while the funds sit in the coins that were withheld.
+
+  `complete:null` MUST mean the node is too old to page this read (pre-0.25) and therefore returned
+  the WHOLE set. A caller MUST NOT read it as `false`: such a node also ignores `after_coin_id`, so
+  a caller that resumed would be re-served the first page indefinitely. A node that pages MUST emit
+  a concrete boolean, so the two are told apart by value and never by convention.
+
+  `cursor` MUST be the `coin_id` of the LAST record actually returned, `null` for an empty page, and
+  `null` from a node that does not page. A caller resumes by passing it as `after_coin_id`.
+
+  `limit` MUST be refused as `-32602 INVALID_PARAMS` outside `1..=1000` rather than clamped, for the
+  reason `control.wallet.coinsByParent` states: a silently shrunk page hands back a cursor for a
+  position the caller did not ask about. The bound is the same frame-derived ceiling, because both
+  reads page the same `WalletCoinRecord` over the same transport frame. An omitted `limit` MUST
+  resolve to 100.
+
+  Both paging parameters are OPTIONAL and a request naming neither MUST be byte-identical to the
+  pre-0.25 request, so adopting the paged form is additive on both sides of the wire.
 
   `coins:[]` MUST mean the node consulted a chain and the address holds nothing. A node that could
   NOT consult a chain MUST return the matching §5 wallet error instead — never an empty list. This
