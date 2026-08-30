@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.25.0] - 2026-08-30
+
+### Features
+- **wallet:** Paginate control.wallet.coins (#37)
+
 ## [0.24.0] - 2026-08-28
 
 ### Features
