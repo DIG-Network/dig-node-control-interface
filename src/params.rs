@@ -584,17 +584,51 @@ pub struct WalletBalanceParams {
 }
 control_call!(WalletBalanceParams => ControlMethod::WalletBalance, results::WalletBalanceResult);
 
-/// `control.wallet.coins` params: which address + asset to read spendable coins for.
+/// `control.wallet.coins` params: which address + asset to read spendable coins for, and which
+/// PAGE of them.
 ///
-/// Field-for-field identical to [`WalletBalanceParams`] — a balance is this read reduced to a sum —
-/// and byte-identical to dig-app's frozen `CoinsRequest`, so adopting the method is a body swap
-/// rather than a re-shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The address + asset pair is byte-identical to dig-app's frozen `CoinsRequest` and to
+/// [`WalletBalanceParams`] — a balance is this read reduced to a sum — so the paging fields are
+/// purely additive and a caller that names neither asks exactly what it asked before.
+///
+/// # Bounded, because an address's coin count is not (dig-node#381)
+///
+/// A funded address accumulates coins without limit, and every change coin a spend produces adds
+/// one. An unpaged read therefore has unbounded cardinality on the same loopback control plane that
+/// has NO request rate limiting of any kind (dig_ecosystem#2577) — the identical exposure
+/// [`WalletCoinsByParentParams`] documents at length, for the identical reason, and on the fallback
+/// tier the work lands on a third-party coinset oracle rather than on this node.
+///
+/// Paged rather than capped, for the reason its sibling records: a bare cap is a dead end, because
+/// an address holding more coins than the cap could never be fully enumerated, and this read exists
+/// so a caller can BUILD A SPEND from the coins it names. A spend built from a silently truncated
+/// coin set refuses with a shortfall that is not true.
+///
+/// # The paging rules are the sibling's rules, deliberately
+///
+/// ASCENDING `coin_id`, a cursor the caller was HANDED rather than an offset, and an out-of-range
+/// `limit` REFUSED rather than clamped. See [`WalletCoinsByParentParams`] for why each of those is
+/// the money-safe choice; a second set of paging semantics on the same plane would be a place for
+/// the two to disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WalletCoinsParams {
     /// The `xch1…` address to read coins for.
     pub address: String,
     /// The asset to read coins for.
     pub asset: Asset,
+    /// Resume STRICTLY AFTER this coin, in ascending `coin_id` order. `None` starts at the first.
+    ///
+    /// This is the value the previous page handed back as
+    /// [`cursor`](results::WalletCoinsResult::cursor) — never a value the caller invented, and never
+    /// a marker for where the chain got to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_coin_id: Option<String>,
+    /// The page size. `None` asks for [`COINS_DEFAULT_LIMIT`].
+    ///
+    /// A value above [`COINS_MAX_LIMIT`], or a zero, is REFUSED as `INVALID_PARAMS` rather than
+    /// clamped — see [`Self::validated`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 control_call!(WalletCoinsParams => ControlMethod::WalletCoins, results::WalletCoinsResult);
 
@@ -840,7 +874,119 @@ pub const COINS_BY_PARENT_DEFAULT_LIMIT: u32 = 100;
 /// answer is undeliverable — the failure would surface as a truncated frame, not as a refusal.
 pub const COINS_BY_PARENT_MAX_LIMIT: u32 = 1_000;
 
-const COINS_BY_PARENT_LIMIT_ERROR: &str = "limit must be between 1 and 1000";
+/// The page bound message BOTH paged coin reads refuse with.
+///
+/// Shared rather than duplicated: the two reads page the same record type over the same frame, so
+/// two copies of this sentence could only ever differ by drifting apart.
+const PAGE_LIMIT_ERROR: &str = "limit must be between 1 and 1000";
+
+/// The page size `control.wallet.coins` uses when the caller names none (dig-node#381).
+///
+/// Pinned TO its sibling rather than restated. Both reads page the same
+/// [`WalletCoinRecord`](results::WalletCoinRecord) over the same transport frame, so the derivation
+/// that fixes one fixes the other, and a second literal here would be a second thing to forget when
+/// the frame limit moves.
+pub const COINS_DEFAULT_LIMIT: u32 = COINS_BY_PARENT_DEFAULT_LIMIT;
+
+/// The largest page `control.wallet.coins` will accept — the same frame-derived ceiling
+/// [`COINS_BY_PARENT_MAX_LIMIT`] documents the arithmetic for, and pinned to it for the reason
+/// [`COINS_DEFAULT_LIMIT`] gives.
+pub const COINS_MAX_LIMIT: u32 = COINS_BY_PARENT_MAX_LIMIT;
+
+impl<'de> Deserialize<'de> for WalletCoinsParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawWalletCoinsParams {
+            address: String,
+            asset: Asset,
+            #[serde(default)]
+            after_coin_id: Option<String>,
+            #[serde(default)]
+            limit: Option<u32>,
+        }
+
+        let raw = RawWalletCoinsParams::deserialize(deserializer)?;
+        let after_coin_id = raw
+            .after_coin_id
+            .map(|id| {
+                normalize_coin_id(&id)
+                    .map(str::to_owned)
+                    .ok_or_else(|| serde::de::Error::custom(AFTER_COIN_ID_ERROR))
+            })
+            .transpose()?;
+        if !raw.limit.map_or(true, is_legal_page) {
+            return Err(serde::de::Error::custom(PAGE_LIMIT_ERROR));
+        }
+        Ok(Self {
+            address: raw.address,
+            asset: raw.asset,
+            after_coin_id,
+            limit: raw.limit,
+        })
+    }
+}
+
+impl WalletCoinsParams {
+    /// A first page of coins at one address for one asset: the node's default size, from the start.
+    ///
+    /// The common case, and the one a caller should not have to spell out — naming a page size means
+    /// asserting a number this caller invented over the one the contract chose.
+    pub fn first_page(address: impl Into<String>, asset: Asset) -> Self {
+        Self {
+            address: address.into(),
+            asset,
+            after_coin_id: None,
+            limit: None,
+        }
+    }
+
+    /// The page size this request asks for, resolving `None` to [`COINS_DEFAULT_LIMIT`].
+    ///
+    /// Stated once here so a node and a client cannot resolve the same omitted field to two
+    /// different numbers — a disagreement that shows up as a page boundary in the wrong place,
+    /// which is exactly where a paged walk loses rows. On a coin read a lost row is a coin the
+    /// caller cannot spend.
+    pub fn effective_limit(&self) -> u32 {
+        self.limit.unwrap_or(COINS_DEFAULT_LIMIT)
+    }
+
+    /// Normalize the cursor and check the page bound, or reject as `-32602 INVALID_PARAMS`.
+    ///
+    /// The address is NOT validated here: it is decoded by the node's own bech32m reader, which is
+    /// the only thing that can tell a well-formed address from a well-formed string, and this crate
+    /// has never claimed otherwise for [`WalletBalanceParams`] either.
+    ///
+    /// An out-of-range `limit` is REFUSED, never clamped, for the reason
+    /// [`WalletCoinsByParentParams::validated`] states: a silently shrunk page hands back a cursor
+    /// for a position the caller did not ask about.
+    pub fn validated(self) -> Result<Self, crate::error::ControlError> {
+        fn invalid(message: &'static str) -> crate::error::ControlError {
+            crate::error::ControlError::of(crate::error::ControlErrorCode::InvalidParams, message)
+        }
+
+        let after_coin_id = self
+            .after_coin_id
+            .as_deref()
+            .map(|id| {
+                normalize_coin_id(id)
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid(AFTER_COIN_ID_ERROR))
+            })
+            .transpose()?;
+        if !self.limit.map_or(true, is_legal_page) {
+            return Err(invalid(PAGE_LIMIT_ERROR));
+        }
+        Ok(WalletCoinsParams {
+            address: self.address,
+            asset: self.asset,
+            after_coin_id,
+            limit: self.limit,
+        })
+    }
+}
 
 impl<'de> Deserialize<'de> for WalletCoinsByParentParams {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -869,7 +1015,7 @@ impl<'de> Deserialize<'de> for WalletCoinsByParentParams {
             })
             .transpose()?;
         if !raw.limit.map_or(true, is_legal_page) {
-            return Err(serde::de::Error::custom(COINS_BY_PARENT_LIMIT_ERROR));
+            return Err(serde::de::Error::custom(PAGE_LIMIT_ERROR));
         }
         Ok(Self {
             parent_coin_id,
@@ -938,7 +1084,7 @@ impl WalletCoinsByParentParams {
             })
             .transpose()?;
         if !self.limit.map_or(true, is_legal_page) {
-            return Err(invalid(COINS_BY_PARENT_LIMIT_ERROR));
+            return Err(invalid(PAGE_LIMIT_ERROR));
         }
         Ok(WalletCoinsByParentParams {
             parent_coin_id,
@@ -1645,11 +1791,7 @@ mod tests {
             json!({ "address": "xch1exampleaddr", "asset": { "cat": OTHER_CAT_HEX } })
         );
         assert_eq!(
-            serde_json::to_value(WalletCoinsParams {
-                address: "xch1exampleaddr".into(),
-                asset: cat,
-            })
-            .unwrap(),
+            serde_json::to_value(WalletCoinsParams::first_page("xch1exampleaddr", cat)).unwrap(),
             json!({ "address": "xch1exampleaddr", "asset": { "cat": OTHER_CAT_HEX } })
         );
     }
