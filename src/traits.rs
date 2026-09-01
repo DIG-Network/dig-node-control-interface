@@ -559,11 +559,19 @@ pub trait ControlHandler: Sync {
     ///
     /// An implementation MUST:
     ///
-    /// - **Keep the seven states apart.** `unfunded` is the only genuine out-of-funds state.
+    /// - **Keep the eight states apart.** `unfunded` is the only genuine out-of-funds state.
     ///   `deferred` (no priced requirement), `pending` (submitted, unconfirmed), `withheld`
-    ///   (`Relayed` provenance) and `disabled` (the node-wide switch) all mean "no coin yet" and
-    ///   none of them means "send money". Collapsing any of them into `unfunded` is the dig-app#300
-    ///   defect this method exists to remove.
+    ///   (`Relayed` provenance), `disabled` (the node-wide switch) and `unadvertised` (that switch
+    ///   ON, but nothing publishable to advertise) all mean "no coin yet" and none of them means
+    ///   "send money". Collapsing any of them into `unfunded` is the dig-app#300 defect this method
+    ///   exists to remove.
+    /// - **Answer [`Unadvertised`](results::MirrorBondState::Unadvertised) -- never
+    ///   [`Disabled`](results::MirrorBondState::Disabled) -- when the node's own switch is ON and
+    ///   its advertise-URL list has no publishable entry.** The two are both node-wide and both
+    ///   mean "no coin", but they differ in REMEDY and in whether anything is wrong: `disabled` is
+    ///   the operator's own decision and a client MUST NOT present it as a fault, so serving it
+    ///   here would oblige a conforming client to stay silent about the single reason the node
+    ///   bonds nothing.
     /// - **Read `bonded` and `reclaiming` amounts FROM THE COIN**, never from this epoch's
     ///   requirement. A coin created under a previous requirement locks the previous amount, and
     ///   the current price is not a fact about an existing coin.
