@@ -2209,9 +2209,10 @@ pub struct SpendsListResult {
 ///
 /// # The whole point is that "no coin yet" is never one answer
 ///
-/// Six of these seven variants mean "there is no current-epoch coin", and every one of them calls
-/// for a different response from a person: add funds, wait, do nothing, turn a switch back on, or
-/// nothing at all because the capsule was never this node's to advertise. Collapsing any two of
+/// Seven of these eight variants mean "there is no current-epoch coin", and every one of them calls
+/// for a different response from a person: add funds, wait, do nothing, turn a switch back on,
+/// publish an advertise URL, or nothing at all because the capsule was never this node's to
+/// advertise. Collapsing any two of
 /// them is what produces an hourly out-of-funds alarm about a perfectly healthy node
 /// (dig-app#300), which is the defect this method exists to remove.
 ///
@@ -2228,6 +2229,10 @@ pub struct SpendsListResult {
 ///
 /// - [`Withheld`](Self::Withheld) carries §25.8's meaning — `Relayed` provenance, per capsule.
 /// - [`Disabled`](Self::Disabled) is the node-wide switch, which §25.8 could not express at all.
+/// - [`Unadvertised`](Self::Unadvertised) is that switch being ON while the node still has nothing
+///   publishable to advertise. It is node-wide like `disabled` and is deliberately NOT the same
+///   value: `disabled` is the operator's own decision and MUST NOT be shown as a fault, so a node
+///   served under it would oblige a conforming client to stay silent about a real failure.
 /// - [`Reclaiming`](Self::Reclaiming) is §25.8's seventh state, which `BondState` had no variant
 ///   for even though the money is still locked while it lasts.
 ///
@@ -2297,6 +2302,25 @@ pub enum MirrorBondState {
     /// Node-wide, not per capsule: every row reads `disabled` together. The remedy is a switch, and
     /// it is the operator's own earlier decision — a client MUST NOT present it as a fault.
     Disabled,
+    /// This node has nothing publishable to advertise, so it advertises nothing and creates no
+    /// mirror coin.
+    ///
+    /// The node holds the capsule, its own collateralisation switch is ON, its wallet may be full
+    /// and the epoch's requirement may be perfectly well known. It simply has no advertise URL a
+    /// peer could fetch from -- the list is empty, or every entry in it was rejected as
+    /// non-absolute or reachable only from this machine -- and a mirror coin that advertised no
+    /// URL would bond nothing.
+    ///
+    /// **A client MUST surface this as a fault.** That is the whole difference between it and
+    /// [`Disabled`](Self::Disabled), which is also node-wide and also means "no coin", but is the
+    /// operator's own earlier decision and MUST NOT be presented as one. Here the operator decided
+    /// the opposite -- the switch is ON -- and the node is silently unable to honour it. The remedy
+    /// is a publishable advertise URL, and it is the only remedy: sending $DIG changes nothing,
+    /// which is why serving this as [`Unfunded`](Self::Unfunded) is a false statement about money.
+    ///
+    /// Node-wide like `disabled`: every row reads `unadvertised` together, because the URL list is
+    /// one list for the node rather than a property of any capsule.
+    Unadvertised,
     /// A live coin is being reclaimed: the bond is going away and the money is not back yet.
     ///
     /// Carries the coin because the funds are STILL LOCKED for the duration. A surface that showed

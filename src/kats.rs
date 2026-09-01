@@ -4891,6 +4891,38 @@ fn every_collateral_unknown_reason_is_listed_in_all() {
 /// `balance_unreadable` token beside it. The nearest wrong implementation reuses one of the four
 /// census/record/chain reasons, and it is distinguishable here only because the token itself is
 /// asserted — a test that merely round-tripped the value would pass against every one of them.
+/// **A node with nothing publishable to advertise is `unadvertised`, and that is NOT `disabled`.**
+///
+/// A node whose advertise-URL list is empty (or whose every entry was rejected) creates no mirror
+/// coin, no matter how much $DIG it holds and no matter that its own collateralisation switch is
+/// ON. dig-node reported that as [`Unfunded`](results::MirrorBondState::Unfunded) and sent an
+/// operator to buy $DIG that would have bonded nothing.
+///
+/// The nearest wrong implementation maps it onto
+/// [`Disabled`](results::MirrorBondState::Disabled) — the only pre-existing variant that does not
+/// name a figure. That is why this fixture asserts BOTH halves rather than the new token alone:
+/// `disabled` means the operator's own switch and this contract forbids a client presenting it as a
+/// fault, so serving it here would oblige a conforming client to stay silent about the one thing
+/// actually wrong. The two tokens must differ, and the difference is the assertion.
+#[test]
+fn an_unadvertised_bond_is_its_own_state_and_not_disabled() {
+    let unadvertised = serde_json::to_value(results::MirrorBondState::Unadvertised).unwrap();
+    let disabled = serde_json::to_value(results::MirrorBondState::Disabled).unwrap();
+
+    assert_eq!(
+        unadvertised,
+        serde_json::json!({ "bond_state": "unadvertised" }),
+        "the token is the contract, and it is a bare tag with no payload"
+    );
+    assert_ne!(
+        unadvertised, disabled,
+        "a node whose switch is ON must not be reported under the switch's own token"
+    );
+
+    let parsed: results::MirrorBondState = serde_json::from_value(unadvertised).unwrap();
+    assert_eq!(parsed, results::MirrorBondState::Unadvertised);
+}
+
 #[test]
 fn a_balance_unreadable_bond_is_deferred_not_unfunded() {
     let state = results::MirrorBondState::Deferred {
@@ -5411,6 +5443,7 @@ fn the_bond_surface_wire_tokens_are_unique() {
         },
         results::MirrorBondState::Withheld,
         results::MirrorBondState::Disabled,
+        results::MirrorBondState::Unadvertised,
         results::MirrorBondState::Reclaiming {
             coin_id: BOND_COIN_B.into(),
             epoch: 6,
@@ -5426,10 +5459,10 @@ fn the_bond_surface_wire_tokens_are_unique() {
                 .to_owned()
         })
         .collect();
-    assert_eq!(tokens.len(), 7, "all seven states must be represented");
+    assert_eq!(tokens.len(), 8, "all eight states must be represented");
     tokens.sort();
     tokens.dedup();
-    assert_eq!(tokens.len(), 7, "bond-state tokens collide");
+    assert_eq!(tokens.len(), 8, "bond-state tokens collide");
 }
 
 /// **An ABSENT `cursor` or `complete` must FAIL to decode — neither may collapse into a value.**

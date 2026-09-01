@@ -1091,7 +1091,7 @@ when it is not — WHY, together with the $DIG those bonds have locked. It is th
 `SPEC.md` §25.8 requires, and it is served over the control plane before the node adopts it
 (release-first).
 
-**Its whole purpose is that "no coin yet" is never one answer.** Six of the seven states mean there is
+**Its whole purpose is that "no coin yet" is never one answer.** Seven of the eight states mean there is
 no current-epoch coin, and each calls for a different response from a person. A client MUST NOT
 collapse any two of them; conflating "out of funds" with "withheld on purpose" produces hourly funding
 alarms about a perfectly healthy node, which is the defect this method exists to remove.
@@ -1104,7 +1104,17 @@ alarms about a perfectly healthy node, which is the defect this method exists to
 | `deferred` | `reason` | the epoch requirement is unknown, so no create can be PRICED — including `balance_unreadable`, where the node cannot read its own $DIG balance | none; the wallet may be full |
 | `withheld` | — | the capsule has `Relayed` provenance: held, deliberately never advertised | none |
 | `disabled` | — | collateralisation is switched OFF for this node | the operator's own switch |
+| `unadvertised` | — | collateralisation is ON, but the node has no publishable advertise URL, so it advertises nothing and a coin would bond nothing | publish an advertise URL |
 | `reclaiming` | `coin_id`, `epoch`, `amount_dig_base_units` | a live coin is being reclaimed; the money is STILL LOCKED | wait |
+
+**`disabled` and `unadvertised` are node-wide, and only ONE of them is a fault.** Both mean every row
+reads the same token together and no coin exists for any bond. They differ in whether the operator
+already knows: `disabled` is that operator's own switch, and a client MUST NOT present it as a fault,
+while `unadvertised` is that switch ON and the node silently unable to honour it because no entry in
+its advertise-URL list is publishable. A client MUST surface `unadvertised`, and an implementation MUST
+NOT serve it as `disabled` -- doing so obliges a conforming client to stay silent about the one thing
+that is wrong. It MUST NOT serve it as `unfunded` either: the wallet may be full, and no amount of $DIG
+creates a coin that would advertise nothing.
 
 **`unfunded` is the ONLY state a client may raise a funding alarm on.** `deferred` in particular is not
 one: the node does not know the price, and an operator sending money in response changes nothing.
