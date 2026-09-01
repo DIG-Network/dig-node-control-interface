@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.30.0] - 2026-09-01
+
+### Features
+- **mirror:** A bond page names WHICH WALLET its amounts are about (#43)
+
 ## [0.29.0] - 2026-09-01
 
 ### Features
