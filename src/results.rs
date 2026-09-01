@@ -2576,6 +2576,35 @@ pub enum MirrorBondStatesResult {
         /// Carried so a client can tell a bond at the current epoch from one it is reading across a
         /// rollover, without consulting a second method whose answer may have moved in between.
         epoch: u64,
+        /// WHICH WALLET every figure on this page is about.
+        ///
+        /// # Why an answer about money must name the wallet
+        ///
+        /// Every amount here — each [`Unfunded`](MirrorBondState::Unfunded) shortfall,
+        /// [`locked_dig_base_units`](Self::Known::locked_dig_base_units), each bonded amount — is a
+        /// statement about the node's own MACHINE-custody operator wallet, not about the user's. A
+        /// node reported three bonds `unfunded, short 1010` while its operator's own wallet held
+        /// 1,015,000 base units of $DIG: both statements were true, each was about a different
+        /// wallet, and the payload named an amount and no wallet, so nobody could tell. Naming it
+        /// here is what makes the page self-describing rather than merely correct.
+        ///
+        /// # On the ANSWER, not on each row — and the distinction is not cosmetic
+        ///
+        /// The funding wallet is node-wide, so a per-row copy would be the same string repeated for
+        /// every entry: a field that cannot vary, which reads as though it could. Worse, two rows
+        /// of one answer could then be written to disagree, and a client would have to decide which
+        /// to believe. One value per answer can be wrong; it cannot be inconsistent with itself.
+        ///
+        /// Carried rather than left to `control.wallet.operatorAddress` for the same reason
+        /// [`epoch`](Self::Known::epoch) is carried: a second call is a second observation, and it
+        /// may have moved. A page of amounts that requires a follow-up call to learn whose amounts
+        /// they are can be rendered, screenshotted and acted on before that call returns.
+        ///
+        /// The same type `control.wallet.operatorAddress` returns, reused rather than restated, so
+        /// the two surfaces cannot drift into two spellings of one fact — and so a node with no
+        /// wallet yet says [`NotInitialized`](WalletOperatorAddressUnavailableReason::NotInitialized)
+        /// here too, instead of a blank string a client might render as a destination.
+        funding_wallet: WalletOperatorAddressResult,
     },
     /// The node cannot state the bond states, and names which fact is missing.
     Unknown {
