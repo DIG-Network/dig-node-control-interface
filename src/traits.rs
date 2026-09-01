@@ -324,6 +324,26 @@ pub trait ControlHandler: Sync {
     ) -> Result<results::WalletArrivalsResult, ControlError>;
     /// `control.wallet.peak` (READ-only, OPEN)
     async fn wallet_peak(&self) -> Result<results::WalletPeakResult, ControlError>;
+    /// `control.wallet.operatorAddress` (READ-only, TOKEN-GATED)
+    ///
+    /// An implementation MUST:
+    ///
+    /// - **Answer for its OWN operator wallet** -- the machine-custody autoseed wallet that pays
+    ///   mirror-coin collateral -- and never for the user's wallet, a watched address, or an
+    ///   upstream node's wallet. The method exists because those were indistinguishable, and an
+    ///   implementation that forwarded it would recreate the confusion exactly.
+    /// - **Return ONLY the address and its puzzle hash.** No seed, no mnemonic, no private or
+    ///   extended key, no derivation material, in any encoding (§908). This method says where money
+    ///   can be SENT; nothing here may help anyone spend it.
+    /// - **Perform no mutation.** It MUST NOT create, unseal-and-cache, rotate or initialise a
+    ///   wallet as a side effect of being read. A node without one answers
+    ///   [`NotInitialized`](results::WalletOperatorAddressUnavailableReason::NotInitialized).
+    /// - **Answer [`Unavailable`](results::WalletOperatorAddressResult::Unavailable) with a reason,
+    ///   never a blank or placeholder address.** An address a client renders is an address somebody
+    ///   may send money to.
+    async fn wallet_operator_address(
+        &self,
+    ) -> Result<results::WalletOperatorAddressResult, ControlError>;
     /// `control.peerCounts` (READ-only, OPEN)
     ///
     /// `dig_peer_count` MUST be dig-node-core's `connected_peers` — the same figure
@@ -746,6 +766,7 @@ pub trait ControlHandler: Sync {
             }
             ControlMethod::WalletArrivals => encode(self.wallet_arrivals(decode(params)?).await?),
             ControlMethod::WalletPeak => encode(self.wallet_peak().await?),
+            ControlMethod::WalletOperatorAddress => encode(self.wallet_operator_address().await?),
             ControlMethod::WalletSyncStatus => encode(self.wallet_sync_status().await?),
             ControlMethod::WalletBroadcast => encode(self.wallet_broadcast(decode(params)?).await?),
             // Re-validated here idempotently; deserialization already enforced the same rule.

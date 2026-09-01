@@ -1471,6 +1471,16 @@ impl ControlHandler for MockNode {
             synced: true,
         })
     }
+    /// Answers a DISTINCT address from every other fixture value in this file, so a dispatch arm
+    /// wired to the wrong wallet read is distinguishable here rather than agreeing by accident.
+    async fn wallet_operator_address(
+        &self,
+    ) -> Result<results::WalletOperatorAddressResult, ControlError> {
+        Ok(results::WalletOperatorAddressResult::Known {
+            address: OPERATOR_ADDRESS.into(),
+            puzzle_hash: "7c".repeat(32),
+        })
+    }
     /// Reports three DIFFERENT counts, so a handler that answered one number twice — or a dispatch
     /// arm wired to the wallet's sync status, whose chia count this deliberately matches — is
     /// distinguishable from a correct one by the DIG counts alone. The known count is unequal to
@@ -4891,6 +4901,106 @@ fn every_collateral_unknown_reason_is_listed_in_all() {
 /// `balance_unreadable` token beside it. The nearest wrong implementation reuses one of the four
 /// census/record/chain reasons, and it is distinguishable here only because the token itself is
 /// asserted — a test that merely round-tripped the value would pass against every one of them.
+/// **The operator-address method is TOKEN-GATED and OWNED, and both halves are the contract.**
+///
+/// Neither property is cosmetic and each has a distinct wrong version.
+///
+/// If it were an OPEN read, any stranger who can reach the control plane could map this node to a
+/// chain identity -- a linkage no other open read discloses.
+///
+/// If it were DELEGATED it would be forwarded to the upstream node, and the caller would be handed
+/// **a different machine's address** while every field name still said "operator". That is not a
+/// degraded answer; it is a confident wrong one, and somebody funding "the machine wallet" from it
+/// would send money to a machine they do not run. The method exists precisely because two wallets
+/// were indistinguishable, so an answer about the wrong wallet is the defect reintroduced.
+///
+/// Asserted against the two neighbouring wallet reads rather than in isolation: `WalletPeak` is
+/// open and delegated, so the controls prove these assertions can fail, and a blanket change to the
+/// wallet category cannot make this test vacuous.
+#[test]
+fn the_operator_address_is_token_gated_and_answered_by_this_node() {
+    assert!(
+        ControlMethod::WalletOperatorAddress.requires_auth(),
+        "a stranger must not be able to map this node to a chain identity"
+    );
+    assert!(!ControlMethod::WalletOperatorAddress.is_open_read());
+    assert_eq!(
+        ControlMethod::WalletOperatorAddress.routing(),
+        crate::method::Routing::Owned,
+        "forwarding this upstream would answer with ANOTHER machine's wallet address"
+    );
+
+    // The controls: a neighbouring wallet read that is genuinely open and genuinely delegated, so
+    // neither assertion above can be satisfied by every method having those properties.
+    assert!(ControlMethod::WalletPeak.is_open_read());
+    assert_eq!(
+        ControlMethod::WalletPeak.routing(),
+        crate::method::Routing::Delegated
+    );
+
+    assert_eq!(
+        ControlMethod::WalletOperatorAddress.name(),
+        "control.wallet.operatorAddress"
+    );
+    assert_eq!(
+        ControlMethod::from_name("control.wallet.operatorAddress"),
+        Some(ControlMethod::WalletOperatorAddress),
+        "a variant missing from ControlMethod::ALL is unreachable by name"
+    );
+}
+
+/// **The operator-address answer carries a destination and NOTHING that could spend it (\u00a7908).**
+///
+/// The wire form is asserted as EXACT BYTES rather than round-tripped, because round-tripping is
+/// satisfied by any struct that agrees with itself -- including one that grew a `seed`, a
+/// `mnemonic` or a `derivation_path` field. `assert_eq!` on the whole JSON object fails the moment
+/// a field is added, which is the only mutation this test needs to catch and the one that matters.
+///
+/// The unavailable arm is pinned beside it because the wrong implementation there is not a leak but
+/// a fabrication: answering `{"address": ""}` for a node with no wallet renders a blank destination
+/// on a funding screen, and a placeholder address renders a real-looking one. Both are money
+/// statements. The tagged `unavailable` form cannot be mistaken for either.
+#[test]
+fn the_operator_address_result_carries_a_destination_and_no_spending_material() {
+    let known = results::WalletOperatorAddressResult::Known {
+        address: "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsjqfwvy".into(),
+        puzzle_hash: "00".repeat(32),
+    };
+    assert_eq!(
+        serde_json::to_value(&known).unwrap(),
+        serde_json::json!({
+            "state": "known",
+            "address": "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsjqfwvy",
+            "puzzle_hash": "00".repeat(32),
+        }),
+        "exactly two fields: where money goes, and the same place as a puzzle hash"
+    );
+
+    for (reason, token) in [
+        (
+            results::WalletOperatorAddressUnavailableReason::NotInitialized,
+            "not_initialized",
+        ),
+        (
+            results::WalletOperatorAddressUnavailableReason::Unreadable,
+            "unreadable",
+        ),
+    ] {
+        let unavailable = results::WalletOperatorAddressResult::Unavailable { reason };
+        let wire = serde_json::to_value(&unavailable).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "state": "unavailable", "reason": token })
+        );
+        assert!(
+            wire.get("address").is_none(),
+            "an unavailable answer must not carry an address field at all -- a blank or \
+             placeholder destination is a money statement"
+        );
+        assert_result_round_trips::<results::WalletOperatorAddressResult>(wire);
+    }
+}
+
 /// **A node with nothing publishable to advertise is `unadvertised`, and that is NOT `disabled`.**
 ///
 /// A node whose advertise-URL list is empty (or whose every entry was rejected) creates no mirror
@@ -5318,6 +5428,10 @@ const BOND_STORE_B: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2
 /// A second root under [`STORE`], so a fixture can show the SAME store at two roots in two
 /// different states — the case a store-keyed surface would silently merge.
 const BOND_ROOT_B: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+/// The handler fixture's operator-wallet address -- distinct from every other address in this file
+/// so a dispatch arm wired to the wrong wallet read cannot agree with the right one by accident.
+const OPERATOR_ADDRESS: &str =
+    "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsjqfwvy";
 const BOND_COIN_A: &str = "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1";
 const BOND_COIN_B: &str = "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2";
 

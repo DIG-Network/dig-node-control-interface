@@ -189,6 +189,8 @@ pub enum ControlMethod {
     WalletCoinsByParent,
     /// `control.wallet.arrivals` — read confirmed INCOMING funds since a cursor position.
     WalletArrivals,
+    /// `control.wallet.operatorAddress` — read the address of the node's OWN machine wallet.
+    WalletOperatorAddress,
     /// `control.wallet.peak` — read the node's current chain peak height.
     WalletPeak,
     /// `control.wallet.syncStatus` — read whether the wallet's chain replica is being kept current.
@@ -280,6 +282,7 @@ impl ControlMethod {
             ControlMethod::WalletCoinSpend => "control.wallet.coinSpend",
             ControlMethod::WalletCoinsByParent => "control.wallet.coinsByParent",
             ControlMethod::WalletArrivals => "control.wallet.arrivals",
+            ControlMethod::WalletOperatorAddress => "control.wallet.operatorAddress",
             ControlMethod::WalletPeak => "control.wallet.peak",
             ControlMethod::WalletSyncStatus => "control.wallet.syncStatus",
             ControlMethod::WalletBroadcast => "control.wallet.broadcast",
@@ -517,6 +520,7 @@ impl ControlMethod {
             | ControlMethod::WalletArrivals
             | ControlMethod::WalletPeak
             | ControlMethod::WalletSyncStatus
+            | ControlMethod::WalletOperatorAddress
             | ControlMethod::WalletBroadcast
             | ControlMethod::WalletWatch
             | ControlMethod::WalletUnwatch
@@ -574,6 +578,7 @@ impl ControlMethod {
             ControlMethod::WalletCoinSpend => "READ-only: the SPEND that spent a coin -- its puzzle reveal, its solution and the coin itself -- named by the coin's own id. `spend: null` means the consulted chain shows that coin as unspent or unknown; it NEVER means the chain could not be reached, which is an error.",
             ControlMethod::WalletCoinsByParent => "READ-only: the DIRECT children created by spending one coin, named by that parent's coin id. ONE hop, never a recursive walk: an empty list means the parent created no known children, and a caller wanting a lineage composes hops itself.",
             ControlMethod::WalletArrivals => "READ-only: confirmed INCOMING funds recorded since a cursor position, oldest first -- the answer to `was I just paid?`, which no balance or coin list can give. Each row is a coin the node determined ARRIVED: confirmed on chain, above the wallet's arrival baseline, not previously reported, and not the wallet's own change. Resume from `cursor` (the last row you were handed), never from `latest`.",
+            ControlMethod::WalletOperatorAddress => "READ-only: the address of the node's OWN operator wallet -- the MACHINE-custody wallet that pays mirror-coin collateral, never the user's. Returns a public address and puzzle hash and NEVER any key, seed or derivation material. TOKEN-GATED, and answered by THIS node rather than forwarded upstream.",
             ControlMethod::WalletPeak => "READ-only: the node's current chain peak height, independent of any address.",
             ControlMethod::WalletSyncStatus => "READ-only: whether the wallet's CHAIN replica is being kept current (not_started/syncing/synced/no_wallet_enrolled/wallet_not_unlocked), the replica's own height, and its CHIA full-node peer count -- unrelated to control.sync.status (DIG stores) and to control.peerStatus (DIG peers).",
             ControlMethod::WalletBroadcast => "Push an ALREADY-SIGNED spend bundle to the network; the node never signs. TOKEN-GATED.",
@@ -640,6 +645,7 @@ impl ControlMethod {
         ControlMethod::WalletArrivals,
         ControlMethod::WalletPeak,
         ControlMethod::WalletSyncStatus,
+        ControlMethod::WalletOperatorAddress,
         ControlMethod::WalletBroadcast,
         ControlMethod::WalletWatch,
         ControlMethod::WalletUnwatch,
@@ -716,8 +722,8 @@ mod tests {
         assert_eq!(actual_open, expected_open);
     }
 
-    /// **The gated wallet methods are the push, the arrival cursor, the three enrolment methods,
-    /// and the three reservation methods.** The fixture varies one thing -- which wallet method is asked -- against a category
+    /// **The gated wallet methods are the push, the arrival cursor, the operator address, the three
+    /// enrolment methods, and the three reservation methods.** The fixture varies one thing -- which wallet method is asked -- against a category
     /// whose other members ARE open, so both nearest wrong implementations fail here: one that opens
     /// the whole category (the state this crate shipped in at `1190a18`) and one that gates it
     /// wholesale.
@@ -735,6 +741,10 @@ mod tests {
             gated,
             vec![
                 "control.wallet.arrivals",
+                // Gated for the SAME reason as `arrivals` above: the caller does not name the
+                // address, so the node volunteers its own node-to-address association. Here it is
+                // the machine wallet's, which no open read discloses.
+                "control.wallet.operatorAddress",
                 "control.wallet.broadcast",
                 "control.wallet.watch",
                 "control.wallet.unwatch",

@@ -1103,6 +1103,16 @@ impl WalletCoinsByParentParams {
 pub struct WalletPeakParams {}
 control_call!(WalletPeakParams => ControlMethod::WalletPeak, results::WalletPeakResult);
 
+/// `control.wallet.operatorAddress` params — none.
+///
+/// There is exactly one operator wallet per node, so there is nothing to scope the question by.
+/// Deliberately NOT an address-taking method: a caller cannot ask *is THIS address the operator
+/// wallet* by supplying a candidate, because a node answering yes/no about supplied addresses is an
+/// oracle for probing which addresses a machine controls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletOperatorAddressParams {}
+control_call!(WalletOperatorAddressParams => ControlMethod::WalletOperatorAddress, results::WalletOperatorAddressResult);
+
 /// `control.peerCounts` params — none.
 ///
 /// The counts describe this node's own connectivity on each network, so there is nothing to scope
