@@ -1107,6 +1107,80 @@ pub struct WalletPeakResult {
     pub synced: bool,
 }
 
+/// Where the node's OWN operator wallet lives on chain — the MACHINE wallet, not the user's.
+///
+/// # Two wallets, and confusing them costs real money
+///
+/// A node has an operator wallet of its own, derived from a machine-custody autoseed. It is the
+/// wallet that pays mirror-coin collateral, and it is NOT the wallet whose keys the user holds and
+/// whose addresses they watch. Nothing on any surface named which wallet a mirror figure was about,
+/// and the cost of that was measured: a node reported three mirror bonds `unfunded, short 1010`
+/// while the operator's OWN wallet held 1,015,000 base units of $DIG. Both statements were true and
+/// they were about different wallets. This method exists so a client can name the second one, and
+/// so somebody wanting to fund the machine wallet can find out where to send the money.
+///
+/// # The custody boundary (§908) is the whole design of this result
+///
+/// It carries an ADDRESS and a PUZZLE HASH and nothing else, and it never may carry more. Both are
+/// public values in exactly the sense a coin id or an amount is: they say WHERE money can be sent,
+/// never HOW it can be spent. A seed, a mnemonic, a private key, an extended key, a derivation path
+/// with an index, or any other material from which a spend could be authorised MUST NOT appear
+/// here, in any form, however encoded. The node signs its own mirror spends and no key ever leaves
+/// it; a method that exported one would move the node from machine custody to no custody at all.
+///
+/// # It is TOKEN-GATED and it is answered by THIS node
+///
+/// Gated rather than open because the address links this specific node to a chain identity, and a
+/// stranger able to ask any node for that mapping learns something about its operator that no other
+/// open read discloses. Owned rather than delegated because the question is *which wallet does THIS
+/// node spend from* — forwarding it upstream would return a different machine's address, which is
+/// precisely the confusion the method exists to end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WalletOperatorAddressResult {
+    /// The node knows its operator wallet and reports where it is.
+    Known {
+        /// The bech32m address, `xch1…` on mainnet — the value a person pastes into a wallet to
+        /// send this node money.
+        address: String,
+        /// The same destination as a puzzle hash: LOWERCASE 64-hex, unprefixed.
+        ///
+        /// Beside the address rather than instead of it, because a client that must match this
+        /// wallet against a coin record is comparing puzzle hashes, and re-deriving one from an
+        /// address is a bech32m decode a consumer should not have to reimplement to answer *is
+        /// this coin the machine wallet's?*
+        puzzle_hash: String,
+    },
+    /// The node cannot say where its operator wallet is.
+    ///
+    /// A DEFINITE statement that the answer is unavailable, with the reason — never an empty string
+    /// or a placeholder address. An address a client renders is an address somebody may send money
+    /// to, so a fabricated or blank one is a money statement of the worst kind.
+    Unavailable {
+        /// Why.
+        reason: WalletOperatorAddressUnavailableReason,
+    },
+}
+
+/// Why a node cannot name its own operator wallet.
+///
+/// Two reasons, and they call for different responses: one is a node that has not finished setting
+/// itself up, the other is a node whose machine custody is broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletOperatorAddressUnavailableReason {
+    /// The operator wallet has not been created yet.
+    ///
+    /// Nothing is wrong. A node that has never run its autoseed setup has no operator wallet, and
+    /// therefore no address; it will have one. A client MUST NOT present this as a fault.
+    NotInitialized,
+    /// The operator wallet exists but this node could not read it.
+    ///
+    /// A fault: the seed material is present and unreadable, or its unseal failed. The node cannot
+    /// pay mirror collateral in this state either, so a client SHOULD surface it.
+    Unreadable,
+}
+
 /// How far the node's wallet chain replica has got — the states a background sync can be in.
 ///
 /// Named states rather than a boolean, because "has never started" and "is caught up" are different

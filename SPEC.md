@@ -118,6 +118,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.coinSpend` | no | delegated | `{coin_id:string}` | `WalletCoinSpendResult` |
 | `control.wallet.coinsByParent` | no | delegated | `{parent_coin_id:string, after_coin_id?:string, limit?:u32}` | `WalletCoinsByParentResult` |
 | `control.wallet.arrivals` | yes | delegated | `{after_seq:u64=0, limit?:u32}` | `WalletArrivalsResult` |
+| `control.wallet.operatorAddress` | yes | owned | — | `{state:"known", address, puzzle_hash}` \| `{state:"unavailable", reason:"not_initialized"\|"unreadable"}` |
 | `control.wallet.peak` | no | delegated | — | `{peak_height:u32\|null, synced:bool}` |
 | `control.wallet.syncStatus` | no | delegated | — | `{phase:"not_started"\|"syncing"\|"synced"\|"no_wallet_enrolled"\|"wallet_not_unlocked", peak_height:u32\|null, chia_peer_count:u32\|null, watched_addresses:u32\|null, subscription_peer_count:u32\|null, chia_peer_peak_height:u32\|null}` |
 | `control.wallet.broadcast` | yes | delegated | `{signed_bundle_hex:string}` | `WalletBroadcastResult` |
@@ -1090,6 +1091,35 @@ epoch and can rise by more than any margin chosen.
 when it is not — WHY, together with the $DIG those bonds have locked. It is the surface dig-node
 `SPEC.md` §25.8 requires, and it is served over the control plane before the node adopts it
 (release-first).
+
+### `control.wallet.operatorAddress` — which wallet is the MACHINE's
+
+The node has an operator wallet of its own, machine-custody and autoseed-derived, and it is the
+wallet that pays mirror-coin collateral. It is NOT the user's wallet. This method names it.
+
+It exists because nothing named it, and the cost of that was measured: a node reported three mirror
+bonds `unfunded, short 1010` while the operator's own wallet held 1,015,000 base units of $DIG. Both
+statements were true and each was about a different wallet, and no surface anywhere let a person tell
+which. An operator who wants to FUND the machine wallet needs its address, and had no way to obtain
+one.
+
+The method MUST hold four properties:
+
+* **It returns a DESTINATION and nothing that can spend from it.** An address and its puzzle hash,
+  both public in the sense a coin id is. A seed, mnemonic, private or extended key, or derivation
+  material MUST NOT appear in the answer in any encoding. The node signs its own mirror spends and no
+  key leaves it (§908); a method exporting one would move the node from machine custody to none.
+* **It is TOKEN-GATED**, by the same rule as `control.wallet.arrivals`: the CALLER does not name the
+  address, so the node volunteers its own node-to-address association. That mapping is not public,
+  and a stranger able to ask any node for it learns something no open read discloses.
+* **It is OWNED, never delegated.** The question is which wallet THIS node spends from. Forwarding it
+  upstream returns another machine's address under field names that still say "operator" — a
+  confident wrong answer, and precisely the confusion the method exists to end.
+* **It answers `unavailable` with a reason rather than a blank or placeholder address**, and it
+  performs no mutation: reading it MUST NOT create, initialise, unseal-and-cache or rotate a wallet.
+  A node that has none answers `not_initialized`, which is not a fault; a node whose wallet is
+  present and unreadable answers `unreadable`, which is one, and such a node cannot pay collateral
+  either.
 
 **Its whole purpose is that "no coin yet" is never one answer.** Seven of the eight states mean there is
 no current-epoch coin, and each calls for a different response from a person. A client MUST NOT
