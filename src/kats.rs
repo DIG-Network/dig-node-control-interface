@@ -1690,6 +1690,10 @@ impl ControlHandler for MockNode {
             complete: true,
             locked_dig_base_units: 1_047,
             epoch: 7,
+            funding_wallet: results::WalletOperatorAddressResult::Known {
+                address: OPERATOR_ADDRESS.into(),
+                puzzle_hash: "7c".repeat(32),
+            },
         })
     }
 
@@ -4901,6 +4905,65 @@ fn every_collateral_unknown_reason_is_listed_in_all() {
 /// `balance_unreadable` token beside it. The nearest wrong implementation reuses one of the four
 /// census/record/chain reasons, and it is distinguishable here only because the token itself is
 /// asserted — a test that merely round-tripped the value would pass against every one of them.
+/// **A page of bond amounts names the wallet those amounts are about, and it is the SAME wallet
+/// `control.wallet.operatorAddress` reports.**
+///
+/// This is the defect stated as a test. A node said `unfunded, short 1010` while its operator's own
+/// wallet held 1,015,000 base units of $DIG; both were true, each about a different wallet, and the
+/// payload carried an amount and no wallet.
+///
+/// The fixture is built to distinguish the fix from the nearest wrong implementations, and there
+/// are two of them:
+///
+/// - **A page that carries an address which is not the funding wallet's.** Caught by comparing the
+///   bond page's answer against the dedicated method's, THROUGH THE DISPATCHER, so both come from
+///   the same handler by the same route a client uses. A second hardcoded expectation here would
+///   agree with itself while the two surfaces disagreed.
+/// - **A field that is present and empty.** Caught by asserting the `known` tag and a non-empty
+///   address, because a blank destination rendered on a funding screen is the money statement this
+///   whole family exists to prevent.
+///
+/// The page deliberately contains an `unfunded` row, so the assertion is made on an answer that is
+/// actually demanding money -- the exact case where naming the wrong wallet costs somebody a
+/// transfer.
+#[test]
+fn a_page_of_bond_amounts_names_the_wallet_those_amounts_are_about() {
+    let handler = MockNode;
+
+    let page = block_on(handler.mirror_bond_states(MirrorBondStatesParams::default()))
+        .expect("the fixture answers");
+    let results::MirrorBondStatesResult::Known {
+        entries,
+        funding_wallet,
+        ..
+    } = page
+    else {
+        panic!("the fixture is a known answer");
+    };
+
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e.state, results::MirrorBondState::Unfunded { .. })),
+        "the fixture must contain a row that DEMANDS money, or this proves nothing"
+    );
+
+    let results::WalletOperatorAddressResult::Known { address, .. } = &funding_wallet else {
+        panic!("a node that can state its bonds can state whose bonds they are");
+    };
+    assert!(
+        !address.is_empty(),
+        "an empty address renders as a destination on a funding screen"
+    );
+
+    let direct = block_on(handler.wallet_operator_address()).expect("the fixture answers");
+    assert_eq!(
+        funding_wallet, direct,
+        "the wallet a bond page names must be the wallet the dedicated method reports -- two \
+         answers to one question is the drift this contract exists to prevent"
+    );
+}
+
 /// **The operator-address method is TOKEN-GATED and OWNED, and both halves are the contract.**
 ///
 /// Neither property is cosmetic and each has a distinct wrong version.
@@ -5496,6 +5559,7 @@ fn golden_bond_state_vectors_pin_every_state() {
         "cursor": {"store_id": BOND_STORE_B, "root": BOND_ROOT_B},
         "locked_dig_base_units": 3_094u64,
         "epoch": 7u64,
+        "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
     }));
 
     // The three states with no payload, plus `reclaiming`, which HAS one because its money is
@@ -5514,6 +5578,7 @@ fn golden_bond_state_vectors_pin_every_state() {
         "cursor": {"store_id": BOND_STORE_B, "root": ROOT},
         "locked_dig_base_units": 2_047u64,
         "epoch": 7u64,
+        "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
     }));
 
     for reason in results::MirrorBondStatesUnknownReason::ALL {
@@ -5601,6 +5666,7 @@ fn an_absent_paging_key_never_becomes_a_definite_answer() {
         "cursor": null,
         "locked_dig_base_units": 0u64,
         "epoch": 7u64,
+        "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
     });
     // The control: with both keys present it decodes, so the failures below are about ABSENCE and
     // not about the rest of the payload.
@@ -5635,6 +5701,7 @@ fn the_locked_total_spans_pages_and_is_never_the_page_sum() {
         "cursor": {"store_id": STORE, "root": ROOT},
         "locked_dig_base_units": 5_000u64,
         "epoch": 7u64,
+        "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
     });
     assert_result_round_trips::<results::MirrorBondStatesResult>(wire.clone());
 
@@ -5768,6 +5835,7 @@ fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
         "cursor": {"store_id": STORE, "root": BOND_ROOT_B},
         "locked_dig_base_units": 1_047u64,
         "epoch": 7u64,
+        "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
     });
     assert_result_round_trips::<results::MirrorBondStatesResult>(truthful);
 
@@ -5819,6 +5887,7 @@ fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
         "cursor": {"store_id": STORE, "root": ROOT},
         "locked_dig_base_units": 1_047u64,
         "epoch": 7u64,
+        "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
     });
     let short: results::MirrorBondStatesResult = serde_json::from_value(short_page).unwrap();
     assert_ne!(short, parsed);

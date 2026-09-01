@@ -133,7 +133,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.collateral.margin.get` | yes | owned | — | `{margin_bp:u64}` |
 | `control.collateral.margin.set` | yes | owned | `{margin_bp:u64}` | `{margin_bp:u64}` |
 | `control.collateral.buffer` | yes | owned | — | `CollateralBufferResult` (`{state:"known", epoch, protocol_version, funding_state, recommended_buffer_dig_base_units, spendable_dig_base_units, pairs_served_by_this_node, required_per_store_dig_base_units, margin_bp, overlap_dig_base_units, escalation_headroom_dig_base_units, horizon_epochs, escalation_ceiling_micros}` \| `{state:"unknown", reason}`) |
-| `control.mirror.bondStates` | yes | owned | `{after?:{store_id,root}, limit?:u32}` | `MirrorBondStatesResult` (`{state:"known", entries:[{store_id, root, bond_state, …}], complete, cursor, locked_dig_base_units, epoch}` \| `{state:"unknown", reason}`) |
+| `control.mirror.bondStates` | yes | owned | `{after?:{store_id,root}, limit?:u32}` | `MirrorBondStatesResult` (`{state:"known", entries:[{store_id, root, bond_state, …}], complete, cursor, locked_dig_base_units, epoch, funding_wallet}` \| `{state:"unknown", reason}`) |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -1145,6 +1145,16 @@ its advertise-URL list is publishable. A client MUST surface `unadvertised`, and
 NOT serve it as `disabled` -- doing so obliges a conforming client to stay silent about the one thing
 that is wrong. It MUST NOT serve it as `unfunded` either: the wallet may be full, and no amount of $DIG
 creates a coin that would advertise nothing.
+
+**A `known` answer NAMES THE WALLET its amounts are about, in `funding_wallet`.** Every figure on the
+page — each `unfunded` shortfall, each bonded amount, and `locked_dig_base_units` — is a statement
+about the node's own MACHINE-custody operator wallet and not about the user's. It MUST be the same
+value `control.wallet.operatorAddress` reports, carried in the same type so the two surfaces cannot
+drift into two spellings of one fact, and it MUST appear on the ANSWER rather than on each row: the
+funding wallet is node-wide, so a per-row copy is a field that cannot vary while reading as though it
+could, and two rows of one answer could then be written to disagree. It is carried rather than left
+to a second call for the same reason `epoch` is: a follow-up call is a second observation, and a page
+of amounts can be rendered and acted on before it returns.
 
 **`unfunded` is the ONLY state a client may raise a funding alarm on.** `deferred` in particular is not
 one: the node does not know the price, and an operator sending money in response changes nothing.
