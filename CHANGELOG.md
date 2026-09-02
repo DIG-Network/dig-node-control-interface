@@ -7,7 +7,7 @@ This project adheres to [Semantic Versioning](https://semver.org) and
 ## [0.31.0] - 2026-09-02
 
 ### Features
-- **wallet:** A fallback answer is bounded by the peak of the TIER THAT ANSWERED it (#44)
+- **contract:** A fallback answer is bounded by the peak of the TIER THAT ANSWERED it (#45)
 
 ## [0.30.0] - 2026-09-01
 
