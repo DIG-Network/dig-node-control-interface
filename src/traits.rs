@@ -415,7 +415,7 @@ pub trait ControlHandler: Sync {
     /// that has already lapsed at that instant, and MUST report the clock it used as `as_of_unix`.
     ///
     /// An implementation that cannot read its reservation set MUST return
-    /// [`ControlErrorCode::WalletReservationsUnavailable`](crate::error::ControlErrorCode::WalletReservationsUnavailable)
+    /// [`ControlErrorCode::WalletReservationsUnavailable`]
     /// and MUST NOT return an empty list. "Nothing is held" permits a caller to spend; "I cannot
     /// tell" must stop it, and the two are indistinguishable once collapsed.
     async fn wallet_reservations_held(
@@ -425,7 +425,7 @@ pub trait ControlHandler: Sync {
     ///
     /// Acquisition MUST be atomic across concurrent callers: take EVERY coin in `coin_ids` or take
     /// none. On a clash an implementation MUST have written nothing and MUST answer
-    /// [`ControlErrorCode::WalletCoinsReserved`](crate::error::ControlErrorCode::WalletCoinsReserved)
+    /// [`ControlErrorCode::WalletCoinsReserved`]
     /// — never a shortfall code, because the user has the money and is waiting on a settlement, and
     /// never a partial success, because a caller believing it holds inputs it does not is the state
     /// all-or-none exists to make unreachable.

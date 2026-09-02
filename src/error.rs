@@ -79,7 +79,7 @@ pub enum ControlErrorCode {
     /// and hand the bundle straight back. **Retrying cannot help**: the remedy is a bundle that
     /// does not spend the node's coins, or the flag.
     ///
-    /// The exact opposite disposition to [`WalletCoinsReserved`], which is a wait. Keeping the two
+    /// The exact opposite disposition to [`WalletCoinsReserved`](Self::WalletCoinsReserved), which is a wait. Keeping the two
     /// on distinct numbers is the whole point of this code being catalogued here.
     WalletNodeSpendDisabled,
     /// `-32046` — one or more named coins are already committed to a live in-flight spend, so

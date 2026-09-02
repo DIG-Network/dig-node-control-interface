@@ -5968,3 +5968,96 @@ fn a_malformed_bond_cursor_is_refused_rather_than_restarting_the_walk() {
         }
     }
 }
+
+/// **Every TIER-DISCLOSING wallet result states the ANSWERING-TIER rule, in the rustdoc too.**
+///
+/// The rule this crate publishes is that a `fallback` answer is bounded by the peak of the tier that
+/// actually answered it, not by the node's own replica or its held peers. The nearest wrong version of
+/// that amendment is the one this crate has already shipped once in the opposite direction: the
+/// document is swept and the field doc-comments are not, so `SPEC.md` teaches one rule while the
+/// rustdoc a consumer actually reads teaches the superseded one. A test that only searched `SPEC.md`
+/// would pass on exactly that half-done change.
+///
+/// The scope is the results that DISCLOSE a tier — those declaring `source: Option<WalletReadSource>`.
+/// `WalletPeakResult` and `WalletSyncStatusResult` are outside it for DIFFERENT reasons.
+/// `WalletSyncStatusResult` is genuinely replica-pinned: `SPEC.md` forbids its `peak_height` the
+/// oracle fallback outright, so the answering-tier rule has nothing to bind there. `WalletPeakResult`
+/// DOES vary its answering tier — `control.wallet.peak` deliberately falls back to the coinset oracle
+/// — but declares no `source`, so the rule cannot be EXPRESSED on it. That is a deferred wire-shape
+/// gap, not an exemption on the merits: it is tracked as issue #46, and until that field lands a
+/// caller MUST NOT assume a `WalletPeakResult` is replica-sourced.
+/// Anchoring on the `source` declaration rather than on an occurrence count means a tier-disclosing
+/// result added later is covered the day it is added, instead of silently lowering the denominator.
+#[test]
+fn every_tier_disclosing_wallet_result_publishes_the_answering_tier_rule() {
+    const SOURCE: &str = include_str!("results.rs");
+    const MARKER: &str = "the tier that ANSWERED";
+
+    let mut checked = 0usize;
+    for block in SOURCE
+        .split(
+            "
+pub struct ",
+        )
+        .skip(1)
+    {
+        if !block.contains("pub source: Option<WalletReadSource>,") {
+            continue;
+        }
+        let name = block.split_whitespace().next().unwrap_or("<unnamed>");
+        let lines: Vec<&str> = block.lines().collect();
+        for (ix, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed != "pub synced: bool," && trimmed != "pub peak_height: Option<u32>," {
+                continue;
+            }
+            checked += 1;
+            let doc: String = lines[..ix]
+                .iter()
+                .rev()
+                .take_while(|l| l.trim_start().starts_with("///"))
+                .fold(String::new(), |acc, l| {
+                    format!(
+                        "{}
+{acc}",
+                        l.trim_start()
+                    )
+                });
+            assert!(
+                doc.contains(MARKER),
+                "{name} declares `{trimmed}` without stating the answering-tier rule in its own doc                  block, so a consumer reading the rustdoc learns the superseded rule. Doc block:
+{doc}"
+            );
+        }
+    }
+    assert!(
+        checked >= 10,
+        "only {checked} freshness fields were reached — the declaration shapes this test anchors on          have changed, so it is measuring nothing"
+    );
+}
+
+/// **The superseded absolute rule survives nowhere — not in the SPEC, not in the rustdoc.**
+///
+/// Adding the new sentence beside the old one leaves the contract self-contradictory, and a
+/// reimplementer is entitled to build against either half. The banned phrasings are the exact ones
+/// 0.30.0 published, so this fails loudly if a merge or a revert reintroduces them.
+#[test]
+fn the_superseded_unconditional_fallback_rule_is_stated_nowhere() {
+    for (name, text) in [
+        ("SPEC.md", include_str!("../SPEC.md")),
+        ("results.rs", include_str!("results.rs")),
+    ] {
+        for banned in [
+            "however caught-up",
+            "always `false` for a fallback answer",
+            "`false` for every fallback answer",
+            "every fallback answer",
+        ] {
+            assert!(
+                !text.contains(banned),
+                "{name} still publishes the superseded unconditional rule via {banned:?}: a \
+                 fallback answer is now bounded by the peak of the tier that ANSWERED it"
+            );
+        }
+    }
+}
