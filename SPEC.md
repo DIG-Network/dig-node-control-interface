@@ -318,7 +318,7 @@ opposite remedies — see §4.2.
   `"fallback"` answer MUST report the oracle's own peak and a `"db"` answer the replica's.
   `synced` is `true` if and only if that reported `peak_height` is the height the answering
   tier reported in the SAME read that produced these figures; a peak carried over from an
-  earlier read does not satisfy it. A node that cannot bind the two together in one read MUST
+  earlier read, or obtained from any other exchange, party or tier, does not satisfy it. A node that cannot bind the two together in one read MUST
   report `peak_height:null` and `synced:false`, and MUST report the same when the answering
   tier tracks no peak and for a cached row. `synced:true` on a `"fallback"` answer asserts only
   that one disclosed oracle answered self-consistently; it is not corroboration by the network.
@@ -624,11 +624,16 @@ opposite remedies — see §4.2.
 
   `source` names the TIER that produced the figures, and every freshness field describes THAT tier:
   `"db"` is the node's own chain replica (`synced:true`, `peak_height` = the replica's peak);
-  `"fallback"` is a third-party coinset HTTP oracle, which MUST report THAT ORACLE's own reported peak
-  and `synced` measured against it. A node MUST NOT bound a `"fallback"` answer by its own replica's
-  peak, nor by the high-water mark of its held peers: neither produced the figure, so neither bounds its
-  freshness. `synced:false` with `peak_height:null` is required where the answering tier tracks no peak
-  of its own, and for a cached row. A `"fallback"` answer also means the queried address
+  `"fallback"` is a third-party coinset HTTP oracle. `synced` is a CONCLUSION, and it is defined
+  exactly: it is `true` if and only if the reported `peak_height` is the height the tier that ANSWERED
+  reported in the SAME read that produced these figures, and that tier reports the figures complete as
+  of it. A peak carried over from an earlier read, or obtained from any other exchange, party or tier,
+  does NOT satisfy this. `synced:true` on a `"fallback"` answer therefore asserts only that ONE
+  disclosed oracle answered self-consistently. It is not corroboration by the network and MUST NOT be
+  presented as confirmation by it; a consumer that badges money as current from it MUST also surface
+  the tier. `false` and `null` are the honest answer in three cases, and a node MUST emit them there:
+  an answering tier that tracks no peak of its own; a CACHED row, which no live tier bounds; and a peak
+  the node cannot bind to the same read as the figures. A `"fallback"` answer also means the queried address
   WAS DISCLOSED off-node. `source` is ABSENT/`null` only from a node predating tier disclosure — a
   third state meaning "tier unknown", never a defaulted tier; consumers MUST NOT treat it as either.
   `synced:false` means the figures are STALE, or came from a tier that tracks no peak; `peak_height` is
