@@ -692,15 +692,18 @@ pub struct WalletBalanceResult {
     /// `Option` field as `None` — so no `#[serde(default)]` is needed and none is written; a
     /// REQUIRED field here would reject an older node's payload outright.
     pub source: Option<WalletReadSource>,
-    /// Whether THESE figures reflect a caught-up local view. When `false`, they are STALE or came
-    /// from the fallback tier.
+    /// Whether THESE figures reflect a caught-up view of the tier that ANSWERED, measured against
+    /// that tier's own peak. When `false`, they are STALE or drawn from a tier that tracks no peak.
     ///
-    /// This describes the ANSWER, not the node: a [`WalletReadSource::Fallback`] answer is always
-    /// `false`, however caught-up the node's own replica happens to be.
+    /// This describes the ANSWER, not the node: a [`WalletReadSource::Fallback`] answer is measured
+    /// against the ORACLE's peak, never against the node's own replica or its held peers, neither of
+    /// which produced the figures.
     pub synced: bool,
-    /// The peak block height the reported figures reflect, or `null` when no height applies —
-    /// including every [`WalletReadSource::Fallback`] answer, whose figures came from the oracle's
-    /// chain view rather than the node's.
+    /// The peak block height of the tier that ANSWERED, or `null` when that tier tracks no peak.
+    ///
+    /// For a [`WalletReadSource::Fallback`] answer this is the oracle's own reported height, and for
+    /// a [`WalletReadSource::Db`] answer the replica's. It is never the node's replica height stamped
+    /// onto an oracle's figures, and never a CACHED row, which no live tier bounds.
     pub peak_height: Option<u32>,
 }
 
@@ -829,9 +832,10 @@ pub struct WalletCoinsResult {
     pub cursor: Option<String>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
-    /// Whether THESE coins reflect a caught-up local view; always `false` for a fallback answer.
+    /// Whether THESE coins reflect a caught-up view of the tier that ANSWERED, measured against that
+    /// tier's own peak — never against the node's replica or its held peers.
     pub synced: bool,
-    /// The peak height these coins reflect, or `null` when none applies (every fallback answer).
+    /// The peak height of the tier that ANSWERED, or `null` when that tier tracks no peak.
     pub peak_height: Option<u32>,
 }
 
@@ -872,11 +876,15 @@ where
 /// # The freshness fields are honest, not decorative
 ///
 /// [`source`](Self::source) discloses which tier answered, and every freshness field describes THAT
-/// tier — the same rule the by-address reads carry. A `fallback` answer MUST report
-/// [`synced`](Self::synced) `false` and [`peak_height`](Self::peak_height) `null` however caught-up
-/// the node's own replica is, because the oracle produced the figures and the replica neither
-/// produced them nor bounds their freshness. A `db` answer means the node's OWN replica answered, so
-/// it MUST report `synced: true` and the replica's peak.
+/// tier — the same rule the by-address reads carry. The bound MUST come from the party that PRODUCED
+/// the answer: a `fallback` answer MUST report the ORACLE's own peak as
+/// [`peak_height`](Self::peak_height) and [`synced`](Self::synced) MEASURED against that peak, and a
+/// `db` answer the replica's peak and `synced` measured against it. A node MUST NOT bound an answer by
+/// its own replica's peak, nor by the high-water mark of its held peers, when neither produced the
+/// answer — that stamps a freshness claim onto figures whose freshness it does not bound.
+///
+/// `false` and `null` remain the honest answer in two cases, and a node MUST emit them there: an
+/// answering tier that tracks no peak of its own, and a CACHED row, which no live tier bounds.
 ///
 /// # A negative answer requires a view that could have held the coin
 ///
@@ -907,9 +915,10 @@ pub struct WalletCoinByIdResult {
     pub coin: Option<WalletCoinRecord>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
-    /// Whether this answer reflects a caught-up local view; `false` for every fallback answer.
+    /// Whether this answer reflects a caught-up view of the tier that ANSWERED, measured against
+    /// that tier's own peak — never against the node's replica or its held peers.
     pub synced: bool,
-    /// The peak height this answer reflects, or `null` when none applies (every fallback answer).
+    /// The peak height of the tier that ANSWERED, or `null` when that tier tracks no peak.
     pub peak_height: Option<u32>,
 }
 
@@ -979,9 +988,10 @@ pub struct WalletCoinSpendResult {
     pub spend: Option<WalletCoinSpend>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
-    /// Whether this answer reflects a caught-up local view; `false` for every fallback answer.
+    /// Whether this answer reflects a caught-up view of the tier that ANSWERED, measured against
+    /// that tier's own peak — never against the node's replica or its held peers.
     pub synced: bool,
-    /// The peak height this answer reflects, or `null` when none applies (every fallback answer).
+    /// The peak height of the tier that ANSWERED, or `null` when that tier tracks no peak.
     pub peak_height: Option<u32>,
 }
 
@@ -1071,9 +1081,10 @@ pub struct WalletCoinsByParentResult {
     pub cursor: Option<String>,
     /// Which tier answered, or `None` from a node too old to disclose it. See [`WalletReadSource`].
     pub source: Option<WalletReadSource>,
-    /// Whether these children reflect a caught-up local view; `false` for every fallback answer.
+    /// Whether these children reflect a caught-up view of the tier that ANSWERED, measured against
+    /// that tier's own peak — never against the node's replica or its held peers.
     pub synced: bool,
-    /// The peak height these children reflect, or `null` when none applies (every fallback answer).
+    /// The peak height of the tier that ANSWERED, or `null` when that tier tracks no peak.
     pub peak_height: Option<u32>,
 }
 
@@ -3337,7 +3348,7 @@ impl CollateralUnknownReason {
 /// node derives identically; the margin is a local operator preference that MUST NOT be a consensus
 /// input. Returning them from one method would invite exactly the conflation dig-app `SPEC.md`
 /// §3.7b forbids — read the margin from
-/// [`CollateralMarginResult`](crate::results::CollateralMarginResult) instead.
+/// [`CollateralMarginResult`] instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CollateralRequirementResult {

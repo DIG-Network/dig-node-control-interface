@@ -314,9 +314,10 @@ opposite remedies — see §4.2.
   parameter: a coin id is not asset-scoped.
 
   `source` names which tier answered, and every freshness field describes THAT tier, exactly as for
-  `WalletBalanceResult` below: a `"fallback"` answer MUST report `synced:false` and
-  `peak_height:null`; a `"db"` answer means the node's own replica answered and MUST report
-  `synced:true` and that replica's peak. A caller needing a height to bound a confirmation against
+  `WalletBalanceResult` below: the bound MUST come from the tier that ANSWERED, so a `"fallback"`
+  answer MUST report the oracle's own peak and `synced` measured against it, and a `"db"` answer the
+  replica's peak and `synced` measured against that. `synced:false` with `peak_height:null` is the
+  required answer when the answering tier tracks no peak, and for a cached row. A caller needing a height to bound a confirmation against
   reads `control.wallet.peak`.
 
   **A node MUST NOT answer `coin:null` from a view that could not have held the coin.** A replica
@@ -614,13 +615,15 @@ opposite remedies — see §4.2.
 
   `source` names the TIER that produced the figures, and every freshness field describes THAT tier:
   `"db"` is the node's own chain replica (`synced:true`, `peak_height` = the replica's peak);
-  `"fallback"` is a third-party coinset HTTP oracle, which MUST report `synced:false` and
-  `peak_height:null` however caught-up the node's own replica is, because the replica neither
-  produced that figure nor bounds its freshness. A `"fallback"` answer also means the queried address
+  `"fallback"` is a third-party coinset HTTP oracle, which MUST report THAT ORACLE's own reported peak
+  and `synced` measured against it. A node MUST NOT bound a `"fallback"` answer by its own replica's
+  peak, nor by the high-water mark of its held peers: neither produced the figure, so neither bounds its
+  freshness. `synced:false` with `peak_height:null` is required where the answering tier tracks no peak
+  of its own, and for a cached row. A `"fallback"` answer also means the queried address
   WAS DISCLOSED off-node. `source` is ABSENT/`null` only from a node predating tier disclosure — a
   third state meaning "tier unknown", never a defaulted tier; consumers MUST NOT treat it as either.
-  `synced:false` means the figures are STALE or fallback-served; `peak_height` is the block height
-  the figures reflect (present as `null`, never omitted, when no height applies).
+  `synced:false` means the figures are STALE, or came from a tier that tracks no peak; `peak_height` is
+  the peak of the tier that ANSWERED (present as `null`, never omitted, when that tier tracks none).
   The `asset` request field is an **`Asset`** (see "Asset" below). This result is a strict
   SUPERSET of dig-app's `BalanceResponse {balance}`: a consumer reading only `{balance}` deserializes
   it losslessly (unknown fields ignored), which is the no-consumer-change guarantee pinned by a KAT.
