@@ -313,12 +313,21 @@ opposite remedies — see §4.2.
   so that an unanswerable question never wears the shape of an answer. There is no `asset`
   parameter: a coin id is not asset-scoped.
 
-  `source` names which tier answered, and every freshness field describes THAT tier, exactly as for
-  `WalletBalanceResult` below: the bound MUST come from the tier that ANSWERED, so a `"fallback"`
-  answer MUST report the oracle's own peak and `synced` measured against it, and a `"db"` answer the
-  replica's peak and `synced` measured against that. `synced:false` with `peak_height:null` is the
-  required answer when the answering tier tracks no peak, and for a cached row. A caller needing a height to bound a confirmation against
-  reads `control.wallet.peak`.
+  `source` names which tier answered, and every freshness field describes THAT tier, exactly as
+  for `WalletBalanceResult` below: the bound MUST come from the tier that ANSWERED, so a
+  `"fallback"` answer MUST report the oracle's own peak and a `"db"` answer the replica's.
+  `synced` is `true` if and only if that reported `peak_height` is the height the answering
+  tier reported in the SAME read that produced these figures; a peak carried over from an
+  earlier read does not satisfy it. A node that cannot bind the two together in one read MUST
+  report `peak_height:null` and `synced:false`, and MUST report the same when the answering
+  tier tracks no peak and for a cached row. `synced:true` on a `"fallback"` answer asserts only
+  that one disclosed oracle answered self-consistently; it is not corroboration by the network.
+
+  A caller needing a height to bound a confirmation against reads THIS answer's own
+  `peak_height`. It MAY read `control.wallet.peak` only when that is `null`, and MUST then
+  treat the two as possibly different chain views: `WalletPeakResult` carries no `source`, so
+  which tier answered it is undisclosed, and a confirmation count computed across the two
+  MUST fail closed rather than report a number neither view supports.
 
   **A node MUST NOT answer `coin:null` from a view that could not have held the coin.** A replica
   that is not caught up, or a local index that is address-scoped rather than a full chain view, has

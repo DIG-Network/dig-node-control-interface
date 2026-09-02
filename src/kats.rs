@@ -5979,8 +5979,13 @@ fn a_malformed_bond_cursor_is_refused_rather_than_restarting_the_walk() {
 /// would pass on exactly that half-done change.
 ///
 /// The scope is the results that DISCLOSE a tier — those declaring `source: Option<WalletReadSource>`.
-/// `WalletPeakResult` and `WalletSyncStatusResult` are deliberately outside it: they carry no `source`
-/// and are defined as the node's OWN replica height, so the answering-tier rule has nothing to bind.
+/// `WalletPeakResult` and `WalletSyncStatusResult` are outside it for DIFFERENT reasons.
+/// `WalletSyncStatusResult` is genuinely replica-pinned: `SPEC.md` forbids its `peak_height` the
+/// oracle fallback outright, so the answering-tier rule has nothing to bind there. `WalletPeakResult`
+/// DOES vary its answering tier — `control.wallet.peak` deliberately falls back to the coinset oracle
+/// — but declares no `source`, so the rule cannot be EXPRESSED on it. That is a deferred wire-shape
+/// gap, not an exemption on the merits: it is tracked as issue #46, and until that field lands a
+/// caller MUST NOT assume a `WalletPeakResult` is replica-sourced.
 /// Anchoring on the `source` declaration rather than on an occurrence count means a tier-disclosing
 /// result added later is covered the day it is added, instead of silently lowering the denominator.
 #[test]
