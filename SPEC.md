@@ -128,6 +128,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.wallet.reservations.held` | yes | delegated | — | `{reserved:[ReservedCoin], as_of_unix:u64}` |
 | `control.wallet.reservations.reserve` | yes | delegated | `{coin_ids:[string], ttl_secs?:u64}` | `{reservation_id, coin_ids, expires_at_unix, ttl_secs}` |
 | `control.wallet.reservations.release` | yes | delegated | `{reservation_id:string}` | `{released:bool, coin_ids:[string]}` |
+| `control.wallet.resetCoinDb` | yes | delegated | `{confirm:bool=false}` | `{coins_dropped:u64, staged_dropped:u64}`; DESTRUCTIVE -- discards the cached coin database and re-syncs from chain. No key material is affected. Refuses as `INVALID_PARAMS` unless `confirm==true`, and refuses while a spend is in flight. |
 | `control.spends.list` | yes | owned | `{since_ms?:u64, until_ms?:u64, store_id?:string, kind?:string, status?:string, after_id?:string, limit?:u32}` | `{spends:[AutomatedSpend], complete:bool, cursor:string\|null, unreadable_lines:u32}` |
 | `control.collateral.requirement` | yes | owned | — | `CollateralRequirementResult` (`{state:"known", epoch, protocol_version, required_per_store_dig_base_units, stores, owners, multiplier_micros, handicap_dig_base_units}` \| `{state:"unknown", reason}`) |
 | `control.collateral.margin.get` | yes | owned | — | `{margin_bp:u64}` |
