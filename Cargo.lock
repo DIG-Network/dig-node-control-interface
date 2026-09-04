@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "dig-node-control-interface"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "async-trait",
  "futures",
