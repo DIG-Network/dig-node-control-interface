@@ -406,6 +406,17 @@ pub trait ControlHandler: Sync {
     /// custody keys: this method reports what was ENROLLED through it, and a caller reconciling
     /// against a superset would unwatch keys it never watched.
     async fn wallet_watched(&self) -> Result<results::WalletWatchedResult, ControlError>;
+    /// `control.wallet.resetCoinDb` (TOKEN-GATED, DESTRUCTIVE)
+    ///
+    /// Discards this node's cached coin database and re-syncs it from chain. Every dropped table is
+    /// chain-derived and reproduced by syncing -- no key material is affected. The implementation
+    /// MUST refuse as `INVALID_PARAMS` unless the caller set `confirm = true`, and MUST refuse a
+    /// reset while a spend is in flight (a hold this call would otherwise silently invalidate) --
+    /// see [`WalletResetCoinDbParams`](params::WalletResetCoinDbParams).
+    async fn wallet_reset_coin_db(
+        &self,
+        params: params::WalletResetCoinDbParams,
+    ) -> Result<results::WalletResetCoinDbResult, ControlError>;
     /// `control.wallet.reservations.held` (READ-only, TOKEN-GATED)
     ///
     /// Gated although it is a read: the caller supplies nothing, so the answer names this node's OWN
@@ -780,6 +791,11 @@ pub trait ControlHandler: Sync {
                 encode(self.wallet_unwatch(params.validated()?).await?)
             }
             ControlMethod::WalletWatched => encode(self.wallet_watched().await?),
+            // Re-validated here idempotently; deserialization already enforced the same rule.
+            ControlMethod::WalletResetCoinDb => {
+                let params: params::WalletResetCoinDbParams = decode(params)?;
+                encode(self.wallet_reset_coin_db(params).await?)
+            }
             ControlMethod::WalletReservationsHeld => encode(self.wallet_reservations_held().await?),
             ControlMethod::WalletReservationsReserve => {
                 encode(self.wallet_reservations_reserve(decode(params)?).await?)

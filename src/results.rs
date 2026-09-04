@@ -1903,6 +1903,19 @@ pub struct WalletReservationsReleaseResult {
     pub coin_ids: Vec<String>,
 }
 
+/// `control.wallet.resetCoinDb` — how much cache the reset actually discarded.
+///
+/// Both counts describe local, chain-derived cache rows dropped, never money lost — every one of
+/// them is reproduced by the re-sync that follows. `coins_dropped == 0` on an already-empty cache is
+/// a SUCCESS, not a sign the reset failed to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletResetCoinDbResult {
+    /// Confirmed coin rows discarded from the cache.
+    pub coins_dropped: u64,
+    /// Staged (not-yet-confirmed) coin rows discarded from the cache.
+    pub staged_dropped: u64,
+}
+
 /// `pairing.request` — the pairing handshake bootstrap (OPEN, no token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingRequestResult {

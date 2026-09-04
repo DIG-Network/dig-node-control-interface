@@ -146,6 +146,7 @@ and pushes bytes somebody else signed.
 | `control.wallet.reservations.held` | T | del | — | `{reserved:[{coin_id, reservation_id, expires_at_unix}], as_of_unix}`; the coins committed to in-flight spends. `reserved:[]` means NOTHING is held; a set that cannot be read is `-32047`, never an empty list. Narrows SELECTION, never a balance |
 | `control.wallet.reservations.reserve` | T | del | `{coin_ids:[string], ttl_secs?:u64}` | `{reservation_id, coin_ids, expires_at_unix, ttl_secs}`; ALL the named coins or none. A clash is `-32046 WALLET_COINS_RESERVED` — a WAIT, never a shortfall — and reserves nothing. The returned `ttl_secs` is the lifetime the node APPLIED, which may be shorter than requested |
 | `control.wallet.reservations.release` | T | del | `{reservation_id:string}` | `{released:bool, coin_ids:[string]}`; frees a hold ahead of its TTL. A handle naming no live reservation is a SUCCESS with `released:false`. Every hold also lapses on its own, so an abandoned one is never a permanent lockout |
+| `control.wallet.resetCoinDb` | T | del | `{confirm:bool=false}` | `{coins_dropped:u64, staged_dropped:u64}`; DESTRUCTIVE — discards this node's cached coin database and re-syncs it from chain. No key material is affected, coins live on chain and are re-derived by the resync. Refuses as `INVALID_PARAMS` unless `confirm==true` (an omitted field is refused exactly like an explicit `false`), and refuses while a spend is in flight so a reset can never race a hold |
 
 ### dig-profile bodies (delegated to the engine)
 

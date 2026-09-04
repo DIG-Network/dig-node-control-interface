@@ -1370,6 +1370,30 @@ pub struct WalletReservationsReleaseParams {
 }
 control_call!(WalletReservationsReleaseParams => ControlMethod::WalletReservationsRelease, results::WalletReservationsReleaseResult);
 
+/// `control.wallet.resetCoinDb` params: discard the cached coin database and re-sync from chain.
+///
+/// # `confirm` is the on-wire acknowledgement, not a default
+///
+/// The field defaults to `false` under [`Deserialize`] so an OMITTED field reads exactly like an
+/// explicit `false` -- a client that forgot the flag gets the same refusal as one that typed it. The
+/// handler MUST refuse with `INVALID_PARAMS` unless `confirm == true`; nothing about deserializing
+/// this struct performs the reset.
+///
+/// # No key material is affected
+///
+/// Every table this clears is chain-derived and reproduced by syncing; a seed or key is never
+/// touched. See [`WalletResetCoinDbResult`](results::WalletResetCoinDbResult) for what is reported
+/// back, and the handler's own contract for the SpendInFlight refusal that protects a hold in
+/// progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletResetCoinDbParams {
+    /// Must be `true` or the call is refused as `INVALID_PARAMS`. Defaults to `false` when omitted,
+    /// so an omitted field is refused exactly like an explicit one.
+    #[serde(default)]
+    pub confirm: bool,
+}
+control_call!(WalletResetCoinDbParams => ControlMethod::WalletResetCoinDb, results::WalletResetCoinDbResult);
+
 impl<'de> Deserialize<'de> for WalletReservationsReserveParams {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

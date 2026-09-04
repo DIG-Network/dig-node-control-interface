@@ -1565,6 +1565,24 @@ impl ControlHandler for MockNode {
             public_keys: set.borrow().iter().cloned().collect(),
         }))
     }
+    /// Mirrors the real node's own INVALID_PARAMS refusal when `confirm` was not set -- the one
+    /// piece of the real handler's business logic worth reproducing here, because a mock that always
+    /// "succeeds" would let a client that forgot the flag pass its own KATs.
+    async fn wallet_reset_coin_db(
+        &self,
+        params: WalletResetCoinDbParams,
+    ) -> Result<results::WalletResetCoinDbResult, ControlError> {
+        if !params.confirm {
+            return Err(ControlError::of(
+                ControlErrorCode::InvalidParams,
+                "control.wallet.resetCoinDb requires params.confirm = true",
+            ));
+        }
+        Ok(results::WalletResetCoinDbResult {
+            coins_dropped: 3,
+            staged_dropped: 1,
+        })
+    }
     async fn wallet_reservations_held(
         &self,
     ) -> Result<results::WalletReservationsHeldResult, ControlError> {
@@ -1793,6 +1811,43 @@ fn round_trip<C: crate::traits::ControlCall>(call: &C) -> Result<C::Output, Cont
     let req = build_request(RequestId::Number(1), call);
     let resp = block_on(node.dispatch(req));
     parse_response::<C>(resp)
+}
+
+/// **`control.wallet.resetCoinDb` refuses without `confirm: true` -- the omitted field reads exactly
+/// like an explicit `false`, so this ALSO covers a client that forgot the flag entirely.**
+#[test]
+fn reset_coin_db_refuses_without_confirm() {
+    let err = round_trip(&WalletResetCoinDbParams { confirm: false }).unwrap_err();
+    assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+}
+
+/// **`control.wallet.resetCoinDb` with `confirm: true` reaches the handler and reports what it
+/// dropped.**
+#[test]
+fn reset_coin_db_with_confirm_reaches_the_handler() {
+    let result = round_trip(&WalletResetCoinDbParams { confirm: true }).unwrap();
+    assert_eq!(
+        (result.coins_dropped, result.staged_dropped),
+        (3, 1),
+        "the mock handler's fixed report must come back byte-identical through the dispatcher"
+    );
+}
+
+/// **A raw request that OMITS `confirm` entirely is refused exactly like an explicit `false`.**
+///
+/// This is the field's `#[serde(default)]` doing its job: a client that forgot the flag must get the
+/// SAME refusal as one that typed it, never a deserialization error that reads as a different kind of
+/// mistake and never a silent reset.
+#[test]
+fn reset_coin_db_omitting_confirm_is_refused_like_an_explicit_false() {
+    let node = MockNode;
+    let req = JsonRpcRequest::new(
+        RequestId::Number(1),
+        ControlMethod::WalletResetCoinDb.name(),
+        json!({}),
+    );
+    let err = block_on(node.dispatch(req)).into_result().unwrap_err();
+    assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
 }
 
 #[test]
@@ -2433,6 +2488,7 @@ fn minimal_params(m: ControlMethod) -> Value {
         ControlMethod::ProfileGetBody => json!({ "store_id": STORE, "root": ROOT }),
         ControlMethod::WalletReservationsReserve => json!({ "coin_ids": [] }),
         ControlMethod::WalletReservationsRelease => json!({ "reservation_id": "mock-res-absent" }),
+        ControlMethod::WalletResetCoinDb => json!({ "confirm": true }),
         _ => json!({}),
     }
 }
