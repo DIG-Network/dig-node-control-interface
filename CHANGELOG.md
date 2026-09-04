@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.32.0] - 2026-09-04
+
+### Features
+- **wallet:** Declare control.wallet.resetCoinDb, discarding the cached coin database (#48)
+
 ## [0.31.0] - 2026-09-02
 
 ### Features
