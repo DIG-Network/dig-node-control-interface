@@ -109,20 +109,29 @@ pub trait ControlHandler: Sync {
     ///
     /// An implementation MUST:
     ///
-    /// - **Apply the change LIVE, with no restart hint.** Unlike `config_set_upstream`, nothing
-    ///   here is read only at process start — dig-node#562's own advertise decision is recomputed
-    ///   every mirror-coin-creation pass, so a persisted override is picked up by the very next one.
+    /// - **Answer `requires_restart` TRUTHFULLY for its OWN implementation — never a value this
+    ///   contract fixes.** dig-node#562's advertise decision is recomputed every mirror-coin-
+    ///   creation pass rather than read once at start, so LIVE is a real, reachable answer here,
+    ///   unlike `config_set_upstream`'s override. It is not, however, automatic: a persisted
+    ///   override only counts as live once dig-node's OWN recomputation actually reads it from
+    ///   somewhere this call wrote to. Reading it from `DIG_MIRROR_ADVERTISE_URLS`, an OS
+    ///   ENVIRONMENT VARIABLE, does NOT qualify — a running process cannot change its own
+    ///   environment, so an implementation backed by that variable MUST answer `true`. Answering
+    ///   `false` while still reading the environment would tell dig-app "saved" about a URL the
+    ///   node is not actually advertising, which is a lie about whether a privileged action took
+    ///   effect — the one thing this contract never defers.
     /// - **Never apply dig-node#562's routability or "this machine only" checks to REJECT the
     ///   call.** Those gate what a DERIVED address may publish; an operator's value is a
     ///   deliberate choice (dig-node#562), and rejecting a LAN address here would silently break
     ///   every LAN-only deployment. `params.validated()` already performed the ONE check this
     ///   contract makes — well-formedness — before this method is ever called.
-    /// - **Return the view a follow-up `config_get` would show**, so a caller never has to re-read
-    ///   to learn what took effect — see [`results::MirrorAdvertiseView`].
+    /// - **Return the view a follow-up `config_get` would show ONCE `requires_restart` clears**,
+    ///   so a caller never has to re-read to learn what was persisted — see
+    ///   [`results::SetMirrorAdvertiseUrlsResult`].
     async fn config_set_mirror_advertise_urls(
         &self,
         params: params::SetMirrorAdvertiseUrlsParams,
-    ) -> Result<results::MirrorAdvertiseView, ControlError>;
+    ) -> Result<results::SetMirrorAdvertiseUrlsResult, ControlError>;
     /// `control.log.setLevel`
     async fn log_set_level(
         &self,

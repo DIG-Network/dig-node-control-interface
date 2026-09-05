@@ -163,7 +163,7 @@ impl SetMirrorAdvertiseUrlsParams {
         }
     }
 }
-control_call!(SetMirrorAdvertiseUrlsParams => ControlMethod::ConfigSetMirrorAdvertiseUrls, results::MirrorAdvertiseView);
+control_call!(SetMirrorAdvertiseUrlsParams => ControlMethod::ConfigSetMirrorAdvertiseUrls, results::SetMirrorAdvertiseUrlsResult);
 
 /// `control.log.setLevel` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

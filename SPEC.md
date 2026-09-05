@@ -83,7 +83,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.status` | yes | owned | — | `StatusResult` |
 | `control.config.get` | yes | owned | — | `ConfigResult` |
 | `control.config.setUpstream` | yes | owned | `{upstream:string}` | `{upstream, requires_restart}` |
-| `control.config.setMirrorAdvertiseUrls` | yes | owned | `{urls?:[string]}` (§4.2h) | `MirrorAdvertiseView` |
+| `control.config.setMirrorAdvertiseUrls` | yes | owned | `{urls?:[string]}` (§4.2h) | `{mirror_advertise:MirrorAdvertiseView, requires_restart:bool}` |
 | `control.log.setLevel` | yes | owned | `{filter:string}` | `{filter}` |
 | `control.cache.get` | yes | owned | — | `CacheView` |
 | `control.cache.setCap` | yes | owned | `{cap_bytes:u64}` | `{cap_bytes}` (floored 64 MiB) |
@@ -217,13 +217,16 @@ opposite remedies — see §4.2.
   `null` as "the answering node predates this field", never as "nothing to advertise" (that is
   `MirrorAdvertiseState::Off` or `NoPublicAddress`, both of which carry a real view).
 - **`MirrorAdvertiseView`** (§4.2h): `{urls:[string], operator_override:[string]|null,
-  state:MirrorAdvertiseState}`. Embedded in `ConfigResult` and reused whole as the result of
-  `control.config.setMirrorAdvertiseUrls`, so a caller never has to re-read `config.get` to learn
-  what its `.set` call actually applied.
+  state:MirrorAdvertiseState}`. Embedded in `ConfigResult`, and embedded in turn in
+  `SetMirrorAdvertiseUrlsResult`.
 - **`MirrorAdvertiseState`** (§4.2h): one of `"advertising_override"`, `"advertising_derived"`,
   `"off"`, `"no_public_address"`, `"uncorroborated_address"`, `"no_relay"` — the exact six spellings
   dig-node's own `AdvertiseState` uses (dig-node#562), restated here so client and node cannot drift
   on what one of them means.
+- **`SetMirrorAdvertiseUrlsResult`** (§4.2h): `{mirror_advertise:MirrorAdvertiseView,
+  requires_restart:bool}`. `mirror_advertise` is what a follow-up `config.get` will show ONCE this
+  takes effect; `requires_restart` says whether that is NOW or after a restart, and it is a report
+  of the answering node's OWN implementation, not a value this contract fixes either way (§4.2h).
 - **`CacheView`**: `{cap_bytes:u64, used_bytes:u64, dir:string, shared:bool}`.
 - **`HostedStore`**: `{store_id:string, pinned:bool, capsule_count:u64, total_bytes:u64,
   capsules:[CapsuleEntry]}`.
@@ -1154,16 +1157,28 @@ to dig-node's own advertise module, applied when it turns this override into wha
 publishes — so applying the stricter rule here would silently break every LAN-only deployment while
 looking like a safety improvement.
 
-**Applied LIVE — no restart hint, unlike `control.config.setUpstream`.** dig-node#562's advertise
-decision is recomputed every mirror-coin-creation pass rather than read once at process start, so a
-conforming node picks up a persisted override on its very next pass. An implementation's result MUST
-NOT claim `requires_restart`; there is no such field on `MirrorAdvertiseView`.
+**The result MUST state whether the change is live yet — it MUST NOT assume either answer.**
+`SetMirrorAdvertiseUrlsResult` is `{mirror_advertise:MirrorAdvertiseView, requires_restart:bool}`
+(§4.1); `mirror_advertise` is what a follow-up `config.get` will show ONCE this takes effect, and
+`requires_restart` says whether that is NOW or after a restart. `state` MUST be one of the six
+values dig-node#562's `AdvertiseState` defines; a client MUST treat it as the authority on *why*
+`urls` looks the way it does, and MUST NOT infer a reason from an empty `urls` list alone — four of
+the six states produce one, for four different reasons with four different remedies.
 
-**The result is `MirrorAdvertiseView` — the SAME shape `config.get` embeds** (§4.1), so a caller never
-re-reads `config.get` to learn what its own `.set` call just applied. `state` MUST be one of the six
-values dig-node#562's `AdvertiseState` defines (§4.1); a client MUST treat it as the authority on
-*why* `urls` looks the way it does, and MUST NOT infer a reason from an empty `urls` list alone — four
-of the six states produce one, for four different reasons with four different remedies.
+**`requires_restart` is a report of the answering node's OWN implementation, and this contract
+fixes it in NEITHER direction.** dig-node#562's advertise decision is recomputed every
+mirror-coin-creation pass rather than read once at process start, unlike
+`control.config.setUpstream`'s override — so LIVE is a real, reachable answer here, and an
+implementation MUST NOT be required to answer `requires_restart:true` unconditionally merely
+because a sibling method does. It is, however, NOT the answer today: dig-node#562's recomputation
+reads `DIG_MIRROR_ADVERTISE_URLS` from the OS ENVIRONMENT of the running process, and no control
+call can change the environment of a process already running. An implementation backed by that
+variable MUST answer `requires_restart:true`; it MUST answer `false` only once it persists this
+override somewhere its own advertise pass actually re-reads (a config-store write this call feeds,
+never an environment variable). **Answering `false` while still reading the environment is a
+surface lying about whether a privileged action took effect** — dig-app would render "saved" while
+the node keeps advertising its old value, which is the one class of defect this contract never
+defers regardless of priority (CLAUDE.md §1.2).
 
 **This method is TOKEN-GATED at the ORDINARY tier, never the MASTER tier (§2.1).** Its effect
 outlives the token exactly as `control.chiaPeers.add` and `control.config.setUpstream` do, but the

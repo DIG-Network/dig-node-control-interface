@@ -88,7 +88,8 @@ pub enum ControlMethod {
     /// `control.config.setUpstream` — persist an upstream-RPC override (effective on restart).
     ConfigSetUpstream,
     /// `control.config.setMirrorAdvertiseUrls` — override (or clear) the URLs this node
-    /// advertises in its mirror-coin memos (dig-node#562), live, no restart required.
+    /// advertises in its mirror-coin memos (dig-node#562). The result states whether that took
+    /// effect immediately or needs a restart — see [`crate::results::SetMirrorAdvertiseUrlsResult`].
     ConfigSetMirrorAdvertiseUrls,
     /// `control.log.setLevel` — live-swap the running node's tracing level filter.
     LogSetLevel,
@@ -569,7 +570,7 @@ impl ControlMethod {
             ControlMethod::Status => "A rich node status snapshot (version, uptime, addr, cache, hosted/pinned counts, sync availability).",
             ControlMethod::ConfigGet => "The node's effective configuration (addr/port, upstream + override, cache dir/shared, config path, sync availability, mirror advertise-URL view).",
             ControlMethod::ConfigSetUpstream => "Persist an upstream-RPC override; takes effect on next node start (requires_restart).",
-            ControlMethod::ConfigSetMirrorAdvertiseUrls => "Override (urls: a non-empty list) or clear (urls: null/absent) the URLs this node advertises in its own mirror-coin memos; applied LIVE, no restart. An explicit EMPTY list is refused rather than guessed at -- it is ambiguous between advertising nothing and reverting to the derived default. Checked only for a well-formed absolute URL (scheme + host): an operator's LAN or private address is accepted on purpose, the same derived-vs-operator asymmetry dig-node#562 established.",
+            ControlMethod::ConfigSetMirrorAdvertiseUrls => "Override (urls: a non-empty list) or clear (urls: null/absent) the URLs this node advertises in its own mirror-coin memos. The result's requires_restart says whether that took effect now or needs a node restart -- check it before telling anyone the change is live. An explicit EMPTY list is refused rather than guessed at -- it is ambiguous between advertising nothing and reverting to the derived default. Checked only for a well-formed absolute URL (scheme + host): an operator's LAN or private address is accepted on purpose, the same derived-vs-operator asymmetry dig-node#562 established.",
             ControlMethod::LogSetLevel => "Live-swap the running node's tracing EnvFilter directive (not persisted).",
             ControlMethod::CacheGet => "The on-disk content-cache view: cap_bytes, used_bytes, dir, shared.",
             ControlMethod::CacheSetCap => "Set the on-disk cache size cap in bytes (floored at 64 MiB).",

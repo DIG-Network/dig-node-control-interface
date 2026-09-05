@@ -318,12 +318,12 @@ impl MirrorAdvertiseState {
     ];
 }
 
-/// The mirror advertise-URL view: embedded in [`ConfigResult`], and the whole answer to
-/// `control.config.setMirrorAdvertiseUrls`.
+/// The mirror advertise-URL view: embedded in [`ConfigResult`], and embedded in turn in
+/// [`SetMirrorAdvertiseUrlsResult`].
 ///
-/// Shared between the get and the set the way [`CollateralMarginResult`] is shared between
-/// `control.collateral.margin.get` and `.set` — the set's job is to hand back exactly the view a
-/// follow-up get would show, so a caller never has to re-read to learn what took effect.
+/// Not the WHOLE answer to `control.config.setMirrorAdvertiseUrls` — see
+/// [`SetMirrorAdvertiseUrlsResult::requires_restart`] for the reason a bare view is not enough
+/// there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorAdvertiseView {
     /// The URLs this node will actually publish in its NEXT mirror-coin advertisement. Empty in
@@ -338,6 +338,41 @@ pub struct MirrorAdvertiseView {
     pub operator_override: Option<Vec<String>>,
     /// Which of dig-node#562's six outcomes produced [`Self::urls`] this pass.
     pub state: MirrorAdvertiseState,
+}
+
+/// `control.config.setMirrorAdvertiseUrls` — the persisted view, plus whether it IS the live
+/// answer yet.
+///
+/// This does NOT reuse [`MirrorAdvertiseView`] alone the way [`CollateralMarginResult`] is shared
+/// between `.get` and `.set`, because unlike a margin this override has a genuine "not yet live"
+/// state a bare view cannot express. [`ConfigSetUpstream`](crate::method::ControlMethod::ConfigSetUpstream)'s
+/// sibling result already carries exactly this shape (`requires_restart`) — restated here rather
+/// than reused because the TRUTH VALUE differs per method, not merely the field name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetMirrorAdvertiseUrlsResult {
+    /// What a follow-up `control.config.get` will show ONCE this takes effect. See
+    /// [`Self::requires_restart`] for whether that is now or after a restart.
+    pub mirror_advertise: MirrorAdvertiseView,
+    /// Whether dig-node must be RESTARTED before [`Self::mirror_advertise`] is the answer a LIVE
+    /// `config.get` would give.
+    ///
+    /// This is a report of what THIS node's implementation actually did, never a value this
+    /// contract fixes — unlike [`SetUpstreamResult::requires_restart`], which is unconditionally
+    /// `true` because that override feeds `Config::from_env` at process start and can never be
+    /// read any other way. This override is different in kind: dig-node#562's advertise decision
+    /// is recomputed every mirror-coin-creation pass rather than read once at start, so LIVE is a
+    /// real, reachable answer here.
+    ///
+    /// It is not, however, the answer TODAY. dig-node#562's recomputation reads
+    /// `DIG_MIRROR_ADVERTISE_URLS` from the OS ENVIRONMENT of the running process
+    /// (`std::env::var`), and no control call can change the environment of a process already
+    /// running — so until dig-node persists this override somewhere its own advertise pass
+    /// actually re-reads (a config-store write this call feeds, rather than an environment
+    /// variable), a conforming node MUST answer `true` here. It MUST answer `false` the moment it
+    /// does, and this field is what lets that improvement ship without a wire-contract change: a
+    /// client that renders "saved" only when this is `false` never tells an operator their node is
+    /// advertising a URL it is not.
+    pub requires_restart: bool,
 }
 
 /// `control.log.setLevel` — the applied filter directive.
