@@ -105,6 +105,24 @@ pub trait ControlHandler: Sync {
         &self,
         params: params::SetUpstreamParams,
     ) -> Result<results::SetUpstreamResult, ControlError>;
+    /// `control.config.setMirrorAdvertiseUrls`
+    ///
+    /// An implementation MUST:
+    ///
+    /// - **Apply the change LIVE, with no restart hint.** Unlike `config_set_upstream`, nothing
+    ///   here is read only at process start — dig-node#562's own advertise decision is recomputed
+    ///   every mirror-coin-creation pass, so a persisted override is picked up by the very next one.
+    /// - **Never apply dig-node#562's routability or "this machine only" checks to REJECT the
+    ///   call.** Those gate what a DERIVED address may publish; an operator's value is a
+    ///   deliberate choice (dig-node#562), and rejecting a LAN address here would silently break
+    ///   every LAN-only deployment. `params.validated()` already performed the ONE check this
+    ///   contract makes — well-formedness — before this method is ever called.
+    /// - **Return the view a follow-up `config_get` would show**, so a caller never has to re-read
+    ///   to learn what took effect — see [`results::MirrorAdvertiseView`].
+    async fn config_set_mirror_advertise_urls(
+        &self,
+        params: params::SetMirrorAdvertiseUrlsParams,
+    ) -> Result<results::MirrorAdvertiseView, ControlError>;
     /// `control.log.setLevel`
     async fn log_set_level(
         &self,
@@ -721,6 +739,17 @@ pub trait ControlHandler: Sync {
             ControlMethod::ConfigGet => encode(self.config_get().await?),
             ControlMethod::ConfigSetUpstream => {
                 encode(self.config_set_upstream(decode(params)?).await?)
+            }
+            // `SetMirrorAdvertiseUrlsParams` derives `Deserialize`, so decoding enforces NOTHING
+            // beyond the field's type. `validated()` here is the SOLE enforcement of the
+            // reject-empty-list rule AND the well-formed-URL check -- dropping it admits an
+            // ambiguous or malformed override straight into the node's mirror-coin memo.
+            ControlMethod::ConfigSetMirrorAdvertiseUrls => {
+                let params: params::SetMirrorAdvertiseUrlsParams = decode(params)?;
+                encode(
+                    self.config_set_mirror_advertise_urls(params.validated()?)
+                        .await?,
+                )
             }
             ControlMethod::LogSetLevel => encode(self.log_set_level(decode(params)?).await?),
             ControlMethod::CacheGet => encode(self.cache_get().await?),

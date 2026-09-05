@@ -61,8 +61,9 @@ token, **M** = requires the MASTER token, **—** = open. `Route`: how the node 
 | Method | Auth | Route | Params | Result |
 |---|---|---|---|---|
 | `control.status` | T | own | — | `{running, service, version, commit, protocol, uptime_secs, addr, upstream, cache:{cap_bytes,used_bytes,dir,shared}, hosted_store_count, cached_capsule_count, pinned_store_count, sync:{available}}` |
-| `control.config.get` | T | own | — | `{addr, port, upstream, upstream_override:string\|null, cache_dir, cache_shared, config_path, sync_available}` |
+| `control.config.get` | T | own | — | `{addr, port, upstream, upstream_override:string\|null, cache_dir, cache_shared, config_path, sync_available, mirror_advertise:MirrorAdvertiseView\|null}` |
 | `control.config.setUpstream` | T | own | `{upstream:string}` | `{upstream, requires_restart:true}` |
+| `control.config.setMirrorAdvertiseUrls` | T | own | `{urls?:[string]\|null}` — `null`/absent clears (reverts to the derived default), non-empty sets, an explicit `[]` is refused | `MirrorAdvertiseView = {urls:[string], operator_override:[string]\|null, state:"advertising_override"\|"advertising_derived"\|"off"\|"no_public_address"\|"uncorroborated_address"\|"no_relay"}` |
 | `control.log.setLevel` | T | own | `{filter:string}` (an EnvFilter directive) | `{filter}` |
 
 ### Cache

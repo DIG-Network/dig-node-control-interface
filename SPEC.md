@@ -83,6 +83,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.status` | yes | owned | — | `StatusResult` |
 | `control.config.get` | yes | owned | — | `ConfigResult` |
 | `control.config.setUpstream` | yes | owned | `{upstream:string}` | `{upstream, requires_restart}` |
+| `control.config.setMirrorAdvertiseUrls` | yes | owned | `{urls?:[string]}` (§4.2h) | `MirrorAdvertiseView` |
 | `control.log.setLevel` | yes | owned | `{filter:string}` | `{filter}` |
 | `control.cache.get` | yes | owned | — | `CacheView` |
 | `control.cache.setCap` | yes | owned | `{cap_bytes:u64}` | `{cap_bytes}` (floored 64 MiB) |
@@ -208,8 +209,21 @@ opposite remedies — see §4.2.
   uptime_secs:u64, addr:string, upstream:string, cache:CacheView, hosted_store_count:u64,
   cached_capsule_count:u64, pinned_store_count:u64, sync:{available:bool}}`.
 - **`ConfigResult`**: `{addr:string, port:string, upstream:string, upstream_override:string|null,
-  cache_dir:string, cache_shared:bool, config_path:string, sync_available:bool}`.
-  `upstream_override` MUST be present as `null` when unset (never omitted).
+  cache_dir:string, cache_shared:bool, config_path:string, sync_available:bool,
+  mirror_advertise:MirrorAdvertiseView|null}`.
+  `upstream_override` MUST be present as `null` when unset (never omitted). `mirror_advertise` (§4.2h)
+  MUST be present as `null` ONLY from a node built before the field existed — an implementation of
+  THIS contract version MUST always report a `MirrorAdvertiseView`, never `null`; a client MUST read
+  `null` as "the answering node predates this field", never as "nothing to advertise" (that is
+  `MirrorAdvertiseState::Off` or `NoPublicAddress`, both of which carry a real view).
+- **`MirrorAdvertiseView`** (§4.2h): `{urls:[string], operator_override:[string]|null,
+  state:MirrorAdvertiseState}`. Embedded in `ConfigResult` and reused whole as the result of
+  `control.config.setMirrorAdvertiseUrls`, so a caller never has to re-read `config.get` to learn
+  what its `.set` call actually applied.
+- **`MirrorAdvertiseState`** (§4.2h): one of `"advertising_override"`, `"advertising_derived"`,
+  `"off"`, `"no_public_address"`, `"uncorroborated_address"`, `"no_relay"` — the exact six spellings
+  dig-node's own `AdvertiseState` uses (dig-node#562), restated here so client and node cannot drift
+  on what one of them means.
 - **`CacheView`**: `{cap_bytes:u64, used_bytes:u64, dir:string, shared:bool}`.
 - **`HostedStore`**: `{store_id:string, pinned:bool, capsule_count:u64, total_bytes:u64,
   capsules:[CapsuleEntry]}`.
@@ -1109,6 +1123,57 @@ epoch and can rise by more than any margin chosen.
 when it is not — WHY, together with the $DIG those bonds have locked. It is the surface dig-node
 `SPEC.md` §25.8 requires, and it is served over the control plane before the node adopts it
 (release-first).
+
+### 4.2h The mirror advertise-URL override (`control.config.setMirrorAdvertiseUrls`)
+
+Today the URLs a node advertises in its mirror-coin memos are read from a single environment
+variable, `DIG_MIRROR_ADVERTISE_URLS`, with no control method and no UI: an operator must know the
+variable exists, know its format, and edit a service's environment by hand. This method is how a
+client (dig-app first) sets or clears the SAME override, and it is served over the control plane
+before dig-node adopts it (release-first, matching `control.mirror.bondStates` above).
+
+**Params carry ONE optional field, `urls`, and its THREE states are normative:**
+
+- `null` or an absent key CLEARS the override. The node reverts to dig-node#562's DERIVED default —
+  its own discovered public address and content-serving port.
+- A NON-EMPTY list SETS the override to exactly those URLs.
+- An EXPLICIT EMPTY list (`urls:[]`) MUST be REFUSED as `-32602 INVALID_PARAMS`. It MUST NOT be
+  silently taken to mean either of the above: it is genuinely ambiguous between "advertise nothing"
+  (forfeiting every mirror reward this node could otherwise earn that epoch) and "go back to
+  automatic", and guessing wrong either forfeits money the operator did not intend to give up, or
+  silently overrides a deliberate choice to stop advertising. An implementation MUST perform this
+  refusal itself — decoding the params alone enforces nothing beyond their type.
+
+**Validation is well-formedness ONLY — an absolute URL with a scheme and a host.** An implementation
+MUST NOT apply dig-node#562's routability or "this-machine-only" checks to REJECT this call.
+dig-node#562 established an asymmetry that this method MUST preserve: an OPERATOR's LAN or private
+address is a deliberate choice risking only their own stake, while the SAME address DERIVED
+automatically is a broken reading of this node's own position, so only the derived path applies the
+stricter rule. This contract cannot know which path a given string will take — that decision belongs
+to dig-node's own advertise module, applied when it turns this override into what it actually
+publishes — so applying the stricter rule here would silently break every LAN-only deployment while
+looking like a safety improvement.
+
+**Applied LIVE — no restart hint, unlike `control.config.setUpstream`.** dig-node#562's advertise
+decision is recomputed every mirror-coin-creation pass rather than read once at process start, so a
+conforming node picks up a persisted override on its very next pass. An implementation's result MUST
+NOT claim `requires_restart`; there is no such field on `MirrorAdvertiseView`.
+
+**The result is `MirrorAdvertiseView` — the SAME shape `config.get` embeds** (§4.1), so a caller never
+re-reads `config.get` to learn what its own `.set` call just applied. `state` MUST be one of the six
+values dig-node#562's `AdvertiseState` defines (§4.1); a client MUST treat it as the authority on
+*why* `urls` looks the way it does, and MUST NOT infer a reason from an empty `urls` list alone — four
+of the six states produce one, for four different reasons with four different remedies.
+
+**This method is TOKEN-GATED at the ORDINARY tier, never the MASTER tier (§2.1).** Its effect
+outlives the token exactly as `control.chiaPeers.add` and `control.config.setUpstream` do, but the
+MASTER-tier rule is narrower than "outlives the token": it is whether the effect installs a principal
+the node will thereafter BELIEVE, OBEY, or SPEAK TO. This method changes only what THIS node
+broadcasts ABOUT ITSELF in its own mirror-coin memo — an implementation MUST NOT dial the configured
+value, MUST NOT treat bytes read from it as trusted input, and MUST NOT forward any request to it. A
+caller holding only a paired token cannot use this method to make the node trust or obey anyone new,
+which is the same reason `control.cache.setCap` and `control.log.setLevel` stay ordinary despite also
+persisting past the call that set them.
 
 ### `control.wallet.operatorAddress` — which wallet is the MACHINE's
 

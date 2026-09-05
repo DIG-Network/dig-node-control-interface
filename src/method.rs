@@ -87,6 +87,9 @@ pub enum ControlMethod {
     ConfigGet,
     /// `control.config.setUpstream` — persist an upstream-RPC override (effective on restart).
     ConfigSetUpstream,
+    /// `control.config.setMirrorAdvertiseUrls` — override (or clear) the URLs this node
+    /// advertises in its mirror-coin memos (dig-node#562), live, no restart required.
+    ConfigSetMirrorAdvertiseUrls,
     /// `control.log.setLevel` — live-swap the running node's tracing level filter.
     LogSetLevel,
 
@@ -249,6 +252,7 @@ impl ControlMethod {
             ControlMethod::Status => "control.status",
             ControlMethod::ConfigGet => "control.config.get",
             ControlMethod::ConfigSetUpstream => "control.config.setUpstream",
+            ControlMethod::ConfigSetMirrorAdvertiseUrls => "control.config.setMirrorAdvertiseUrls",
             ControlMethod::LogSetLevel => "control.log.setLevel",
             ControlMethod::CacheGet => "control.cache.get",
             ControlMethod::CacheSetCap => "control.cache.setCap",
@@ -440,6 +444,17 @@ impl ControlMethod {
     /// show the operator the trust state it is subject to. That matches `control.wallet.arrivals`,
     /// which is gated at the ordinary tier for disclosing an association without conferring
     /// authority.
+    ///
+    /// `control.config.setMirrorAdvertiseUrls` ALSO stays ordinary, and for the same reason as
+    /// `control.chiaPeers.list` rather than by analogy to its own persistence: "outlives the
+    /// token" is necessary but not sufficient (see this repo's #40, which argues
+    /// `control.config.setUpstream` should be promoted for exactly this gap). The persisted
+    /// override survives `pairing.revoke` just as `setUpstream`'s does, but it installs no
+    /// principal this node will thereafter believe, obey, or forward requests to — it changes only
+    /// what THIS node broadcasts about itself in its own mirror-coin memo. The node never dials the
+    /// value, never trusts bytes read FROM it, and never routes a call TO it. A caller cannot use
+    /// it to make the node trust or obey anyone new, which is the same reason `cache.setCap` and
+    /// `log.setLevel` stay ordinary despite also persisting past the call that set them.
     pub const fn requires_master_token(self) -> bool {
         self.is_pairing_admin()
             || matches!(
@@ -485,7 +500,9 @@ impl ControlMethod {
     pub const fn category(self) -> Category {
         match self {
             ControlMethod::Status => Category::Status,
-            ControlMethod::ConfigGet | ControlMethod::ConfigSetUpstream => Category::Config,
+            ControlMethod::ConfigGet
+            | ControlMethod::ConfigSetUpstream
+            | ControlMethod::ConfigSetMirrorAdvertiseUrls => Category::Config,
             ControlMethod::LogSetLevel => Category::Log,
             ControlMethod::CacheGet | ControlMethod::CacheSetCap | ControlMethod::CacheClear => {
                 Category::Cache
@@ -550,8 +567,9 @@ impl ControlMethod {
             ControlMethod::ChiaPeersList => "The Chia full-node peers this node tracks, each flagged user_managed: true where a person added it by hand and it is therefore trusted without corroboration.",
             ControlMethod::ChiaPeersRemove => "Stop trusting a Chia full node, optionally banning it. Removing restores corroboration for that peer: chain answers must once again be agreed by independently-dialled peers.",
             ControlMethod::Status => "A rich node status snapshot (version, uptime, addr, cache, hosted/pinned counts, sync availability).",
-            ControlMethod::ConfigGet => "The node's effective configuration (addr/port, upstream + override, cache dir/shared, config path, sync availability).",
+            ControlMethod::ConfigGet => "The node's effective configuration (addr/port, upstream + override, cache dir/shared, config path, sync availability, mirror advertise-URL view).",
             ControlMethod::ConfigSetUpstream => "Persist an upstream-RPC override; takes effect on next node start (requires_restart).",
+            ControlMethod::ConfigSetMirrorAdvertiseUrls => "Override (urls: a non-empty list) or clear (urls: null/absent) the URLs this node advertises in its own mirror-coin memos; applied LIVE, no restart. An explicit EMPTY list is refused rather than guessed at -- it is ambiguous between advertising nothing and reverting to the derived default. Checked only for a well-formed absolute URL (scheme + host): an operator's LAN or private address is accepted on purpose, the same derived-vs-operator asymmetry dig-node#562 established.",
             ControlMethod::LogSetLevel => "Live-swap the running node's tracing EnvFilter directive (not persisted).",
             ControlMethod::CacheGet => "The on-disk content-cache view: cap_bytes, used_bytes, dir, shared.",
             ControlMethod::CacheSetCap => "Set the on-disk cache size cap in bytes (floored at 64 MiB).",
@@ -614,6 +632,7 @@ impl ControlMethod {
         ControlMethod::Status,
         ControlMethod::ConfigGet,
         ControlMethod::ConfigSetUpstream,
+        ControlMethod::ConfigSetMirrorAdvertiseUrls,
         ControlMethod::LogSetLevel,
         ControlMethod::CacheGet,
         ControlMethod::CacheSetCap,
@@ -1077,6 +1096,30 @@ mod tests {
                 "{name} summary must name the corroboration bypass, got: {summary}"
             );
         }
+    }
+
+    /// **`control.config.setMirrorAdvertiseUrls` stays ORDINARY tier — it installs no principal.**
+    ///
+    /// It outlives the token exactly like `chiaPeers.add` and the proposed `config.setUpstream`
+    /// promotion (this repo's #40) — the persisted override survives `pairing.revoke` just as
+    /// theirs do. The discriminator this contract's own doc states is narrower than "outlives the
+    /// token": whether the node will thereafter BELIEVE, OBEY, or SPEAK TO whatever was installed.
+    /// `chiaPeers.add` makes the node trust a peer's chain answers without corroboration;
+    /// `config.setUpstream` makes the node FORWARD calls to a third party. This method changes
+    /// only what this node broadcasts ABOUT ITSELF in its own mirror-coin memo — the node never
+    /// dials the value, never trusts bytes FROM it, and never forwards anything TO it. A caller
+    /// cannot use it to make the node trust or obey anyone new, the same reason `cache.setCap` and
+    /// `log.setLevel` stay ordinary despite also persisting.
+    #[test]
+    fn set_mirror_advertise_urls_is_ordinary_tier_and_config_category() {
+        let m = ControlMethod::ConfigSetMirrorAdvertiseUrls;
+        assert_eq!(m.name(), "control.config.setMirrorAdvertiseUrls");
+        assert_eq!(m.category(), Category::Config);
+        assert_eq!(m.routing(), Routing::Owned);
+        assert!(m.requires_auth(), "a mutation on this plane is never open");
+        assert!(!m.requires_master_token());
+        assert!(!m.is_open_read());
+        assert!(!m.is_pairing_admin());
     }
 
     #[test]

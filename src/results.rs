@@ -259,6 +259,14 @@ pub struct ConfigResult {
     pub config_path: String,
     /// Whether authenticated §21 sync is available.
     pub sync_available: bool,
+    /// This node's mirror advertise-URL view (dig-node#562), or `None` from a node built before
+    /// this field existed.
+    ///
+    /// The [`Option`] carries the backwards compatibility on its own — serde treats a missing
+    /// `Option` field as `None` — so a caller built ahead of its node still parses the rest of
+    /// this response rather than failing the whole call. See [`WalletBalanceResult::source`] for
+    /// the same pattern and the same reason.
+    pub mirror_advertise: Option<MirrorAdvertiseView>,
 }
 
 /// `control.config.setUpstream` — the persisted override + a restart hint.
@@ -268,6 +276,68 @@ pub struct SetUpstreamResult {
     pub upstream: String,
     /// Always `true` — the change takes effect on next node start.
     pub requires_restart: bool,
+}
+
+/// Which of dig-node#562's `AdvertiseState` outcomes produced a [`MirrorAdvertiseView`].
+///
+/// Restated here, under the SAME six spellings, so a client and the node cannot drift on what one
+/// of them means — see the conformance KAT that pins each literal wire token. Named states rather
+/// than a bare empty [`MirrorAdvertiseView::urls`] list, because the four ways of publishing
+/// nothing have four different remedies and an empty list alone cannot tell them apart: a UI that
+/// only sees `[]` cannot say "nothing configured", "switched off", "not discovered yet", "waiting
+/// on a second source" and "waiting on a relay" apart, and each of those calls for different
+/// operator action (or none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorAdvertiseState {
+    /// Publishing the operator's own override; their value always wins.
+    AdvertisingOverride,
+    /// Publishing this node's own reflexive peer address, because no operator override is set.
+    AdvertisingDerived,
+    /// The operator set an override and no entry in it is publishable.
+    Off,
+    /// No operator override, and this node does not yet know a public address it could publish.
+    NoPublicAddress,
+    /// Exactly one source has reported a public address for this node and nothing has confirmed
+    /// it yet — a single source can be wrong without erroring.
+    UncorroboratedAddress,
+    /// A public address is known, but no path to this node (a relay reservation or a confirmed
+    /// direct mapping) is currently held.
+    NoRelay,
+}
+
+impl MirrorAdvertiseState {
+    /// Every variant, so a completeness test walks the SET rather than a chosen example.
+    pub const ALL: [MirrorAdvertiseState; 6] = [
+        MirrorAdvertiseState::AdvertisingOverride,
+        MirrorAdvertiseState::AdvertisingDerived,
+        MirrorAdvertiseState::Off,
+        MirrorAdvertiseState::NoPublicAddress,
+        MirrorAdvertiseState::UncorroboratedAddress,
+        MirrorAdvertiseState::NoRelay,
+    ];
+}
+
+/// The mirror advertise-URL view: embedded in [`ConfigResult`], and the whole answer to
+/// `control.config.setMirrorAdvertiseUrls`.
+///
+/// Shared between the get and the set the way [`CollateralMarginResult`] is shared between
+/// `control.collateral.margin.get` and `.set` — the set's job is to hand back exactly the view a
+/// follow-up get would show, so a caller never has to re-read to learn what took effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorAdvertiseView {
+    /// The URLs this node will actually publish in its NEXT mirror-coin advertisement. Empty in
+    /// every state but [`MirrorAdvertiseState::AdvertisingOverride`] and
+    /// [`MirrorAdvertiseState::AdvertisingDerived`] — see [`Self::state`] for why an empty list
+    /// alone never says why.
+    pub urls: Vec<String>,
+    /// The operator's own persisted override, verbatim, or `None` when unset. Answers "is this
+    /// node advertising something the operator chose, or something it derived" without a caller
+    /// having to infer it from [`Self::state`] alone: `Some` even in
+    /// [`MirrorAdvertiseState::Off`], where the override exists but nothing in it is publishable.
+    pub operator_override: Option<Vec<String>>,
+    /// Which of dig-node#562's six outcomes produced [`Self::urls`] this pass.
+    pub state: MirrorAdvertiseState,
 }
 
 /// `control.log.setLevel` — the applied filter directive.
@@ -2701,6 +2771,7 @@ mod tests {
             cache_shared: false,
             config_path: "/c/config.json".into(),
             sync_available: true,
+            mirror_advertise: None,
         };
         let v = serde_json::to_value(&parsed).unwrap();
         assert_eq!(v["upstream_override"], json!(null));
