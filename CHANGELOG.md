@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.33.0] - 2026-09-05
+
+### Features
+- **control:** Settable mirror advertise-URL override (control.config.setMirrorAdvertiseUrls) (#51)
+
 ## [0.32.1] - 2026-09-04
 
 ### Documentation
