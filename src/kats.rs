@@ -105,6 +105,19 @@ fn golden_request_vectors() {
         },
         json!({"jsonrpc":"2.0","id":1,"method":"control.config.setUpstream","params":{"upstream":"https://rpc.dig.net"}}),
     );
+    // `urls: None` serializes to an EMPTY params object -- `skip_serializing_if` omits the key
+    // entirely rather than writing `"urls":null`, so "clear" and "no override was ever set" are
+    // indistinguishable on the wire, which is exactly the point: both mean the same thing.
+    assert_request(
+        &SetMirrorAdvertiseUrlsParams { urls: None },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.config.setMirrorAdvertiseUrls","params":{}}),
+    );
+    assert_request(
+        &SetMirrorAdvertiseUrlsParams {
+            urls: Some(vec!["dig://[2001:db8::7]:9776".into()]),
+        },
+        json!({"jsonrpc":"2.0","id":1,"method":"control.config.setMirrorAdvertiseUrls","params":{"urls":["dig://[2001:db8::7]:9776"]}}),
+    );
     assert_request(
         &SetLevelParams {
             filter: "info,dig_node_core=debug".into(),
@@ -259,7 +272,41 @@ fn golden_response_result_vectors_are_byte_stable() {
     assert_result_round_trips::<results::ConfigResult>(json!({
         "addr": "127.0.0.1:9256", "port": "9256", "upstream": "https://rpc.dig.net",
         "upstream_override": null, "cache_dir": "/var/cache/dig", "cache_shared": true,
-        "config_path": "/etc/dig/config.json", "sync_available": false
+        "config_path": "/etc/dig/config.json", "sync_available": false,
+        "mirror_advertise": {
+            "urls": ["dig://[2001:db8::1]:9776"], "operator_override": null,
+            "state": "advertising_derived"
+        }
+    }));
+    // The OVERRIDE state carries the operator's own value in `operator_override` too, not just in
+    // `urls` -- the two fields answer different questions ("what will be published" vs "what did
+    // the operator ask for"), and this is the one state where they can legitimately differ (a
+    // partially-rejected operator list would publish fewer URLs than it stored).
+    assert_result_round_trips::<results::MirrorAdvertiseView>(json!({
+        "urls": ["dig://[2001:db8::7]:9776", "https://mirror.example.com"],
+        "operator_override": ["dig://[2001:db8::7]:9776", "https://mirror.example.com"],
+        "state": "advertising_override"
+    }));
+    // `control.config.setMirrorAdvertiseUrls`'s own result, pinned at BOTH `requires_restart`
+    // values -- not because today's MockNode (or today's real dig-node) ever answers `false`, but
+    // because the WIRE FORMAT must already be able to carry it. A contract that could only
+    // express `true` would force a breaking change the day dig-node actually persists this
+    // somewhere its own advertise pass reads, instead of an environment variable.
+    assert_result_round_trips::<results::SetMirrorAdvertiseUrlsResult>(json!({
+        "mirror_advertise": {
+            "urls": ["dig://[2001:db8::7]:9776"],
+            "operator_override": ["dig://[2001:db8::7]:9776"],
+            "state": "advertising_override"
+        },
+        "requires_restart": true
+    }));
+    assert_result_round_trips::<results::SetMirrorAdvertiseUrlsResult>(json!({
+        "mirror_advertise": {
+            "urls": ["dig://[2001:db8::7]:9776"],
+            "operator_override": ["dig://[2001:db8::7]:9776"],
+            "state": "advertising_override"
+        },
+        "requires_restart": false
     }));
     assert_result_round_trips::<results::CacheView>(json!({
         "cap_bytes": 67108864, "used_bytes": 0, "dir": "/c", "shared": false
@@ -486,6 +533,156 @@ fn golden_response_result_vectors_are_byte_stable() {
         "balance": 0u64, "pending": 7u64,
         "source": "fallback", "synced": false, "peak_height": null
     }));
+}
+
+/// `mirror_advertise` is ADDITIVE (dig-node#562), which is the property that lets this crate ship
+/// ahead of the dig-node release that serves it.
+///
+/// The fixture that matters is the one WITHOUT the key: a node released before this field existed
+/// emits no `mirror_advertise` at all, and a caller built against this crate must still parse that
+/// payload. A test that only round-trips a payload carrying the field cannot see a missing
+/// `Option` handling — the field decodes fine either way, and the break would surface only against
+/// a real older node.
+#[test]
+fn a_pre_advertise_field_nodes_config_get_still_parses_with_it_unknown() {
+    let legacy = json!({
+        "addr": "127.0.0.1:9256", "port": "9256", "upstream": "https://rpc.dig.net",
+        "upstream_override": null, "cache_dir": "/var/cache/dig", "cache_shared": true,
+        "config_path": "/etc/dig/config.json", "sync_available": false
+    });
+    let parsed: results::ConfigResult = serde_json::from_value(legacy)
+        .expect("a node predating mirror_advertise must still deserialize");
+    assert_eq!(parsed.addr, "127.0.0.1:9256");
+    assert_eq!(
+        parsed.mirror_advertise, None,
+        "an absent field means a node too old to report it -- never a silently empty view"
+    );
+}
+
+/// The six advertise states spell themselves on the wire as dig-node#562's own `AdvertiseState`
+/// labels, pinned literally so a Rust variant rename cannot silently change what a client matches
+/// on, or drift from the node's own six spellings.
+#[test]
+fn the_mirror_advertise_states_are_dig_node_562s_own_wire_labels() {
+    for (state, wire) in [
+        (
+            results::MirrorAdvertiseState::AdvertisingOverride,
+            "advertising_override",
+        ),
+        (
+            results::MirrorAdvertiseState::AdvertisingDerived,
+            "advertising_derived",
+        ),
+        (results::MirrorAdvertiseState::Off, "off"),
+        (
+            results::MirrorAdvertiseState::NoPublicAddress,
+            "no_public_address",
+        ),
+        (
+            results::MirrorAdvertiseState::UncorroboratedAddress,
+            "uncorroborated_address",
+        ),
+        (results::MirrorAdvertiseState::NoRelay, "no_relay"),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<results::MirrorAdvertiseState>(json!(wire)).unwrap(),
+            state
+        );
+    }
+    assert_eq!(results::MirrorAdvertiseState::ALL.len(), 6);
+}
+
+/// **`control.config.setMirrorAdvertiseUrls` reaches its own handler, both directions.**
+///
+/// Keyed to something only THIS handler could produce: clearing echoes back the DERIVED state
+/// with no operator override, and setting echoes back the OVERRIDE state carrying exactly the
+/// URLs given — an arm mis-wired to `config_set_upstream` could not produce either shape.
+///
+/// **`requires_restart` is asserted `true` for BOTH**, and that is the load-bearing assertion in
+/// this test, not an afterthought: this mock, like every real dig-node today, has no persisted
+/// store its own advertise pass reads, so a conforming answer is never "live" regardless of which
+/// branch was taken. A future dig-node that adds one would flip this to `false` -- see
+/// [`results::SetMirrorAdvertiseUrlsResult::requires_restart`].
+#[test]
+fn the_dispatcher_routes_set_mirror_advertise_urls_to_its_own_handler() {
+    let cleared = round_trip(&SetMirrorAdvertiseUrlsParams { urls: None })
+        .expect("clearing the override must route");
+    assert_eq!(
+        cleared.mirror_advertise.state,
+        results::MirrorAdvertiseState::AdvertisingDerived
+    );
+    assert_eq!(cleared.mirror_advertise.operator_override, None);
+    assert!(
+        !cleared.mirror_advertise.urls.is_empty(),
+        "a derived default is still published"
+    );
+    assert!(
+        cleared.requires_restart,
+        "an env-var-backed node cannot apply this live, and MUST say so"
+    );
+
+    let mine = vec!["dig://[2001:db8::9]:9776".to_string()];
+    let set = round_trip(&SetMirrorAdvertiseUrlsParams {
+        urls: Some(mine.clone()),
+    })
+    .expect("setting an override must route");
+    assert_eq!(
+        set.mirror_advertise.state,
+        results::MirrorAdvertiseState::AdvertisingOverride
+    );
+    assert_eq!(set.mirror_advertise.urls, mine);
+    assert_eq!(set.mirror_advertise.operator_override, Some(mine));
+    assert!(
+        set.requires_restart,
+        "an env-var-backed node cannot apply this live, and MUST say so"
+    );
+}
+
+/// **An explicit empty list is refused THROUGH THE REAL DISPATCHER, not merely by the bare
+/// constructor.** `SetMirrorAdvertiseUrlsParams` derives a plain `Deserialize`, so nothing before
+/// `dispatch_method`'s own `validated()` call stands between a caller and an ambiguous override —
+/// this is the test that would fail if that call were ever dropped.
+#[test]
+fn set_mirror_advertise_urls_refuses_an_explicit_empty_list_through_dispatch() {
+    let err = round_trip(&SetMirrorAdvertiseUrlsParams { urls: Some(vec![]) })
+        .expect_err("an explicit empty list must be refused, not treated as clear-or-set");
+    assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+    // Pinned on the RUNTIME value, not just read by eye in the source: `cargo fmt` has, on this
+    // exact ecosystem, twice collapsed a `\`-newline string continuation into a run of spaces
+    // that a source grep cannot see because the backslash is already gone by the time it looks.
+    // A `\`-continued literal lives in this message; if a reformat ever mangles it, this is the
+    // assertion that catches it rather than shipping a sentence with a hole in the middle.
+    assert!(
+        !err.message.contains("  "),
+        "error message has a double space -- a `\\` line-continuation was likely mangled: {:?}",
+        err.message
+    );
+}
+
+/// **A malformed entry is refused THROUGH THE REAL DISPATCHER**, pinned from the discriminating
+/// side: a bare hostname with no scheme is dig-node#562's own `Rejection::NotAbsolute` criterion,
+/// so accepting it here would let a caller persist a URL dig-node's OWN mirror module could never
+/// have derived, and no fetcher could act on.
+#[test]
+fn set_mirror_advertise_urls_refuses_a_non_absolute_url_through_dispatch() {
+    let err = round_trip(&SetMirrorAdvertiseUrlsParams {
+        urls: Some(vec!["example.com".into()]),
+    })
+    .expect_err("a schemeless host must be refused as not well-formed");
+    assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+
+    // The control: a LAN address is NOT refused here, even though dig-node#562 would refuse it on
+    // the DERIVED path. This contract checks well-formedness only -- routability is deliberately
+    // dig-node's own call to make, never this crate's.
+    let lan = round_trip(&SetMirrorAdvertiseUrlsParams {
+        urls: Some(vec!["http://192.168.1.5:9776".into()]),
+    })
+    .expect("a well-formed LAN address must be ACCEPTED -- routability is not checked here");
+    assert_eq!(
+        lan.mirror_advertise.operator_override,
+        Some(vec!["http://192.168.1.5:9776".to_string()])
+    );
 }
 
 /// `source` is ADDITIVE in BOTH directions (dig_ecosystem#2233), which is the property that lets
@@ -981,6 +1178,10 @@ thread_local! {
 /// every method group without a running node.
 struct MockNode;
 
+/// The address [`MockNode`] pretends to have DERIVED for itself when no operator override is set —
+/// an RFC 3849 documentation-range IPv6 host, under dig-node#562's `dig://` derived scheme.
+pub const MOCK_DERIVED_MIRROR_URL: &str = "dig://[2001:db8::1]:9776";
+
 /// The one Chia peer [`MockNode`] pretends to have trusted, canonical per
 /// [`crate::params::canonical_peer_ip`].
 pub const MOCK_TRUSTED_CHIA_PEER: &str = "203.0.113.7";
@@ -1037,6 +1238,11 @@ impl ControlHandler for MockNode {
             cache_shared: false,
             config_path: "/tmp/config.json".into(),
             sync_available: true,
+            mirror_advertise: Some(results::MirrorAdvertiseView {
+                urls: vec![MOCK_DERIVED_MIRROR_URL.into()],
+                operator_override: None,
+                state: results::MirrorAdvertiseState::AdvertisingDerived,
+            }),
         })
     }
     async fn config_set_upstream(
@@ -1048,6 +1254,36 @@ impl ControlHandler for MockNode {
         }
         Ok(results::SetUpstreamResult {
             upstream: params.upstream,
+            requires_restart: true,
+        })
+    }
+    async fn config_set_mirror_advertise_urls(
+        &self,
+        params: SetMirrorAdvertiseUrlsParams,
+    ) -> Result<results::SetMirrorAdvertiseUrlsResult, ControlError> {
+        let mirror_advertise = match params.urls {
+            // Cleared: fall back to exactly the DERIVED view `config_get` reports as its baseline,
+            // so `.set(None)` then `.get()` agree with each other rather than two independent
+            // echoes of the same literal.
+            None => results::MirrorAdvertiseView {
+                urls: vec![MOCK_DERIVED_MIRROR_URL.into()],
+                operator_override: None,
+                state: results::MirrorAdvertiseState::AdvertisingDerived,
+            },
+            // Set: the override IS the effective list, verbatim -- the dispatcher already ran
+            // `validated()`, so a non-empty, well-formed list is the only shape that reaches here.
+            Some(urls) => results::MirrorAdvertiseView {
+                urls: urls.clone(),
+                operator_override: Some(urls),
+                state: results::MirrorAdvertiseState::AdvertisingOverride,
+            },
+        };
+        Ok(results::SetMirrorAdvertiseUrlsResult {
+            mirror_advertise,
+            // Honest for THIS mock, which -- like every real dig-node today -- has no persisted
+            // store its own advertise pass reads; the override only reaches an environment
+            // variable a running process cannot change. `true` here is a fact about the answering
+            // node, not a constant this contract asserts (see the field's own doc).
             requires_restart: true,
         })
     }

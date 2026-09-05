@@ -259,6 +259,14 @@ pub struct ConfigResult {
     pub config_path: String,
     /// Whether authenticated §21 sync is available.
     pub sync_available: bool,
+    /// This node's mirror advertise-URL view (dig-node#562), or `None` from a node built before
+    /// this field existed.
+    ///
+    /// The [`Option`] carries the backwards compatibility on its own — serde treats a missing
+    /// `Option` field as `None` — so a caller built ahead of its node still parses the rest of
+    /// this response rather than failing the whole call. See [`WalletBalanceResult::source`] for
+    /// the same pattern and the same reason.
+    pub mirror_advertise: Option<MirrorAdvertiseView>,
 }
 
 /// `control.config.setUpstream` — the persisted override + a restart hint.
@@ -267,6 +275,103 @@ pub struct SetUpstreamResult {
     /// The normalized upstream that was persisted.
     pub upstream: String,
     /// Always `true` — the change takes effect on next node start.
+    pub requires_restart: bool,
+}
+
+/// Which of dig-node#562's `AdvertiseState` outcomes produced a [`MirrorAdvertiseView`].
+///
+/// Restated here, under the SAME six spellings, so a client and the node cannot drift on what one
+/// of them means — see the conformance KAT that pins each literal wire token. Named states rather
+/// than a bare empty [`MirrorAdvertiseView::urls`] list, because the four ways of publishing
+/// nothing have four different remedies and an empty list alone cannot tell them apart: a UI that
+/// only sees `[]` cannot say "nothing configured", "switched off", "not discovered yet", "waiting
+/// on a second source" and "waiting on a relay" apart, and each of those calls for different
+/// operator action (or none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorAdvertiseState {
+    /// Publishing the operator's own override; their value always wins.
+    AdvertisingOverride,
+    /// Publishing this node's own reflexive peer address, because no operator override is set.
+    AdvertisingDerived,
+    /// The operator set an override and no entry in it is publishable.
+    Off,
+    /// No operator override, and this node does not yet know a public address it could publish.
+    NoPublicAddress,
+    /// Exactly one source has reported a public address for this node and nothing has confirmed
+    /// it yet — a single source can be wrong without erroring.
+    UncorroboratedAddress,
+    /// A public address is known, but no path to this node (a relay reservation or a confirmed
+    /// direct mapping) is currently held.
+    NoRelay,
+}
+
+impl MirrorAdvertiseState {
+    /// Every variant, so a completeness test walks the SET rather than a chosen example.
+    pub const ALL: [MirrorAdvertiseState; 6] = [
+        MirrorAdvertiseState::AdvertisingOverride,
+        MirrorAdvertiseState::AdvertisingDerived,
+        MirrorAdvertiseState::Off,
+        MirrorAdvertiseState::NoPublicAddress,
+        MirrorAdvertiseState::UncorroboratedAddress,
+        MirrorAdvertiseState::NoRelay,
+    ];
+}
+
+/// The mirror advertise-URL view: embedded in [`ConfigResult`], and embedded in turn in
+/// [`SetMirrorAdvertiseUrlsResult`].
+///
+/// Not the WHOLE answer to `control.config.setMirrorAdvertiseUrls` — see
+/// [`SetMirrorAdvertiseUrlsResult::requires_restart`] for the reason a bare view is not enough
+/// there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorAdvertiseView {
+    /// The URLs this node will actually publish in its NEXT mirror-coin advertisement. Empty in
+    /// every state but [`MirrorAdvertiseState::AdvertisingOverride`] and
+    /// [`MirrorAdvertiseState::AdvertisingDerived`] — see [`Self::state`] for why an empty list
+    /// alone never says why.
+    pub urls: Vec<String>,
+    /// The operator's own persisted override, verbatim, or `None` when unset. Answers "is this
+    /// node advertising something the operator chose, or something it derived" without a caller
+    /// having to infer it from [`Self::state`] alone: `Some` even in
+    /// [`MirrorAdvertiseState::Off`], where the override exists but nothing in it is publishable.
+    pub operator_override: Option<Vec<String>>,
+    /// Which of dig-node#562's six outcomes produced [`Self::urls`] this pass.
+    pub state: MirrorAdvertiseState,
+}
+
+/// `control.config.setMirrorAdvertiseUrls` — the persisted view, plus whether it IS the live
+/// answer yet.
+///
+/// This does NOT reuse [`MirrorAdvertiseView`] alone the way [`CollateralMarginResult`] is shared
+/// between `.get` and `.set`, because unlike a margin this override has a genuine "not yet live"
+/// state a bare view cannot express. [`ConfigSetUpstream`](crate::method::ControlMethod::ConfigSetUpstream)'s
+/// sibling result already carries exactly this shape (`requires_restart`) — restated here rather
+/// than reused because the TRUTH VALUE differs per method, not merely the field name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetMirrorAdvertiseUrlsResult {
+    /// What a follow-up `control.config.get` will show ONCE this takes effect. See
+    /// [`Self::requires_restart`] for whether that is now or after a restart.
+    pub mirror_advertise: MirrorAdvertiseView,
+    /// Whether dig-node must be RESTARTED before [`Self::mirror_advertise`] is the answer a LIVE
+    /// `config.get` would give.
+    ///
+    /// This is a report of what THIS node's implementation actually did, never a value this
+    /// contract fixes — unlike [`SetUpstreamResult::requires_restart`], which is unconditionally
+    /// `true` because that override feeds `Config::from_env` at process start and can never be
+    /// read any other way. This override is different in kind: dig-node#562's advertise decision
+    /// is recomputed every mirror-coin-creation pass rather than read once at start, so LIVE is a
+    /// real, reachable answer here.
+    ///
+    /// It is not, however, the answer TODAY. dig-node#562's recomputation reads
+    /// `DIG_MIRROR_ADVERTISE_URLS` from the OS ENVIRONMENT of the running process
+    /// (`std::env::var`), and no control call can change the environment of a process already
+    /// running — so until dig-node persists this override somewhere its own advertise pass
+    /// actually re-reads (a config-store write this call feeds, rather than an environment
+    /// variable), a conforming node MUST answer `true` here. It MUST answer `false` the moment it
+    /// does, and this field is what lets that improvement ship without a wire-contract change: a
+    /// client that renders "saved" only when this is `false` never tells an operator their node is
+    /// advertising a URL it is not.
     pub requires_restart: bool,
 }
 
@@ -2701,6 +2806,7 @@ mod tests {
             cache_shared: false,
             config_path: "/c/config.json".into(),
             sync_available: true,
+            mirror_advertise: None,
         };
         let v = serde_json::to_value(&parsed).unwrap();
         assert_eq!(v["upstream_override"], json!(null));

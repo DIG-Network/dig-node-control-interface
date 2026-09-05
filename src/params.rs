@@ -90,6 +90,81 @@ pub struct SetUpstreamParams {
 }
 control_call!(SetUpstreamParams => ControlMethod::ConfigSetUpstream, results::SetUpstreamResult);
 
+/// Whether `entry` is an absolute URL with both a scheme and a host.
+///
+/// The ONE check [`SetMirrorAdvertiseUrlsParams::validated`] performs — dig-node#562's own
+/// `Rejection::NotAbsolute` criterion, restated here rather than imported (`dig-node-service` sits
+/// above this crate in the dependency hierarchy, so this crate cannot depend on it, CLAUDE.md
+/// Appendix B).
+///
+/// Deliberately NOT a routability or "this machine only" check. dig-node#562 established that an
+/// operator's LAN or private address is a legitimate, deliberate choice risking only their own
+/// stake, while the SAME address derived automatically is a broken reading of this node's own
+/// position — the two paths apply different rules to identical bytes. This contract cannot tell
+/// which path a byte string will take (that is dig-node's own `classify`'s job, applied when it
+/// turns this override into what it actually publishes), so it must not apply the stricter rule to
+/// both. A well-meaning validator here would look like a safety improvement and would silently
+/// break every LAN-only deployment instead.
+fn is_well_formed_advertise_url(entry: &str) -> bool {
+    url::Url::parse(entry)
+        .ok()
+        .is_some_and(|parsed| parsed.host().is_some())
+}
+
+/// `control.config.setMirrorAdvertiseUrls` params.
+///
+/// # The three states this ONE optional field carries, and why an empty list is refused
+///
+/// - `None` (absent, or JSON `null`) CLEARS the override, reverting to dig-node#562's DERIVED
+///   default — this node's own discovered public address.
+/// - `Some(urls)` with at least one entry SETS the override to exactly those URLs.
+/// - `Some(vec![])` — an EXPLICIT empty list — is REFUSED as `-32602 INVALID_PARAMS` rather than
+///   silently taken to mean either of the above. It is genuinely ambiguous between "advertise
+///   nothing" (forfeiting every mirror reward this node could otherwise earn this epoch) and "go
+///   back to automatic" — and guessing wrong either forfeits money the operator did not intend to
+///   give up, or silently overrides a deliberate choice to stop advertising. See [`Self::validated`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetMirrorAdvertiseUrlsParams {
+    /// The URLs to advertise, or `None` to clear the override and revert to the derived default.
+    /// See the type doc for why `Some(vec![])` is refused rather than accepted as either meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urls: Option<Vec<String>>,
+}
+
+impl SetMirrorAdvertiseUrlsParams {
+    /// Refuse an explicit empty list, and refuse any entry that is not a well-formed absolute URL,
+    /// both as `-32602 INVALID_PARAMS`. `None` and a non-empty list of well-formed URLs both pass
+    /// through unchanged.
+    ///
+    /// Refused rather than guessed at, for the same reason [`CollateralMarginSetParams::validated`]
+    /// refuses rather than clamps: a caller is stating an intent right now, and silently applying a
+    /// different meaning than the one requested would make a subsequent
+    /// [`MirrorAdvertiseView`](results::MirrorAdvertiseView) disagree with what the caller believes
+    /// it set — on a surface that gates real mirror-coin rewards.
+    pub fn validated(self) -> Result<Self, ControlError> {
+        fn invalid(message: impl Into<String>) -> ControlError {
+            ControlError::of(ControlErrorCode::InvalidParams, message)
+        }
+
+        match &self.urls {
+            Some(urls) if urls.is_empty() => Err(invalid(
+                "urls must be omitted/null to clear the override, or a NON-EMPTY list to set \
+                 one -- an explicit empty list is ambiguous between the two and is refused",
+            )),
+            Some(urls) => {
+                if let Some(bad) = urls.iter().find(|u| !is_well_formed_advertise_url(u)) {
+                    return Err(invalid(format!(
+                        "{bad:?} is not a well-formed absolute URL (a scheme and a host are required)"
+                    )));
+                }
+                Ok(self)
+            }
+            None => Ok(self),
+        }
+    }
+}
+control_call!(SetMirrorAdvertiseUrlsParams => ControlMethod::ConfigSetMirrorAdvertiseUrls, results::SetMirrorAdvertiseUrlsResult);
+
 /// `control.log.setLevel` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetLevelParams {
