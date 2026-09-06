@@ -664,10 +664,10 @@ pub trait ControlHandler: Sync {
     ///
     /// Reconcile this node's mirror coins to its CURRENT advertise URL: reclaim every coin
     /// advertising a stale URL, then recreate it advertising the URL this node advertises TODAY.
-    /// Shared by the manual "reset mirrors" action and dig-node#570's automatic epoch-boundary
-    /// pass — build ONE reconcile primitive and serve both triggers through it
-    /// (dig_ecosystem#3203); a node that diverges into two implementations of a money-moving
-    /// operation with different guards has a live defect, not a style difference.
+    /// Shared by the manual "reset mirrors" action and the same primitive the node's DAILY
+    /// detector runs (dig-node#570) — build ONE reconcile primitive and serve both triggers
+    /// through it (dig_ecosystem#3203); a node that diverges into two implementations of a
+    /// money-moving operation with different guards has a live defect, not a style difference.
     ///
     /// # The trap this method exists to not fall into
     ///
@@ -679,30 +679,38 @@ pub trait ControlHandler: Sync {
     /// - **Establish and validate the new URL BEFORE reclaiming anything.** The candidate URL
     ///   must be CORROBORATED (dig-node#566), never merely discovered. If it cannot be
     ///   established, refuse as
-    ///   [`AddressUncorroborated`](results::MirrorReconcileRefusal::AddressUncorroborated) and do
-    ///   NOTHING — no reclaim, no create, no partial progress.
+    ///   [`NotPublishing`](results::MirrorReconcileRefusal::NotPublishing) and do NOTHING — no
+    ///   reclaim, no create, no partial progress.
     /// - **Refuse a no-op rather than spend to reach it.** When the candidate URL is identical to
     ///   what this node's existing coins already advertise, refuse as
     ///   [`UrlUnchanged`](results::MirrorReconcileRefusal::UrlUnchanged) rather than reclaim and
     ///   recreate coins that would advertise the same thing.
-    /// - **Check affordability of the WHOLE plan before starting**, and if the wallet cannot
-    ///   afford even the first step, refuse as
+    /// - **Size the affordable prefix K BEFORE attempting any reclaim, and reclaim exactly K —
+    ///   never more.** K is the same quantity [`Planned`](results::MirrorReconcileResult::Planned)
+    ///   already priced: the wallet's balance augmented by the K coins' OWN collateral (since
+    ///   reclaiming them is what funds their matching recreate). A wallet that cannot afford even
+    ///   K = 1 refuses as
     ///   [`InsufficientFunds`](results::MirrorReconcileRefusal::InsufficientFunds) rather than
-    ///   reclaim what it cannot afford to recreate.
-    /// - **Reclaim-first, and stop at the affordable prefix.** If the plan can afford SOME but not
-    ///   ALL of its steps, run the affordable prefix and answer
-    ///   [`Partial`](results::MirrorReconcileResult::Partial) naming what remains and why — never
-    ///   half-run silently, and never fail the whole call once real money has already moved.
+    ///   reclaim a coin it cannot afford to recreate. Reclaiming more than K leaves the node
+    ///   holding uncollateralised capsules it has stopped advertising — the half-run failure this
+    ///   whole method exists to prevent; "no worse off" means the bond COUNT is unchanged, not
+    ///   merely that no fee was wasted.
+    /// - **Report [`Submitted`](results::MirrorReconcileResult::Submitted), never `completed` or
+    ///   `partial` — those outcomes do not exist.** A reclaim and a create are separate spend
+    ///   bundles, and a create's funding is a scan of CONFIRMED coins: the reclaimed collateral is
+    ///   chain-visible only in a LATER pass. An implementation MUST NOT wait for confirmation
+    ///   inside this call, and MUST NOT report a `created` count it cannot back — only how many
+    ///   reclaims the mempool accepted or rejected, and how many recreates are therefore owed to
+    ///   the ordinary create pass. `left_unchanged > 0` is a NORMAL outcome, not an error.
     /// - **`Refused` MUST mean nothing was spent, unconditionally.** A caller distinguishes
-    ///   `refused` from `partial` precisely so it never has to guess whether a "no" cost money; an
-    ///   implementation that spends anything under a `Refused` outcome breaks that guarantee.
+    ///   `refused` from `submitted` precisely so it never has to guess whether a "no" cost money;
+    ///   an implementation that spends anything under a `Refused` outcome breaks that guarantee.
     /// - **`dry_run: true` prices the plan and spends nothing** —
-    ///   [`Planned`](results::MirrorReconcileResult::Planned) reports the same capsule/reclaim/
-    ///   create counts and cost a real run would incur, computed against the SAME validation
-    ///   (corroborated URL, changed URL, affordability) a real run performs, so a dry run that
-    ///   would in fact refuse MUST report [`Refused`](results::MirrorReconcileResult::Refused),
-    ///   never a [`Planned`](results::MirrorReconcileResult::Planned) plan for a call that cannot
-    ///   execute.
+    ///   [`Planned`](results::MirrorReconcileResult::Planned) reports the same capsule/collateral/
+    ///   fee figures a real run would incur, computed against the SAME validation (corroborated
+    ///   URL, changed URL, affordability) a real run performs, so a dry run that would in fact
+    ///   refuse MUST report [`Refused`](results::MirrorReconcileResult::Refused), never a
+    ///   [`Planned`](results::MirrorReconcileResult::Planned) plan for a call that cannot execute.
     async fn mirror_reconcile(
         &self,
         params: params::MirrorReconcileParams,

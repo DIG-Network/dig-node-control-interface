@@ -1921,7 +1921,9 @@ impl ControlHandler for MockNode {
         params: crate::params::MirrorBondStatesParams,
     ) -> Result<results::MirrorBondStatesResult, ControlError> {
         // Two roots of the SAME store in DIFFERENT states, so a dispatch test cannot pass against
-        // an implementation that answers per store rather than per (store, root).
+        // an implementation that answers per store rather than per (store, root). The bonded row
+        // is deliberately STALE (its urls differ from MOCK_RECONCILE_TARGET_URL) so a fixture can
+        // assert `url_current: false` rather than a row that could never need reconciling.
         let entries = vec![
             results::MirrorBondEntry {
                 store_id: STORE.into(),
@@ -1930,6 +1932,8 @@ impl ControlHandler for MockNode {
                     coin_id: BOND_COIN_A.into(),
                     epoch: 7,
                     amount_dig_base_units: 1_047,
+                    urls: vec![MOCK_DERIVED_MIRROR_URL.to_string()],
+                    url_current: false,
                 },
             },
             results::MirrorBondEntry {
@@ -1954,6 +1958,19 @@ impl ControlHandler for MockNode {
                 address: OPERATOR_ADDRESS.into(),
                 puzzle_hash: "7c".repeat(32),
             },
+            url_reconcile: Box::new(results::UrlReconcileStatus {
+                auto_enabled: true,
+                personal_day_offset_secs: Some(41_400),
+                next_check_unix_ms: Some(MOCK_NOW_UNIX * 1_000 + 86_400_000),
+                last_observation: Some(results::UrlReconcileObservation {
+                    at_unix_ms: MOCK_NOW_UNIX * 1_000,
+                    conclusive: true,
+                    urls: Some(vec![MOCK_DERIVED_MIRROR_URL.to_string()]),
+                    state: None,
+                }),
+                stale_bonds: 1,
+                auto_reconciled_this_epoch: false,
+            }),
         })
     }
 
@@ -1961,26 +1978,36 @@ impl ControlHandler for MockNode {
         &self,
         params: crate::params::MirrorReconcileParams,
     ) -> Result<results::MirrorReconcileResult, ControlError> {
-        // Three capsules -- the epic's own worked example (dig_ecosystem#3203: "on this host that
-        // is 3 capsules"). The mock's URL differs from `MOCK_DERIVED_MIRROR_URL` on purpose: a
-        // fixture where `url_current == url` could pass an implementation that reconciled onto an
+        // n=3 stale capsules -- the epic's own worked example (dig_ecosystem#3203: "on this host
+        // that is 3 capsules") -- but the wallet can only afford K=2. The SAME K appears in BOTH
+        // branches below on purpose: sizing K happens ONCE, before any reclaim, and a real run
+        // must never invent a different K than a prior dry run already priced -- that is the
+        // load-bearing invariant this whole method exists to hold. `url_current` is this node's
+        // TARGET, deliberately unequal to what the stale coins in `stale_url_sets` show: a
+        // fixture where they matched could pass an implementation that reconciled onto an
         // unchanged URL, which is precisely the no-op `UrlUnchanged` exists to refuse.
-        let url_current = vec![MOCK_DERIVED_MIRROR_URL.to_string()];
-        let url_target = vec![MOCK_RECONCILE_TARGET_URL.to_string()];
+        const CAPSULES_STALE: u32 = 3;
+        const CAPSULES_AFFORDABLE: u32 = 2;
+        let url_current = vec![MOCK_RECONCILE_TARGET_URL.to_string()];
         if params.dry_run {
             Ok(results::MirrorReconcileResult::Planned {
-                capsules: 3,
-                reclaims: 3,
-                creates: 3,
-                estimated_cost_dig_base_units: 4_500,
-                url_advertised: url_target,
+                capsules_stale: CAPSULES_STALE,
+                capsules_affordable: CAPSULES_AFFORDABLE,
+                collateral_reclaimed_dig_base_units: 2_094, // 2 coins x 1_047 each
+                collateral_relocked_dig_base_units: 2_094,
+                fee_estimate_mojos: 200_000_000,
+                stale_url_sets: vec![vec![MOCK_DERIVED_MIRROR_URL.to_string()]],
                 url_current,
+                targets_seen_last_7_days: 1,
             })
         } else {
-            Ok(results::MirrorReconcileResult::Completed {
-                reclaimed: 3,
-                created: 3,
-                url: url_target,
+            Ok(results::MirrorReconcileResult::Submitted {
+                reclaims_submitted: CAPSULES_AFFORDABLE,
+                reclaims_rejected: 0,
+                recreates_owed: CAPSULES_AFFORDABLE,
+                left_unchanged: CAPSULES_STALE - CAPSULES_AFFORDABLE,
+                left_reason: Some("wallet cannot afford the third reclaim+create pair".to_string()),
+                url_current,
             })
         }
     }
@@ -2120,19 +2147,31 @@ fn reset_coin_db_omitting_confirm_is_refused_like_an_explicit_false() {
     assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
 }
 
-/// **Every `control.mirror.reconcile` outcome is byte-stable, including BOTH `url_current` shapes
-/// on `refused`** — present (the node can still say what it advertises today even though it
-/// refuses) and `null` (the one refusal, `no_mirror_coins`, that leaves no bond to read a URL
-/// from at all). Four shapes, one per outcome — the wire contract a client branches its money-UX
-/// on (dig_ecosystem#3203).
+/// **Every `control.mirror.reconcile` outcome is byte-stable.**
+///
+/// `refused` covers every DISTINCT wire shape the flattened `reason` tag can take: a unit variant
+/// with `url_current` present (`url_unchanged`) and one with it `null` — the node has nothing to
+/// read a URL from at all (`no_mirror_coins`) — a variant that flattens a simple payload
+/// alongside the tag (`not_publishing`'s `state`, `requirement_unknown`'s renamed
+/// `collateral_reason`), and a variant whose own payload is a NESTED tagged object rather than
+/// flattened (`wallet_unavailable`'s `capability`). Exhaustive bare-value coverage of all TEN
+/// reasons lives in `every_mirror_reconcile_refusal_is_a_distinct_wire_token` below; this test
+/// proves the EMBEDDING into `Refused` doesn't collide or drop a key for any of those shapes.
+///
+/// `submitted` covers BOTH `left_unchanged` states — zero (every stale capsule was affordable)
+/// and nonzero (a NORMAL outcome, not an error) — because a caller must be able to tell them
+/// apart from the counts alone, with no separate "partial" tag to lean on.
 #[test]
 fn mirror_reconcile_result_golden_vectors_are_byte_stable() {
     assert_result_round_trips::<results::MirrorReconcileResult>(json!({
         "outcome": "planned",
-        "capsules": 3, "reclaims": 3, "creates": 3,
-        "estimated_cost_dig_base_units": 4_500,
-        "url_advertised": ["dig://[2001:db8::9]:9776"],
-        "url_current": ["dig://[2001:db8::1]:9776"]
+        "capsules_stale": 3, "capsules_affordable": 2,
+        "collateral_reclaimed_dig_base_units": 2_094,
+        "collateral_relocked_dig_base_units": 2_094,
+        "fee_estimate_mojos": 200_000_000,
+        "stale_url_sets": [["dig://[2001:db8::1]:9776"]],
+        "url_current": ["dig://[2001:db8::9]:9776"],
+        "targets_seen_last_7_days": 1
     }));
     assert_result_round_trips::<results::MirrorReconcileResult>(json!({
         "outcome": "refused",
@@ -2145,29 +2184,59 @@ fn mirror_reconcile_result_golden_vectors_are_byte_stable() {
         "url_current": null
     }));
     assert_result_round_trips::<results::MirrorReconcileResult>(json!({
-        "outcome": "completed",
-        "reclaimed": 3, "created": 3,
-        "url": ["dig://[2001:db8::9]:9776"]
+        "outcome": "refused",
+        "reason": "not_publishing",
+        "state": "uncorroborated_address",
+        "url_current": ["dig://[2001:db8::1]:9776"]
     }));
     assert_result_round_trips::<results::MirrorReconcileResult>(json!({
-        "outcome": "partial",
-        "reclaimed": 2, "created": 1, "remaining": 1,
-        "reason": "wallet ran out of funds after the second reclaim confirmed"
+        "outcome": "refused",
+        "reason": "requirement_unknown",
+        "collateral_reason": "not_censused",
+        "url_current": ["dig://[2001:db8::1]:9776"]
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "refused",
+        "reason": "wallet_unavailable",
+        "capability": {"kind": "signing", "reason": "not_initialized"},
+        "url_current": ["dig://[2001:db8::1]:9776"]
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "submitted",
+        "reclaims_submitted": 2, "reclaims_rejected": 0, "recreates_owed": 2,
+        "left_unchanged": 1,
+        "left_reason": "wallet cannot afford the third reclaim+create pair",
+        "url_current": ["dig://[2001:db8::9]:9776"]
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "submitted",
+        "reclaims_submitted": 3, "reclaims_rejected": 0, "recreates_owed": 3,
+        "left_unchanged": 0,
+        "left_reason": null,
+        "url_current": ["dig://[2001:db8::9]:9776"]
     }));
 }
 
 /// **Every `MirrorReconcileRefusal` decodes/encodes to its own stable snake_case token, and the
-/// six are pairwise distinct.**
+/// ten are pairwise distinct.**
 #[test]
 fn every_mirror_reconcile_refusal_is_a_distinct_wire_token() {
+    // `MirrorReconcileRefusal` is internally tagged (`reason`), so its wire form is an OBJECT for
+    // every variant, including the unit ones -- unlike the pre-0.35.0 shape, a bare string is
+    // never a valid encoding. Round-trip through the real object rather than a hand-built string.
     for &reason in results::MirrorReconcileRefusal::ALL {
-        let wire = json!(reason.as_wire());
-        let parsed: results::MirrorReconcileRefusal = serde_json::from_value(wire.clone()).unwrap();
+        let wire = serde_json::to_value(reason).unwrap();
+        let parsed: results::MirrorReconcileRefusal = serde_json::from_value(wire.clone())
+            .unwrap_or_else(|e| panic!("{reason:?} must decode from its own wire encoding: {e}"));
         assert_eq!(
             parsed, reason,
-            "{reason:?} must round-trip through its own wire token"
+            "{reason:?} must round-trip through its own wire encoding"
         );
-        assert_eq!(serde_json::to_value(reason).unwrap(), wire);
+        assert_eq!(
+            wire.get("reason").and_then(|v| v.as_str()),
+            Some(reason.as_wire()),
+            "{reason:?}'s wire encoding must carry its own `reason` token"
+        );
     }
     let tokens: std::collections::BTreeSet<&str> = results::MirrorReconcileRefusal::ALL
         .iter()
@@ -2192,15 +2261,19 @@ fn every_mirror_reconcile_refusal_is_listed_in_all() {
     // Exhaustive on purpose. Adding a variant MUST break this match.
     const fn index(reason: R) -> usize {
         match reason {
-            R::AddressUncorroborated => 0,
+            R::NotPublishing { .. } => 0,
             R::UrlUnchanged => 1,
             R::NoMirrorCoins => 2,
-            R::InsufficientFunds => 3,
+            R::InsufficientFunds { .. } => 3,
             R::ReconcileInProgress => 4,
-            R::AdvertiseOff => 5,
+            R::Disabled => 5,
+            R::ChainUnreadable => 6,
+            R::RequirementUnknown { .. } => 7,
+            R::WalletUnavailable { .. } => 8,
+            R::FundsUnmeasured => 9,
         }
     }
-    const VARIANT_COUNT: usize = 6;
+    const VARIANT_COUNT: usize = 10;
 
     assert_eq!(
         R::ALL.len(),
@@ -2215,40 +2288,67 @@ fn every_mirror_reconcile_refusal_is_listed_in_all() {
     }
 }
 
-/// **`control.mirror.reconcile` reaches its own handler, and `dry_run` actually threads through.**
+/// **`control.mirror.reconcile` reaches its own handler, `dry_run` actually threads through, and
+/// the SAME K carries from the priced plan into the executed submission.**
 ///
 /// `dry_run: true` must come back `Planned` (nothing spent); `dry_run: false` must come back
-/// `Completed`. Keyed to the capsule/reclaim/create counts and to `url_advertised != url_current`,
-/// so an arm mis-wired to `mirror_bond_states` — the only other mirror-prefixed method — cannot
-/// pass this, and a plan against an unchanged URL (which would in fact be the `url_unchanged`
-/// no-op) cannot pass it either.
+/// `Submitted` (never `completed`/`partial`, which cannot exist — see
+/// [`results::MirrorReconcileResult`]'s own doc for why). Keyed to
+/// `capsules_affordable == reclaims_submitted == recreates_owed` and to
+/// `capsules_stale - capsules_affordable == left_unchanged` — the load-bearing invariant that K
+/// is sized ONCE, before any reclaim, and a real run must never invent a different K than a prior
+/// dry run already priced. Also keyed to `stale_url_sets != [url_current]`, so an arm mis-wired to
+/// `mirror_bond_states` — the only other mirror-prefixed method — cannot pass this, and a plan
+/// against an unchanged URL (which would in fact be the `url_unchanged` no-op) cannot pass it
+/// either.
 #[test]
 fn mirror_reconcile_dry_run_prices_without_spending_and_reaches_its_own_handler() {
     let planned = round_trip(&MirrorReconcileParams { dry_run: true }).unwrap();
-    match planned {
+    let (capsules_stale, capsules_affordable) = match planned {
         results::MirrorReconcileResult::Planned {
-            capsules,
-            reclaims,
-            creates,
-            url_advertised,
+            capsules_stale,
+            capsules_affordable,
+            stale_url_sets,
             url_current,
             ..
         } => {
-            assert_eq!((capsules, reclaims, creates), (3, 3, 3));
-            assert_ne!(
-                url_advertised, url_current,
+            assert!(
+                capsules_affordable <= capsules_stale,
+                "the affordable count can never exceed the stale count"
+            );
+            assert!(
+                !stale_url_sets.contains(&url_current),
                 "a dry-run plan against an unchanged URL would be a no-op, not a plan"
             );
+            (capsules_stale, capsules_affordable)
         }
         other => panic!("dry_run: true must answer Planned, got {other:?}"),
-    }
+    };
 
-    let completed = round_trip(&MirrorReconcileParams { dry_run: false }).unwrap();
-    match completed {
-        results::MirrorReconcileResult::Completed {
-            reclaimed, created, ..
-        } => assert_eq!((reclaimed, created), (3, 3)),
-        other => panic!("dry_run: false must answer Completed, got {other:?}"),
+    let submitted = round_trip(&MirrorReconcileParams { dry_run: false }).unwrap();
+    match submitted {
+        results::MirrorReconcileResult::Submitted {
+            reclaims_submitted,
+            recreates_owed,
+            left_unchanged,
+            ..
+        } => {
+            assert_eq!(
+                reclaims_submitted, capsules_affordable,
+                "a real run must submit exactly the K a prior dry run already priced -- never a \
+                 different K invented at execution time"
+            );
+            assert_eq!(
+                recreates_owed, reclaims_submitted,
+                "every ACCEPTED reclaim owes exactly one matching recreate"
+            );
+            assert_eq!(
+                left_unchanged,
+                capsules_stale - capsules_affordable,
+                "n - K must be left exactly as they were"
+            );
+        }
+        other => panic!("dry_run: false must answer Submitted, got {other:?}"),
     }
 
     // Omitting `dry_run` entirely reads exactly like an explicit `false` -- reconciles for real,
@@ -2261,7 +2361,7 @@ fn mirror_reconcile_dry_run_prices_without_spending_and_reaches_its_own_handler(
     );
     let resp = block_on(node.dispatch(req));
     let value = resp.into_result().expect("omitted dry_run must not error");
-    assert_eq!(value["outcome"], json!("completed"));
+    assert_eq!(value["outcome"], json!("submitted"));
 }
 
 #[test]
@@ -6009,7 +6109,8 @@ fn golden_bond_state_vectors_pin_every_state() {
     let rows = json!([
         {
             "store_id": STORE, "root": ROOT, "bond_state": "bonded",
-            "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64
+            "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64,
+            "urls": ["dig://[2001:db8::1]:9776"], "url_current": true
         },
         {
             "store_id": STORE, "root": BOND_ROOT_B, "bond_state": "unfunded",
@@ -6030,10 +6131,24 @@ fn golden_bond_state_vectors_pin_every_state() {
         "locked_dig_base_units": 3_094u64,
         "epoch": 7u64,
         "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
+        "url_reconcile": {
+            "auto_enabled": true,
+            "personal_day_offset_secs": 41_400u64,
+            "next_check_unix_ms": 1_800_086_400_000u64,
+            "last_observation": {
+                "at_unix_ms": 1_800_000_000_000u64,
+                "conclusive": true,
+                "urls": ["dig://[2001:db8::1]:9776"],
+                "state": null
+            },
+            "stale_bonds": 0u32,
+            "auto_reconciled_this_epoch": true
+        },
     }));
 
     // The three states with no payload, plus `reclaiming`, which HAS one because its money is
-    // still locked.
+    // still locked. `url_reconcile` here pins the OTHER branch of its own shape: the daily
+    // detector OFF, so its offset/next-check/observation fields are all `null` together.
     assert_result_round_trips::<results::MirrorBondStatesResult>(json!({
         "state": "known",
         "entries": [
@@ -6049,6 +6164,14 @@ fn golden_bond_state_vectors_pin_every_state() {
         "locked_dig_base_units": 2_047u64,
         "epoch": 7u64,
         "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
+        "url_reconcile": {
+            "auto_enabled": false,
+            "personal_day_offset_secs": null,
+            "next_check_unix_ms": null,
+            "last_observation": null,
+            "stale_bonds": 0u32,
+            "auto_reconciled_this_epoch": false
+        },
     }));
 
     for reason in results::MirrorBondStatesUnknownReason::ALL {
@@ -6082,6 +6205,8 @@ fn the_bond_surface_wire_tokens_are_unique() {
             coin_id: BOND_COIN_A.into(),
             epoch: 7,
             amount_dig_base_units: 1_047,
+            urls: vec!["dig://[2001:db8::1]:9776".into()],
+            url_current: true,
         },
         results::MirrorBondState::Pending,
         results::MirrorBondState::Unfunded {
@@ -6137,6 +6262,10 @@ fn an_absent_paging_key_never_becomes_a_definite_answer() {
         "locked_dig_base_units": 0u64,
         "epoch": 7u64,
         "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
+        "url_reconcile": {
+            "auto_enabled": false, "personal_day_offset_secs": null, "next_check_unix_ms": null,
+            "last_observation": null, "stale_bonds": 0u32, "auto_reconciled_this_epoch": false
+        },
     });
     // The control: with both keys present it decodes, so the failures below are about ABSENCE and
     // not about the rest of the payload.
@@ -6165,13 +6294,18 @@ fn the_locked_total_spans_pages_and_is_never_the_page_sum() {
         "state": "known",
         "entries": [{
             "store_id": STORE, "root": ROOT, "bond_state": "bonded",
-            "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64
+            "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64,
+            "urls": ["dig://[2001:db8::1]:9776"], "url_current": true
         }],
         "complete": false,
         "cursor": {"store_id": STORE, "root": ROOT},
         "locked_dig_base_units": 5_000u64,
         "epoch": 7u64,
         "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
+        "url_reconcile": {
+            "auto_enabled": false, "personal_day_offset_secs": null, "next_check_unix_ms": null,
+            "last_observation": null, "stale_bonds": 0u32, "auto_reconciled_this_epoch": false
+        },
     });
     assert_result_round_trips::<results::MirrorBondStatesResult>(wire.clone());
 
@@ -6298,7 +6432,8 @@ fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
         "state": "known",
         "entries": [
             {"store_id": STORE, "root": ROOT, "bond_state": "bonded",
-             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64},
+             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64,
+             "urls": ["dig://[2001:db8::1]:9776"], "url_current": true},
             {"store_id": STORE, "root": BOND_ROOT_B, "bond_state": "withheld"},
         ],
         "complete": true,
@@ -6306,6 +6441,10 @@ fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
         "locked_dig_base_units": 1_047u64,
         "epoch": 7u64,
         "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
+        "url_reconcile": {
+            "auto_enabled": false, "personal_day_offset_secs": null, "next_check_unix_ms": null,
+            "last_observation": null, "stale_bonds": 0u32, "auto_reconciled_this_epoch": false
+        },
     });
     assert_result_round_trips::<results::MirrorBondStatesResult>(truthful);
 
@@ -6351,13 +6490,18 @@ fn a_provenance_blind_producer_can_say_so_instead_of_shipping_a_short_page() {
         "state": "known",
         "entries": [
             {"store_id": STORE, "root": ROOT, "bond_state": "bonded",
-             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64},
+             "coin_id": BOND_COIN_A, "epoch": 7u64, "amount_dig_base_units": 1_047u64,
+             "urls": ["dig://[2001:db8::1]:9776"], "url_current": true},
         ],
         "complete": true,
         "cursor": {"store_id": STORE, "root": ROOT},
         "locked_dig_base_units": 1_047u64,
         "epoch": 7u64,
         "funding_wallet": {"state": "known", "address": OPERATOR_ADDRESS, "puzzle_hash": "7c".repeat(32)},
+        "url_reconcile": {
+            "auto_enabled": false, "personal_day_offset_secs": null, "next_check_unix_ms": null,
+            "last_observation": null, "stale_bonds": 0u32, "auto_reconciled_this_epoch": false
+        },
     });
     let short: results::MirrorBondStatesResult = serde_json::from_value(short_page).unwrap();
     assert_ne!(short, parsed);
