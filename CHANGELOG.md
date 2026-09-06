@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.35.0] - 2026-09-06
+
+### Bug Fixes
+- Control.mirror.reconcile result shape declares outcomes the node cannot honestly report (#55)
+
 ## [0.34.0] - 2026-09-06
 
 ### Features
