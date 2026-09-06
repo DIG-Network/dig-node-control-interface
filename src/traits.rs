@@ -660,6 +660,54 @@ pub trait ControlHandler: Sync {
         params: params::MirrorBondStatesParams,
     ) -> Result<results::MirrorBondStatesResult, ControlError>;
 
+    /// `control.mirror.reconcile` (TOKEN-GATED)
+    ///
+    /// Reconcile this node's mirror coins to its CURRENT advertise URL: reclaim every coin
+    /// advertising a stale URL, then recreate it advertising the URL this node advertises TODAY.
+    /// Shared by the manual "reset mirrors" action and dig-node#570's automatic epoch-boundary
+    /// pass — build ONE reconcile primitive and serve both triggers through it
+    /// (dig_ecosystem#3203); a node that diverges into two implementations of a money-moving
+    /// operation with different guards has a live defect, not a style difference.
+    ///
+    /// # The trap this method exists to not fall into
+    ///
+    /// A naive reclaim-then-remint can leave the operator WORSE OFF: reclaim-first funds the
+    /// create behind it, so reclaiming first and only then discovering the new URL cannot be
+    /// established leaves the node with ZERO bonds, having spent money to get there, when it was
+    /// bonded before the call. An implementation MUST:
+    ///
+    /// - **Establish and validate the new URL BEFORE reclaiming anything.** The candidate URL
+    ///   must be CORROBORATED (dig-node#566), never merely discovered. If it cannot be
+    ///   established, refuse as
+    ///   [`AddressUncorroborated`](results::MirrorReconcileRefusal::AddressUncorroborated) and do
+    ///   NOTHING — no reclaim, no create, no partial progress.
+    /// - **Refuse a no-op rather than spend to reach it.** When the candidate URL is identical to
+    ///   what this node's existing coins already advertise, refuse as
+    ///   [`UrlUnchanged`](results::MirrorReconcileRefusal::UrlUnchanged) rather than reclaim and
+    ///   recreate coins that would advertise the same thing.
+    /// - **Check affordability of the WHOLE plan before starting**, and if the wallet cannot
+    ///   afford even the first step, refuse as
+    ///   [`InsufficientFunds`](results::MirrorReconcileRefusal::InsufficientFunds) rather than
+    ///   reclaim what it cannot afford to recreate.
+    /// - **Reclaim-first, and stop at the affordable prefix.** If the plan can afford SOME but not
+    ///   ALL of its steps, run the affordable prefix and answer
+    ///   [`Partial`](results::MirrorReconcileResult::Partial) naming what remains and why — never
+    ///   half-run silently, and never fail the whole call once real money has already moved.
+    /// - **`Refused` MUST mean nothing was spent, unconditionally.** A caller distinguishes
+    ///   `refused` from `partial` precisely so it never has to guess whether a "no" cost money; an
+    ///   implementation that spends anything under a `Refused` outcome breaks that guarantee.
+    /// - **`dry_run: true` prices the plan and spends nothing** —
+    ///   [`Planned`](results::MirrorReconcileResult::Planned) reports the same capsule/reclaim/
+    ///   create counts and cost a real run would incur, computed against the SAME validation
+    ///   (corroborated URL, changed URL, affordability) a real run performs, so a dry run that
+    ///   would in fact refuse MUST report [`Refused`](results::MirrorReconcileResult::Refused),
+    ///   never a [`Planned`](results::MirrorReconcileResult::Planned) plan for a call that cannot
+    ///   execute.
+    async fn mirror_reconcile(
+        &self,
+        params: params::MirrorReconcileParams,
+    ) -> Result<results::MirrorReconcileResult, ControlError>;
+
     /// `control.profile.putBody` (TOKEN-GATED)
     ///
     /// An implementation MUST independently resolve the profile's root ON CHAIN, recompute the root
@@ -850,6 +898,7 @@ pub trait ControlHandler: Sync {
                 let params: params::MirrorBondStatesParams = decode(params)?;
                 encode(self.mirror_bond_states(params.validated()?).await?)
             }
+            ControlMethod::MirrorReconcile => encode(self.mirror_reconcile(decode(params)?).await?),
             ControlMethod::CollateralMarginGet => encode(self.collateral_margin_get().await?),
             // `CollateralMarginSetParams` derives `Deserialize`, so decoding enforces NOTHING beyond
             // the field's type. `validated()` here is the SOLE enforcement of `MAX_SAFETY_MARGIN_BP`

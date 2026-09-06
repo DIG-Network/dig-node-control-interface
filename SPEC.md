@@ -136,6 +136,7 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.collateral.margin.set` | yes | owned | `{margin_bp:u64}` | `{margin_bp:u64}` |
 | `control.collateral.buffer` | yes | owned | — | `CollateralBufferResult` (`{state:"known", epoch, protocol_version, funding_state, recommended_buffer_dig_base_units, spendable_dig_base_units, pairs_served_by_this_node, required_per_store_dig_base_units, margin_bp, overlap_dig_base_units, escalation_headroom_dig_base_units, horizon_epochs, escalation_ceiling_micros}` \| `{state:"unknown", reason}`) |
 | `control.mirror.bondStates` | yes | owned | `{after?:{store_id,root}, limit?:u32}` | `MirrorBondStatesResult` (`{state:"known", entries:[{store_id, root, bond_state, …}], complete, cursor, locked_dig_base_units, epoch, funding_wallet}` \| `{state:"unknown", reason}`) |
+| `control.mirror.reconcile` | yes | owned | `{dry_run?:bool=false}` (§4.2i) | `MirrorReconcileResult` (`{outcome:"planned", capsules, reclaims, creates, estimated_cost_dig_base_units, url_advertised, url_current}` \| `{outcome:"refused", reason, url_current}` \| `{outcome:"completed", reclaimed, created, url}` \| `{outcome:"partial", reclaimed, created, remaining, reason}`) |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -1318,6 +1319,83 @@ the page and the node's stay identical.
 **The read is TOKEN-GATED although it is a read.** The caller supplies nothing, so the answer is this
 node's own bond set and funding position — an association, not a relayed public fact. It is NOT an open
 read (§4.2) and NOT a master-token method (§2.1).
+
+### 4.2i Reconciling mirror coins to the current advertise URL (`control.mirror.reconcile`)
+
+A mirror coin carries the advertise URL that was current when it was minted. When that URL changes
+— a new public IP, an operator override, a corroborated address replacing none — every existing coin
+advertises an address the node no longer serves from: it keeps collateral locked while earning
+nothing, and the drift is invisible without this method. `control.mirror.reconcile` is the ONE
+primitive that reclaims every such coin and recreates it advertising the URL this node advertises
+TODAY. It is shared by two triggers — a manual operator-initiated reset and dig-node#570's automatic
+epoch-boundary pass — and an implementation MUST serve both through the SAME reconcile logic rather
+than maintaining two implementations of a money-moving operation with different guards.
+
+**Params carry ONE optional field, `dry_run` (boolean, default `false` when omitted).** `true` prices
+the plan and MUST spend nothing; `false`, and an omitted field, executes the plan for real. There is
+no URL parameter: the target is always whatever this node is CURRENTLY configured to advertise
+(§4.2h's derived-or-override view). A caller wanting a DIFFERENT target MUST set it first via
+`control.config.setMirrorAdvertiseUrls`, then reconcile.
+
+**The result is a tagged union on `outcome`, and a client MUST be able to tell all four apart —
+they mean different things about the user's money:**
+
+| `outcome` | when | payload | spent? |
+| --- | --- | --- | --- |
+| `planned` | `dry_run: true`, and the node believes it CAN execute | `capsules`, `reclaims`, `creates`, `estimated_cost_dig_base_units`, `url_advertised`, `url_current` | no |
+| `refused` | the node refuses to even start | `reason`, `url_current` (nullable) | **no, unconditionally** |
+| `completed` | the whole plan ran | `reclaimed`, `created`, `url` | yes |
+| `partial` | the affordable PREFIX ran; the rest did not start | `reclaimed`, `created`, `remaining`, `reason` | yes, for the prefix only |
+
+**The central invariant: establish and validate the new URL BEFORE reclaiming anything. If it cannot
+be established, the node MUST do nothing at all.** Reclaim-first is dig-node's existing
+mirror-collateral runner order — a reclaim returns collateral, which may fund the create behind it —
+and on a wallet without spare funds that order is not a preference, it is the only one that works. A
+naive implementation that reclaimed first and only then discovered the new URL could not be
+established would leave the operator with ZERO bonds, having spent money to get there, when they were
+bonded before the call. An implementation MUST therefore, in this order:
+
+1. **Resolve and CORROBORATE the candidate URL** (dig-node#566's corroboration, not mere discovery).
+   If it cannot be corroborated, refuse as `address_uncorroborated` and perform no reclaim, no create,
+   and no partial progress.
+2. **Compare the candidate URL against what this node's existing mirror coins advertise today.** If
+   they are identical, refuse as `url_unchanged` rather than spend real $DIG to reach the state the
+   node is already in.
+3. **Confirm this node holds at least one mirror coin to reconcile.** A node with none refuses as
+   `no_mirror_coins` — there is no bond whose advertise URL could be stale.
+4. **Confirm this node's collateral advertising is switched on.** A node with it off refuses as
+   `advertise_off` — there is no URL to reconcile toward.
+5. **Price the WHOLE plan and check affordability BEFORE starting.** A wallet that cannot afford even
+   the first step refuses as `insufficient_funds`, rather than reclaiming a coin it cannot afford to
+   recreate.
+6. **Refuse `reconcile_in_progress` when a reconcile this node started earlier is still in flight.**
+   Reconciling is NOT idempotent mid-flight: a second call racing the first could reclaim a coin the
+   first call is still waiting to recreate. An implementation MUST serialize reconciles rather than
+   interleave them.
+
+**`refused` MUST mean nothing was spent, unconditionally.** A client distinguishes `refused` from
+`partial` precisely so it never has to guess whether a "no" cost money; an implementation MUST NOT
+spend anything before returning `refused`, on any of the six reasons.
+
+**`partial` is reachable ONLY when a later step fails after an earlier prefix has already
+succeeded** — for example the wallet affords the first two of three reclaim+create pairs but not the
+third. It MUST NOT be used for a validation failure discovered before anything ran; that case is
+`refused`. Because reclaim-first ordering means every reclaim that ran had already confirmed before
+its create was attempted, a `partial` outcome MUST leave the node no worse off than before the call:
+`reclaimed` and `created` name what genuinely completed, `remaining` names what did not run, and
+`reason` states why the plan stopped.
+
+**A dry run that would in fact refuse MUST report `refused`, never `planned`.** `planned` prices a
+plan computed against the SAME validation (corroborated URL, changed URL, affordability) step 1-6
+performs; it is not a preview that skips them. A caller previewing a reconcile that would in fact be
+refused MUST see the same refusal reason a real attempt would produce.
+
+**This method is TOKEN-GATED at the ORDINARY tier, never the MASTER tier (§2.1),** by the same
+reasoning as `control.config.setMirrorAdvertiseUrls` (§4.2h): it moves real $DIG, but it installs no
+principal the node will thereafter believe, obey, or forward requests to. It changes only which URL
+THIS node's own mirror coins advertise — an implementation MUST NOT dial a value the caller supplies,
+MUST NOT treat bytes read from anywhere new as trusted input, and MUST NOT forward any request to a
+third party as a result of this call.
 
 ### 4.3 The custody boundary (§908)
 
