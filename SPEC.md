@@ -135,8 +135,8 @@ master token specifically; `Routing` = how the node resolves it (`owned` by the 
 | `control.collateral.margin.get` | yes | owned | — | `{margin_bp:u64}` |
 | `control.collateral.margin.set` | yes | owned | `{margin_bp:u64}` | `{margin_bp:u64}` |
 | `control.collateral.buffer` | yes | owned | — | `CollateralBufferResult` (`{state:"known", epoch, protocol_version, funding_state, recommended_buffer_dig_base_units, spendable_dig_base_units, pairs_served_by_this_node, required_per_store_dig_base_units, margin_bp, overlap_dig_base_units, escalation_headroom_dig_base_units, horizon_epochs, escalation_ceiling_micros}` \| `{state:"unknown", reason}`) |
-| `control.mirror.bondStates` | yes | owned | `{after?:{store_id,root}, limit?:u32}` | `MirrorBondStatesResult` (`{state:"known", entries:[{store_id, root, bond_state, …}], complete, cursor, locked_dig_base_units, epoch, funding_wallet}` \| `{state:"unknown", reason}`) |
-| `control.mirror.reconcile` | yes | owned | `{dry_run?:bool=false}` (§4.2i) | `MirrorReconcileResult` (`{outcome:"planned", capsules, reclaims, creates, estimated_cost_dig_base_units, url_advertised, url_current}` \| `{outcome:"refused", reason, url_current}` \| `{outcome:"completed", reclaimed, created, url}` \| `{outcome:"partial", reclaimed, created, remaining, reason}`) |
+| `control.mirror.bondStates` | yes | owned | `{after?:{store_id,root}, limit?:u32}` | `MirrorBondStatesResult` (`{state:"known", entries:[{store_id, root, bond_state, urls, url_current, …}], complete, cursor, locked_dig_base_units, epoch, funding_wallet, url_reconcile}` \| `{state:"unknown", reason}`) |
+| `control.mirror.reconcile` | yes | owned | `{dry_run?:bool=false}` (§4.2i) | `MirrorReconcileResult` (`{outcome:"planned", capsules_stale, capsules_affordable, collateral_reclaimed_dig_base_units, collateral_relocked_dig_base_units, fee_estimate_mojos, stale_url_sets, url_current, targets_seen_last_7_days}` \| `{outcome:"refused", reason, url_current}` \| `{outcome:"submitted", reclaims_submitted, reclaims_rejected, recreates_owed, left_unchanged, left_reason, url_current}`) |
 | `control.profile.putBody` | yes | delegated | `{store_id:string, root:string, body_b64:string}` | `{stored, store_id, root, body_bytes}` |
 | `control.profile.getBody` | yes | delegated | `{store_id:string, root:string}` | `{store_id, root, body_b64:string\|null, body_bytes}` |
 | `pairing.request` | no | open | `{client_name:string}` | `{pairing_id, pairing_code, expires_ms}` |
@@ -1227,7 +1227,7 @@ alarms about a perfectly healthy node, which is the defect this method exists to
 
 | `bond_state` | payload | means | remedy |
 | --- | --- | --- | --- |
-| `bonded` | `coin_id`, `epoch`, `amount_dig_base_units` | a coin for this pair and epoch is on chain | none |
+| `bonded` | `coin_id`, `epoch`, `amount_dig_base_units`, `urls`, `url_current` | a coin for this pair and epoch is on chain | none |
 | `pending` | — | a create is submitted and unconfirmed | wait |
 | `unfunded` | `short_dig_base_units` | the wallet cannot cover this create | add $DIG |
 | `deferred` | `reason` | the epoch requirement is unknown, so no create can be PRICED — including `balance_unreadable`, where the node cannot read its own $DIG balance | none; the wallet may be full |
@@ -1254,6 +1254,29 @@ funding wallet is node-wide, so a per-row copy is a field that cannot vary while
 could, and two rows of one answer could then be written to disagree. It is carried rather than left
 to a second call for the same reason `epoch` is: a follow-up call is a second observation, and a page
 of amounts can be rendered and acted on before it returns.
+
+**Every `bonded` row carries `urls` and `url_current`, and a `known` answer carries `url_reconcile`
+beside `funding_wallet`.** `urls` is the coin's OWN memo, read at the moment it was minted — a coin
+created before the node's public address changed still carries its OLD address, and `urls` is how a
+client sees that without decoding the memo itself. `url_current` is whether `urls` set-equals what
+this node advertises THIS PASS; `false` is not a fault by itself, it is exactly the condition
+`control.mirror.reconcile` (§4.2i) exists to fix. `url_reconcile` is this node's URL-reconciliation
+standing as a whole: `auto_enabled` (is the daily detector, dig-node#570, armed on this node — `false`
+means only that nothing will run reconcile without a manual call, never a reason by itself),
+`personal_day_offset_secs` and `next_check_unix_ms` (both `null` together when `auto_enabled` is
+`false` — an offset with nothing to offset is not a fact about this node), `last_observation` (what
+the daily detector, or the last manual call, most recently saw — `null` if this node has never
+observed its own advertise state; and when present, `conclusive: false` means BOTH `urls` and `state`
+are `null`, because an inconclusive observation has nothing to report and guessing under either field
+would assert a fact the node does not have), `stale_bonds` (the count of `url_current: false` across
+the WHOLE bond set, never just the current page), and `auto_reconciled_this_epoch` (lets a client
+distinguish "autopilot already handled it" from "everything was already current" — both otherwise read
+identically as `stale_bonds: 0`). Both fields are ADDITIVE to a `known` payload consumers destructure
+by name; a client MUST decode it with unknown-field tolerance (`..`/`#[serde(default)]` or
+equivalent) rather than exhaustively, so a future additive field never breaks it. Without
+`url_reconcile` a client could not decide whether "reset mirrors" would do anything without a
+`dry_run` round trip on every render, and could not tell whether a `submitted` reconcile it kicked off
+earlier has landed without re-deriving `stale_bonds` itself from every row on every page.
 
 **`unfunded` is the ONLY state a client may raise a funding alarm on.** `deferred` in particular is not
 one: the node does not know the price, and an operator sending money in response changes nothing.
@@ -1337,58 +1360,107 @@ no URL parameter: the target is always whatever this node is CURRENTLY configure
 (§4.2h's derived-or-override view). A caller wanting a DIFFERENT target MUST set it first via
 `control.config.setMirrorAdvertiseUrls`, then reconcile.
 
-**The result is a tagged union on `outcome`, and a client MUST be able to tell all four apart —
-they mean different things about the user's money:**
+**The result is a tagged union on `outcome`, and a client MUST be able to tell all three apart —
+they mean different things about the user's money. There is no `completed` or `partial` outcome, and
+an implementation MUST NOT report one:** a reclaim and a create are separate spend bundles, and a
+create's $DIG is selected by a chain scan of CONFIRMED coins, so the collateral a reclaim frees
+becomes chain-visible only in a LATER pass — never inside this call. An implementation MUST NOT wait
+for confirmation inside the call, and MUST NOT report a `created`/`reclaimed`-completed count it
+cannot back: that fact does not exist yet, and reporting it would be a money statement about the
+future told as though it were the present (§25.8). The honest report of what the node did by the time
+it answers is `submitted`.
 
 | `outcome` | when | payload | spent? |
 | --- | --- | --- | --- |
-| `planned` | `dry_run: true`, and the node believes it CAN execute | `capsules`, `reclaims`, `creates`, `estimated_cost_dig_base_units`, `url_advertised`, `url_current` | no |
-| `refused` | the node refuses to even start | `reason`, `url_current` (nullable) | **no, unconditionally** |
-| `completed` | the whole plan ran | `reclaimed`, `created`, `url` | yes |
-| `partial` | the affordable PREFIX ran; the rest did not start | `reclaimed`, `created`, `remaining`, `reason` | yes, for the prefix only |
+| `planned` | `dry_run: true`, and the node believes it CAN execute | `capsules_stale`, `capsules_affordable`, `collateral_reclaimed_dig_base_units`, `collateral_relocked_dig_base_units`, `fee_estimate_mojos`, `stale_url_sets`, `url_current`, `targets_seen_last_7_days` | no |
+| `refused` | the node refuses to even start | `reason` (ten tokens, flattened onto the payload — see below), `url_current` (nullable) | **no, unconditionally** |
+| `submitted` | the node attempted its sized prefix | `reclaims_submitted`, `reclaims_rejected`, `recreates_owed`, `left_unchanged`, `left_reason` (nullable), `url_current` | yes, for the submitted prefix only |
 
-**The central invariant: establish and validate the new URL BEFORE reclaiming anything. If it cannot
-be established, the node MUST do nothing at all.** Reclaim-first is dig-node's existing
-mirror-collateral runner order — a reclaim returns collateral, which may fund the create behind it —
-and on a wallet without spare funds that order is not a preference, it is the only one that works. A
-naive implementation that reclaimed first and only then discovered the new URL could not be
-established would leave the operator with ZERO bonds, having spent money to get there, when they were
-bonded before the call. An implementation MUST therefore, in this order:
+**`planned` prices the collateral round-trip honestly rather than as one "cost".** Collateral is
+reclaimed and RE-LOCKED, not spent: `collateral_reclaimed_dig_base_units` is read FROM the `K` coins
+the plan would reclaim, `collateral_relocked_dig_base_units` is `K × this epoch's margined
+requirement`, and an implementation MUST report them SEPARATELY rather than net them into one cost
+figure — netting them would teach an operator that a reset burns $DIG when the net movement is zero in
+the common case (the money-lie class in the reassuring direction's opposite: making a free action
+look expensive). `fee_estimate_mojos` is the one figure genuinely spent: the XCH network fee, in
+mojos. `stale_url_sets` is the DISTINCT advertise-URL set(s) the `capsules_stale` coins currently
+carry, as `[[string]]` rather than one flattened list, because coins minted at different times can
+carry different URLs and a single list would either merge them or silently show only one coin's memo.
+`targets_seen_last_7_days` is dig-node SPEC §25.13.8's rotating-address warning; a client SHOULD
+surface it once it rises above one or two rather than only after an operator has already paid for
+several resets.
 
-1. **Resolve and CORROBORATE the candidate URL** (dig-node#566's corroboration, not mere discovery).
-   If it cannot be corroborated, refuse as `address_uncorroborated` and perform no reclaim, no create,
-   and no partial progress.
-2. **Compare the candidate URL against what this node's existing mirror coins advertise today.** If
+**The central invariant: establish and validate the new URL BEFORE reclaiming anything, and size the
+affordable prefix `K` BEFORE any reclaim is attempted.** If the URL cannot be established, the node
+MUST do nothing at all. If it can, the node MUST reclaim EXACTLY `K` — never more. `K` is `Planned`'s
+`capsules_affordable` and `Submitted`'s `reclaims_submitted` at once: the SAME quantity, computed the
+SAME way, whichever outcome the call reaches, and a real run MUST NOT invent a different `K` than a
+prior dry run already priced. Reclaiming more than `K` leaves the node holding uncollateralised
+capsules it has stopped advertising — the half-run failure this whole method exists to prevent — so
+"no worse off" here means the bond COUNT is unchanged, never merely that no fee was wasted. An
+implementation MUST therefore, in this order:
+
+1. **Confirm this node can read mirror coins from chain.** If it cannot, refuse as
+   `chain_unreadable` — reconciling from an unreadable chain view risks reclaiming a coin the node
+   has misjudged.
+2. **Confirm this epoch's collateral requirement is `Known` (§4.2e).** If it is not, refuse as
+   `requirement_unknown` carrying the SAME `CollateralUnknownReason` taxonomy §4.2e's own
+   `unknown` answer uses — never `insufficient_funds`; the wallet may be full and no create can
+   be PRICED regardless.
+3. **Confirm this node's collateral advertising is switched ON node-wide** (the operator's own
+   switch, §25.7 of dig-node's own SPEC). A node with it off refuses as `disabled` — a client MUST
+   NOT present this as a fault.
+4. **Confirm this node is currently PUBLISHING an advertise URL.** A node in any of
+   `MirrorAdvertiseState` (§4.2h)'s four non-publishing states refuses as `not_publishing`
+   carrying that state, rather than inventing a parallel vocabulary for the same fact
+   `control.config.get` already serves. Distinct from
+   `disabled`: this gate is about WHAT URL to advertise, `disabled` is about whether the node bonds
+   anything AT ALL regardless of URL.
+5. **Compare the candidate URL against what this node's existing mirror coins advertise today.** If
    they are identical, refuse as `url_unchanged` rather than spend real $DIG to reach the state the
    node is already in.
-3. **Confirm this node holds at least one mirror coin to reconcile.** A node with none refuses as
+6. **Confirm this node holds at least one mirror coin to reconcile.** A node with none refuses as
    `no_mirror_coins` — there is no bond whose advertise URL could be stale.
-4. **Confirm this node's collateral advertising is switched on.** A node with it off refuses as
-   `advertise_off` — there is no URL to reconcile toward.
-5. **Price the WHOLE plan and check affordability BEFORE starting.** A wallet that cannot afford even
-   the first step refuses as `insufficient_funds`, rather than reclaiming a coin it cannot afford to
-   recreate.
-6. **Refuse `reconcile_in_progress` when a reconcile this node started earlier is still in flight.**
-   Reconciling is NOT idempotent mid-flight: a second call racing the first could reclaim a coin the
-   first call is still waiting to recreate. An implementation MUST serialize reconciles rather than
-   interleave them.
+7. **Confirm this node can spend at all** — it can both sign and, if `DIG_WALLET_ENABLE_LIVE_BROADCAST`
+   requires it, broadcast. A node that cannot refuses as `wallet_unavailable` naming which capability
+   is missing and why (signing, reusing `WalletOperatorAddressResult`'s own reason taxonomy so the
+   two surfaces cannot drift into two spellings of one fact; or broadcasting, the same guard
+   `-32044 WALLET_NODE_SPEND_DISABLED` reports elsewhere). Retrying cannot help either reason; the
+   remedy is repairing the wallet or flipping the flag, never sending $DIG.
+8. **Confirm this node has MEASURED what its operator wallet holds** (dig-node SPEC §25.12). A node
+   that has not refuses as `funds_unmeasured` — this states only that measurement is missing, never
+   affordability; quoting a figure here would be fabricated.
+9. **Size the affordable prefix `K` against the WHOLE plan and check `K ≥ 1` BEFORE reclaiming
+   anything.** A wallet that cannot afford even `K = 1` refuses as `insufficient_funds` carrying
+   `have_dig_base_units` (what the wallet actually holds) and `need_dig_base_units` (the cost of the
+   FIRST reclaim+create pair alone — never the whole plan's cost, which a wallet failing at step one
+   was never priced against).
+10. **Refuse `reconcile_in_progress` when a reconcile this node started earlier is still in flight.**
+    Reconciling is NOT idempotent mid-flight: a second call racing the first could reclaim a coin the
+    first call is still waiting to recreate. An implementation MUST serialize reconciles rather than
+    interleave them.
 
 **`refused` MUST mean nothing was spent, unconditionally.** A client distinguishes `refused` from
-`partial` precisely so it never has to guess whether a "no" cost money; an implementation MUST NOT
-spend anything before returning `refused`, on any of the six reasons.
+`submitted` precisely so it never has to guess whether a "no" cost money; an implementation MUST NOT
+spend anything before returning `refused`, on any of the ten reasons above.
 
-**`partial` is reachable ONLY when a later step fails after an earlier prefix has already
-succeeded** — for example the wallet affords the first two of three reclaim+create pairs but not the
-third. It MUST NOT be used for a validation failure discovered before anything ran; that case is
-`refused`. Because reclaim-first ordering means every reclaim that ran had already confirmed before
-its create was attempted, a `partial` outcome MUST leave the node no worse off than before the call:
-`reclaimed` and `created` name what genuinely completed, `remaining` names what did not run, and
-`reason` states why the plan stopped.
+**`submitted` is the ONLY outcome once anything has been reclaimed, and `left_unchanged > 0` is a
+NORMAL result, not an error** — the caller can tell because the counts say so, never because a
+separate "partial" tag does. `reclaims_submitted` and `reclaims_rejected` both count ATTEMPTS against
+the SAME sized `K`: a rejected reclaim was attempted and failed at runtime (e.g. a coin spent
+elsewhere in a race), which is distinct from `left_unchanged` — the `n − K` capsules never attempted
+because `K` was sized before any reclaim ran. `recreates_owed` MUST equal `reclaims_submitted`: only
+an ACCEPTED reclaim's collateral will ever confirm and fund its matching create, and an implementation
+MUST NOT create anything inside this call — every recreate is owed to the ordinary create pass that
+already scans confirmed coins. `left_reason` is `None` exactly when `left_unchanged` is zero; there is
+nothing to explain when nothing was left behind.
 
 **A dry run that would in fact refuse MUST report `refused`, never `planned`.** `planned` prices a
-plan computed against the SAME validation (corroborated URL, changed URL, affordability) step 1-6
-performs; it is not a preview that skips them. A caller previewing a reconcile that would in fact be
-refused MUST see the same refusal reason a real attempt would produce.
+plan computed against the SAME validation (chain readable, requirement known, advertising on and
+publishing, changed URL, mirror coins exist, wallet can spend, funds measured, affordability, not
+already in flight) steps 1-10 perform; it is not a preview that skips them. A caller previewing a
+reconcile that would in fact be refused MUST see the same refusal reason a real attempt would
+produce.
 
 **This method is TOKEN-GATED at the ORDINARY tier, never the MASTER tier (§2.1),** by the same
 reasoning as `control.config.setMirrorAdvertiseUrls` (§4.2h): it moves real $DIG, but it installs no
