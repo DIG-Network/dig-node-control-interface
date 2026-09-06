@@ -1906,9 +1906,10 @@ control_call!(MirrorBondStatesParams => ControlMethod::MirrorBondStates, results
 ///
 /// # `dry_run` prices the plan without spending
 ///
-/// `true` returns [`results::MirrorReconcileResult::Planned`] — how many capsules, reclaims,
-/// creates, and the total cost — and spends nothing. `false` (the default when omitted) executes
-/// the plan for real. Unlike [`WalletResetCoinDbParams::confirm`], an omitted field here does NOT
+/// `true` returns [`results::MirrorReconcileResult::Planned`] — how many capsules are stale, how
+/// many are affordable, the collateral round-trip and fee — and spends nothing. `false` (the
+/// default when omitted) executes the plan for real. Unlike [`WalletResetCoinDbParams::confirm`],
+/// an omitted field here does NOT
 /// refuse the call: this field means "did the caller ask to preview", not "did the caller confirm
 /// a destructive action", so omitting it reads as "reconcile for real", the same as writing
 /// `false` explicitly.
