@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.34.0] - 2026-09-06
+
+### Features
+- Declare control.mirror.reconcile for reconciling mirror coins to the current advertise URL (#53)
+
 ## [0.33.0] - 2026-09-05
 
 ### Features
