@@ -1182,6 +1182,12 @@ struct MockNode;
 /// an RFC 3849 documentation-range IPv6 host, under dig-node#562's `dig://` derived scheme.
 pub const MOCK_DERIVED_MIRROR_URL: &str = "dig://[2001:db8::1]:9776";
 
+/// The NEW advertise URL [`MockNode`] reconciles its mirror coins TOWARD, distinct from
+/// [`MOCK_DERIVED_MIRROR_URL`] (what its existing coins advertise today) so a
+/// `control.mirror.reconcile` fixture can assert `url_current != url` rather than exercise a plan
+/// that would in fact be a no-op.
+pub const MOCK_RECONCILE_TARGET_URL: &str = "dig://[2001:db8::9]:9776";
+
 /// The one Chia peer [`MockNode`] pretends to have trusted, canonical per
 /// [`crate::params::canonical_peer_ip`].
 pub const MOCK_TRUSTED_CHIA_PEER: &str = "203.0.113.7";
@@ -1951,6 +1957,34 @@ impl ControlHandler for MockNode {
         })
     }
 
+    async fn mirror_reconcile(
+        &self,
+        params: crate::params::MirrorReconcileParams,
+    ) -> Result<results::MirrorReconcileResult, ControlError> {
+        // Three capsules -- the epic's own worked example (dig_ecosystem#3203: "on this host that
+        // is 3 capsules"). The mock's URL differs from `MOCK_DERIVED_MIRROR_URL` on purpose: a
+        // fixture where `url_current == url` could pass an implementation that reconciled onto an
+        // unchanged URL, which is precisely the no-op `UrlUnchanged` exists to refuse.
+        let url_current = vec![MOCK_DERIVED_MIRROR_URL.to_string()];
+        let url_target = vec![MOCK_RECONCILE_TARGET_URL.to_string()];
+        if params.dry_run {
+            Ok(results::MirrorReconcileResult::Planned {
+                capsules: 3,
+                reclaims: 3,
+                creates: 3,
+                estimated_cost_dig_base_units: 4_500,
+                url_advertised: url_target,
+                url_current,
+            })
+        } else {
+            Ok(results::MirrorReconcileResult::Completed {
+                reclaimed: 3,
+                created: 3,
+                url: url_target,
+            })
+        }
+    }
+
     async fn collateral_margin_get(&self) -> Result<results::CollateralMarginResult, ControlError> {
         Ok(results::CollateralMarginResult {
             margin_bp: MARGIN_BP.with(|m| *m.borrow()),
@@ -2084,6 +2118,150 @@ fn reset_coin_db_omitting_confirm_is_refused_like_an_explicit_false() {
     );
     let err = block_on(node.dispatch(req)).into_result().unwrap_err();
     assert_eq!(err.code_enum(), Some(ControlErrorCode::InvalidParams));
+}
+
+/// **Every `control.mirror.reconcile` outcome is byte-stable, including BOTH `url_current` shapes
+/// on `refused`** — present (the node can still say what it advertises today even though it
+/// refuses) and `null` (the one refusal, `no_mirror_coins`, that leaves no bond to read a URL
+/// from at all). Four shapes, one per outcome — the wire contract a client branches its money-UX
+/// on (dig_ecosystem#3203).
+#[test]
+fn mirror_reconcile_result_golden_vectors_are_byte_stable() {
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "planned",
+        "capsules": 3, "reclaims": 3, "creates": 3,
+        "estimated_cost_dig_base_units": 4_500,
+        "url_advertised": ["dig://[2001:db8::9]:9776"],
+        "url_current": ["dig://[2001:db8::1]:9776"]
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "refused",
+        "reason": "url_unchanged",
+        "url_current": ["dig://[2001:db8::1]:9776"]
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "refused",
+        "reason": "no_mirror_coins",
+        "url_current": null
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "completed",
+        "reclaimed": 3, "created": 3,
+        "url": ["dig://[2001:db8::9]:9776"]
+    }));
+    assert_result_round_trips::<results::MirrorReconcileResult>(json!({
+        "outcome": "partial",
+        "reclaimed": 2, "created": 1, "remaining": 1,
+        "reason": "wallet ran out of funds after the second reclaim confirmed"
+    }));
+}
+
+/// **Every `MirrorReconcileRefusal` decodes/encodes to its own stable snake_case token, and the
+/// six are pairwise distinct.**
+#[test]
+fn every_mirror_reconcile_refusal_is_a_distinct_wire_token() {
+    for &reason in results::MirrorReconcileRefusal::ALL {
+        let wire = json!(reason.as_wire());
+        let parsed: results::MirrorReconcileRefusal = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            parsed, reason,
+            "{reason:?} must round-trip through its own wire token"
+        );
+        assert_eq!(serde_json::to_value(reason).unwrap(), wire);
+    }
+    let tokens: std::collections::BTreeSet<&str> = results::MirrorReconcileRefusal::ALL
+        .iter()
+        .map(|r| r.as_wire())
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        results::MirrorReconcileRefusal::ALL.len(),
+        "two refusal reasons must not share a wire token"
+    );
+}
+
+/// **`ALL` cannot silently miss a `MirrorReconcileRefusal` variant.**
+///
+/// Exhaustive over the enum, so a new variant fails to COMPILE here until it is given an index,
+/// and the count assertion then fails until `ALL` holds it too — mirrors
+/// `every_collateral_unknown_reason_is_listed_in_all`.
+#[test]
+fn every_mirror_reconcile_refusal_is_listed_in_all() {
+    use results::MirrorReconcileRefusal as R;
+
+    // Exhaustive on purpose. Adding a variant MUST break this match.
+    const fn index(reason: R) -> usize {
+        match reason {
+            R::AddressUncorroborated => 0,
+            R::UrlUnchanged => 1,
+            R::NoMirrorCoins => 2,
+            R::InsufficientFunds => 3,
+            R::ReconcileInProgress => 4,
+            R::AdvertiseOff => 5,
+        }
+    }
+    const VARIANT_COUNT: usize = 6;
+
+    assert_eq!(
+        R::ALL.len(),
+        VARIANT_COUNT,
+        "ALL has drifted from the variant set"
+    );
+    for i in 0..VARIANT_COUNT {
+        assert!(
+            R::ALL.iter().any(|r| index(*r) == i),
+            "variant with index {i} is missing from ALL"
+        );
+    }
+}
+
+/// **`control.mirror.reconcile` reaches its own handler, and `dry_run` actually threads through.**
+///
+/// `dry_run: true` must come back `Planned` (nothing spent); `dry_run: false` must come back
+/// `Completed`. Keyed to the capsule/reclaim/create counts and to `url_advertised != url_current`,
+/// so an arm mis-wired to `mirror_bond_states` — the only other mirror-prefixed method — cannot
+/// pass this, and a plan against an unchanged URL (which would in fact be the `url_unchanged`
+/// no-op) cannot pass it either.
+#[test]
+fn mirror_reconcile_dry_run_prices_without_spending_and_reaches_its_own_handler() {
+    let planned = round_trip(&MirrorReconcileParams { dry_run: true }).unwrap();
+    match planned {
+        results::MirrorReconcileResult::Planned {
+            capsules,
+            reclaims,
+            creates,
+            url_advertised,
+            url_current,
+            ..
+        } => {
+            assert_eq!((capsules, reclaims, creates), (3, 3, 3));
+            assert_ne!(
+                url_advertised, url_current,
+                "a dry-run plan against an unchanged URL would be a no-op, not a plan"
+            );
+        }
+        other => panic!("dry_run: true must answer Planned, got {other:?}"),
+    }
+
+    let completed = round_trip(&MirrorReconcileParams { dry_run: false }).unwrap();
+    match completed {
+        results::MirrorReconcileResult::Completed {
+            reclaimed, created, ..
+        } => assert_eq!((reclaimed, created), (3, 3)),
+        other => panic!("dry_run: false must answer Completed, got {other:?}"),
+    }
+
+    // Omitting `dry_run` entirely reads exactly like an explicit `false` -- reconciles for real,
+    // never a safer "omitted means preview" reading (params.rs's own doc states why).
+    let node = MockNode;
+    let req = JsonRpcRequest::new(
+        RequestId::Number(1),
+        ControlMethod::MirrorReconcile.name(),
+        json!({}),
+    );
+    let resp = block_on(node.dispatch(req));
+    let value = resp.into_result().expect("omitted dry_run must not error");
+    assert_eq!(value["outcome"], json!("completed"));
 }
 
 #[test]

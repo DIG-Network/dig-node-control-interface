@@ -232,6 +232,13 @@ pub enum ControlMethod {
     /// `control.mirror.bondStates` -- the per-`(store, root)` mirror bond state, and the $DIG
     /// those bonds have locked.
     MirrorBondStates,
+    /// `control.mirror.reconcile` -- reconcile this node's mirror coins to its CURRENT advertise
+    /// URL: reclaim every coin advertising a stale URL, then recreate it advertising the URL this
+    /// node advertises today. Shared by the manual "reset mirrors" action and dig-node#570's
+    /// automatic epoch-boundary pass -- ONE reconcile primitive, exposed two ways. See
+    /// [`crate::results::MirrorReconcileResult`] for the four outcomes a caller must be able to
+    /// tell apart, and dig_ecosystem#3203 for why `refused` must mean NOTHING was spent.
+    MirrorReconcile,
 
     // ---- dig-profile bodies (delegated to the engine) ----
     /// `control.profile.putBody` — hand the node the profile body a CONFIRMED chain root commits to.
@@ -306,6 +313,7 @@ impl ControlMethod {
             ControlMethod::CollateralMarginSet => "control.collateral.margin.set",
             ControlMethod::CollateralBuffer => "control.collateral.buffer",
             ControlMethod::MirrorBondStates => "control.mirror.bondStates",
+            ControlMethod::MirrorReconcile => "control.mirror.reconcile",
             ControlMethod::ProfilePutBody => "control.profile.putBody",
             ControlMethod::ProfileGetBody => "control.profile.getBody",
             ControlMethod::PairingRequest => "pairing.request",
@@ -556,7 +564,8 @@ impl ControlMethod {
             | ControlMethod::CollateralMarginGet
             | ControlMethod::CollateralMarginSet
             | ControlMethod::CollateralBuffer
-            | ControlMethod::MirrorBondStates => Category::Collateral,
+            | ControlMethod::MirrorBondStates
+            | ControlMethod::MirrorReconcile => Category::Collateral,
             ControlMethod::ProfilePutBody | ControlMethod::ProfileGetBody => Category::Profile,
         }
     }
@@ -622,6 +631,7 @@ impl ControlMethod {
             ControlMethod::WalletResetCoinDb => "DESTRUCTIVE: discard this node's cached coin database and re-sync it from chain. No key material is affected -- coins live on chain and are re-derived by the resync. Refuses with SpendInFlight while a spend is outstanding, so a reset can never race a hold. Requires params.confirm = true or refuses as INVALID_PARAMS; the on-wire acknowledgement is the confirmation, not a default. TOKEN-GATED.",
             ControlMethod::CollateralBuffer => "READ-only: the $DIG this node recommends HOLDING, in DIG base units, and the funding state it is in -- plus the working behind the figure: the (owner, store, root) pairs THIS NODE serves, the epoch's pre-margin per-store requirement, the local margin in force (BASIS POINTS, `100` is +1%, never converted), the unreclaimed transition overlap, and the escalation headroom. Amounts are DIG base units (3 decimals, one base unit is 0.001 DIG) and never mojos, which are XCH's 1e-12 unit. The HORIZON the headroom assumed travels in the payload and is never implied: escalation is bounded at +12.5% per epoch and COMPOUNDS (x1.12 at one epoch, x1.60 at four, x4.62 at thirteen), so the same buffer over a different horizon is a different claim; `escalation_ceiling_micros` is a WORST CASE, not a forecast -- in the dead band the multiplier does not move. The FUNDING STATE is carried rather than left to each client to re-derive from thresholds, because two clients deriving it will disagree and the one that disagrees about a funding warning is the one an operator acts on; `short_now` and `dangerously_low` leave an epoch uncovered, `below_recommended_buffer` covers every epoch with no cushion and is a READOUT, never a notification. A node that cannot enumerate its served set, cannot read its reclaim state, cannot see its balance, or has no requirement to scale answers `unknown` WITH the reason -- never a zero, which here reads as NO BUFFER NEEDED and would have an operator post nothing. It is a SEPARATE method from `control.collateral.requirement` because that figure is consensus-derived while this one is local: it depends on this node's own served set, an operator preference, and a horizon this node chose. TOKEN-GATED although it is a read: the caller supplies nothing, so the answer is this node's OWN served set, preference and balance.",
             ControlMethod::MirrorBondStates => "READ-only: the state of every mirror bond this node holds, keyed per (store, root), plus the $DIG those bonds have LOCKED. Seven states, and six of them mean `no coin yet` for entirely different reasons: `bonded` (a coin id, epoch and the amount THAT COIN locks, read from the coin and not from today's requirement), `pending` (submitted, unconfirmed -- never a shortfall), `unfunded` (the ONLY genuine out-of-funds state, carrying how many DIG BASE UNITS this bond alone is short), `deferred` (the epoch requirement is unknown so no create can be priced -- the wallet may be full), `withheld` (Relayed provenance: held and deliberately never advertised), `disabled` (collateralisation is switched off node-wide) and `reclaiming` (a live coin whose money is STILL LOCKED until the reclaim confirms). Conflating `unfunded` with `withheld` or `disabled` produces hourly out-of-funds alarms about a healthy node, which is the defect this method removes. Amounts are DIG base units (3 decimals, one base unit is 0.001 DIG) and NEVER mojos, which are XCH's 1e-12 unit. `locked_dig_base_units` is the WHOLE-SET total including reclaiming coins, computed by the node: a client MUST NOT sum the page, which would under-report locked money by a page boundary and show unspendable funds as available. A node that cannot enumerate its bonds, cannot read chain, cannot see its own in-flight creates, or cannot determine the provenance of what it holds answers `unknown` for the WHOLE call WITH the reason -- there is no per-row unknown and no empty-list fallback, because a truncated list and a complete one read the same. A page is bounded, ordered by ascending (store_id, root), and says via `complete` whether it is the whole set; resume from the `cursor` key you were HANDED. TOKEN-GATED although it is a read: the caller supplies nothing, so the answer is this node's OWN bond set and funding position.",
+            ControlMethod::MirrorReconcile => "Reconcile this node's mirror coins to its CURRENT advertise URL: reclaim every coin advertising a stale URL, then recreate it advertising the URL this node advertises today. Shared by the manual \"reset mirrors\" action and dig-node#570's automatic epoch-boundary pass -- ONE reconcile primitive, not two implementations of a money-moving operation with different guards. `dry_run: true` prices the plan (capsules, reclaims, creates, cost) and spends nothing -- always price before executing for real. A refusal (`address_uncorroborated`, `url_unchanged`, `no_mirror_coins`, `insufficient_funds`, `reconcile_in_progress`, `advertise_off`) means NOTHING was spent: the node validates the new URL and checks affordability BEFORE reclaiming anything, and does nothing at all rather than reclaim coins it cannot afford to recreate. A `partial` outcome means the affordable PREFIX completed -- reclaim-first ordering means that prefix leaves the node no worse off than before the call, never with bonds reclaimed and not replaced. TOKEN-GATED.",
             ControlMethod::PairingRequest => "OPEN: request a control-token pairing; returns a pairing_id + pairing_code to compare.",
             ControlMethod::PairingPoll => "OPEN: poll a pairing by id; once the operator approves, returns the scoped token once.",
         }
@@ -686,6 +696,7 @@ impl ControlMethod {
         ControlMethod::CollateralMarginSet,
         ControlMethod::CollateralBuffer,
         ControlMethod::MirrorBondStates,
+        ControlMethod::MirrorReconcile,
         ControlMethod::ProfilePutBody,
         ControlMethod::ProfileGetBody,
         ControlMethod::PairingRequest,
@@ -1118,6 +1129,27 @@ mod tests {
         assert_eq!(m.category(), Category::Config);
         assert_eq!(m.routing(), Routing::Owned);
         assert!(m.requires_auth(), "a mutation on this plane is never open");
+        assert!(!m.requires_master_token());
+        assert!(!m.is_open_read());
+        assert!(!m.is_pairing_admin());
+    }
+
+    /// **`control.mirror.reconcile` is ORDINARY tier and Collateral category.**
+    ///
+    /// It moves real $DIG, but by the same discriminator
+    /// [`ControlMethod::requires_master_token`] states: it installs no principal this node will
+    /// thereafter believe, obey, or forward requests to. Reconciling changes only which URL THIS
+    /// node's OWN mirror coins advertise -- it never dials a value the caller supplies, never
+    /// trusts bytes read from anywhere new, and never routes a call to a third party. That is the
+    /// same reasoning `control.config.setMirrorAdvertiseUrls` and `control.collateral.margin.set`
+    /// rest on, not an exemption because this method happens to spend money.
+    #[test]
+    fn mirror_reconcile_is_ordinary_tier_and_collateral_category() {
+        let m = ControlMethod::MirrorReconcile;
+        assert_eq!(m.name(), "control.mirror.reconcile");
+        assert_eq!(m.category(), Category::Collateral);
+        assert_eq!(m.routing(), Routing::Owned);
+        assert!(m.requires_auth(), "a money-moving mutation is never open");
         assert!(!m.requires_master_token());
         assert!(!m.is_open_read());
         assert!(!m.is_pairing_admin());

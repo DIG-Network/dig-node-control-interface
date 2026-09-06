@@ -1901,6 +1901,33 @@ impl<'de> Deserialize<'de> for MirrorBondStatesParams {
 }
 control_call!(MirrorBondStatesParams => ControlMethod::MirrorBondStates, results::MirrorBondStatesResult);
 
+/// `control.mirror.reconcile` params: reconcile this node's mirror coins to its CURRENT advertise
+/// URL.
+///
+/// # `dry_run` prices the plan without spending
+///
+/// `true` returns [`results::MirrorReconcileResult::Planned`] — how many capsules, reclaims,
+/// creates, and the total cost — and spends nothing. `false` (the default when omitted) executes
+/// the plan for real. Unlike [`WalletResetCoinDbParams::confirm`], an omitted field here does NOT
+/// refuse the call: this field means "did the caller ask to preview", not "did the caller confirm
+/// a destructive action", so omitting it reads as "reconcile for real", the same as writing
+/// `false` explicitly.
+///
+/// # This call takes no other parameter
+///
+/// There is no URL to pass: the URL this reconciles TOWARD is whatever this node is CURRENTLY
+/// configured to advertise (dig-node#562's derived-or-override view), never a value the caller
+/// supplies. A caller wanting a DIFFERENT URL sets it first via
+/// [`SetMirrorAdvertiseUrlsParams`], then reconciles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorReconcileParams {
+    /// Price the plan without spending. Defaults to `false` when omitted — an omitted field
+    /// reconciles for REAL.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+control_call!(MirrorReconcileParams => ControlMethod::MirrorReconcile, results::MirrorReconcileResult);
+
 #[cfg(test)]
 mod tests {
     use super::*;

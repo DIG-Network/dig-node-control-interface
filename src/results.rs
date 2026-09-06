@@ -2777,6 +2777,150 @@ pub enum MirrorBondStatesResult {
     },
 }
 
+/// Why `control.mirror.reconcile` refused — and NOTHING was spent.
+///
+/// Every member is paired with the same guarantee (see [`MirrorReconcileResult::Refused`]): the
+/// node found a reason it must not even START the reclaim-then-recreate sequence, per
+/// dig_ecosystem#3203's central invariant — establish and validate the new URL BEFORE reclaiming
+/// anything, and if it cannot be established, do nothing at all. A reset that half-executes is
+/// worse than one that refuses, because the half that runs is the half that destroys value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorReconcileRefusal {
+    /// The candidate advertise URL is known from only ONE source and nothing has corroborated it
+    /// yet (dig-node#566). Reconciling onto an uncorroborated address would lock collateral behind
+    /// a URL this node cannot yet vouch for — a reset onto nothing.
+    AddressUncorroborated,
+    /// The URL this node would advertise next is IDENTICAL to the one its existing mirror coins
+    /// already advertise. Reconciling would spend real $DIG to reach the state the node is
+    /// already in, so the node refuses rather than charge the operator for a pure-cost no-op.
+    UrlUnchanged,
+    /// This node holds no mirror coins at all, so there is nothing to reclaim and no bond whose
+    /// advertise URL could be stale.
+    NoMirrorCoins,
+    /// The operator wallet cannot afford ANY of the plan, not even its first step. See
+    /// [`MirrorReconcileResult::Partial`] for the case where it can afford a PREFIX instead.
+    InsufficientFunds,
+    /// A reconcile this node started earlier is still in flight. Reconciling is not idempotent
+    /// mid-flight — a second call racing the first could reclaim a coin the first call is still
+    /// waiting to recreate — so the node serializes reconciles rather than interleaving them.
+    ReconcileInProgress,
+    /// This node's mirror-collateral advertising is switched off node-wide. There is no URL to
+    /// reconcile TOWARD, because this node is not posting any mirror-coin advertisement at all.
+    AdvertiseOff,
+}
+
+impl MirrorReconcileRefusal {
+    /// Every refusal reason, for exhaustive rendering and the wire-token uniqueness KAT.
+    pub const ALL: &'static [MirrorReconcileRefusal] = &[
+        MirrorReconcileRefusal::AddressUncorroborated,
+        MirrorReconcileRefusal::UrlUnchanged,
+        MirrorReconcileRefusal::NoMirrorCoins,
+        MirrorReconcileRefusal::InsufficientFunds,
+        MirrorReconcileRefusal::ReconcileInProgress,
+        MirrorReconcileRefusal::AdvertiseOff,
+    ];
+
+    /// The stable snake_case wire token, matching the `reason` field.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            MirrorReconcileRefusal::AddressUncorroborated => "address_uncorroborated",
+            MirrorReconcileRefusal::UrlUnchanged => "url_unchanged",
+            MirrorReconcileRefusal::NoMirrorCoins => "no_mirror_coins",
+            MirrorReconcileRefusal::InsufficientFunds => "insufficient_funds",
+            MirrorReconcileRefusal::ReconcileInProgress => "reconcile_in_progress",
+            MirrorReconcileRefusal::AdvertiseOff => "advertise_off",
+        }
+    }
+}
+
+/// `control.mirror.reconcile` — reconcile this node's mirror coins to its CURRENT advertise URL:
+/// reclaim every coin advertising a stale URL, then recreate it advertising the URL this node
+/// advertises TODAY. Shared by the manual "reset mirrors" action and dig-node#570's automatic
+/// epoch-boundary pass — ONE reconcile primitive, exposed two ways (dig_ecosystem#3203).
+///
+/// # Four outcomes, and a client MUST be able to tell them apart
+///
+/// They mean different things about the user's money, which is why this is a tagged union rather
+/// than a single struct with optional fields:
+///
+/// - [`Planned`](Self::Planned) — `dry_run: true` only. A PRICED PLAN; nothing was spent.
+/// - [`Refused`](Self::Refused) — nothing was spent. See [`MirrorReconcileRefusal`] for why.
+/// - [`Completed`](Self::Completed) — the whole plan ran: every reclaim confirmed, every create
+///   confirmed.
+/// - [`Partial`](Self::Partial) — the affordable PREFIX ran; the rest did not start.
+///
+/// # `Refused` MUST mean nothing was spent, unconditionally
+///
+/// A caller distinguishes `refused` from `partial` precisely so it never has to guess whether a
+/// "no" cost money. An implementation that spends anything under a `Refused` outcome breaks the
+/// one guarantee this contract exists to give the operator.
+///
+/// # A dry run that would in fact refuse reports `Refused`, never `Planned`
+///
+/// `Planned` prices a plan the node believes it CAN execute — computed against the same
+/// validation (corroborated URL, changed URL, affordability) a real run performs. A dry run whose
+/// candidate URL is uncorroborated, unchanged, or otherwise refusable answers `Refused` exactly
+/// like a real run would, so a caller previewing a reset sees the same refusal a real attempt
+/// would hit rather than a plan for a call that cannot execute.
+///
+/// # Reclaim-first ordering is why `Partial` is safe to report at all
+///
+/// dig-node's mirror-collateral runner reclaims before it creates — a reclaim returns collateral,
+/// which may fund the create behind it — so a partial run still leaves the node in a COHERENT
+/// state, never worse off than before the call: every reclaim that ran completed, and no create
+/// ran without its funding reclaim already having confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum MirrorReconcileResult {
+    /// `dry_run: true` only — a priced plan. Nothing was spent.
+    Planned {
+        /// How many `(store, root)` capsules this plan would touch.
+        capsules: u32,
+        /// How many of this node's existing mirror coins the plan would reclaim.
+        reclaims: u32,
+        /// How many new mirror coins the plan would create, advertising the new URL.
+        creates: u32,
+        /// The total cost of the whole plan, in DIG base units (3 decimals, one base unit is
+        /// 0.001 DIG — NEVER mojos, which are XCH's 1e-12 unit).
+        estimated_cost_dig_base_units: u64,
+        /// The URL(s) this plan would advertise once it completes.
+        url_advertised: Vec<String>,
+        /// The URL(s) this node's existing mirror coins advertise TODAY — the plan exists to
+        /// close the gap between this and [`url_advertised`](Self::Planned::url_advertised).
+        url_current: Vec<String>,
+    },
+    /// Refused. Nothing was spent — see [`MirrorReconcileRefusal`] for why.
+    Refused {
+        /// Which of the six reasons this refusal is.
+        reason: MirrorReconcileRefusal,
+        /// The URL(s) this node's existing mirror coins advertise, where the node can state it.
+        /// `None` when the refusal itself means the node cannot say — e.g. `no_mirror_coins`
+        /// leaves no bond to read a URL from at all.
+        url_current: Option<Vec<String>>,
+    },
+    /// The whole plan completed: every reclaim confirmed, every create confirmed.
+    Completed {
+        /// How many mirror coins were reclaimed.
+        reclaimed: u32,
+        /// How many new mirror coins were created, advertising the new URL.
+        created: u32,
+        /// The URL(s) now advertised by the newly created coins.
+        url: Vec<String>,
+    },
+    /// The AFFORDABLE PREFIX completed; the rest did not run.
+    Partial {
+        /// How many mirror coins were reclaimed before the plan stopped.
+        reclaimed: u32,
+        /// How many new mirror coins were created before the plan stopped.
+        created: u32,
+        /// How many capsules the plan did NOT reach.
+        remaining: u32,
+        /// Why the plan stopped rather than completing.
+        reason: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
